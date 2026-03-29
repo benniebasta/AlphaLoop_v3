@@ -1,0 +1,32 @@
+# Environment
+.env
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Logs
+logs/
+*.log
+
+# Alembic
+alembic/versions/__pycache__/
+
+# OS
+Thumbs.db
+.DS_Store

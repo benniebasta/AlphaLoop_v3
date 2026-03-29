@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "alphaloop-web",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "alphaloop.main", "--web-only", "--port", "8090"],
+      "port": 8090
+    },
+    {
+      "name": "alphaloop-bot",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "alphaloop.main", "--dry-run"],
+      "port": 8090
+    },
+    {
+      "name": "alphaloop-live",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "alphaloop.main", "--live"],
+      "port": 8090
+    }
+  ]
+}

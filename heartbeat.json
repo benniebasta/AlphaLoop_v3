@@ -1,0 +1,23 @@
+{
+  "timestamp": 1774783072.8986948,
+  "alive": true,
+  "symbol": "XAUUSD",
+  "cycle": 1,
+  "circuit_breaker": {
+    "consecutive_failures": 0,
+    "is_open": false,
+    "should_kill": false,
+    "open_until": 0.0
+  },
+  "risk": {
+    "daily_pnl": 0.0,
+    "daily_pnl_pct": 0.0,
+    "consecutive_losses": 0,
+    "open_trades": 0,
+    "open_risk_usd": 0.0,
+    "kill_switch": false,
+    "force_close_all": false,
+    "rolling_dd_modifier": 1.0,
+    "seeded": true
+  }
+}

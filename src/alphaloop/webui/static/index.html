@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AlphaLoop™ — Trading Intelligence Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn-uicons.flaticon.com/2.6.0/uicons-regular-rounded/css/uicons-regular-rounded.css">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <!-- Sidebar -->
+  <nav class="sidebar" id="sidebar">
+    <!-- Brand -->
+    <div class="logo">
+      <div class="logo-brand">
+        <div class="logo-monogram">AL</div>
+        <div class="logo-text">
+          AlphaLoop<sup>TM</sup>
+          <span class="logo-subtitle">Trading Intelligence Platform</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- MONITOR -->
+    <div class="nav-group">
+      <div class="nav-group-label">Monitor</div>
+      <div class="nav-item active" data-page="dashboard">
+        <span class="nav-icon"><i class="fi fi-rr-dashboard"></i></span> Dashboard
+      </div>
+      <div class="nav-item" data-page="live">
+        <span class="nav-icon"><i class="fi fi-rr-signal-alt-2"></i></span> ⚡ Live
+      </div>
+      <div class="nav-item" data-page="trades">
+        <span class="nav-icon"><i class="fi fi-rr-list"></i></span> Trades
+      </div>
+    </div>
+
+    <!-- EXECUTION -->
+    <div class="nav-group">
+      <div class="nav-group-label">Execution</div>
+      <div class="nav-item" data-page="agents">
+        <span class="nav-icon"><i class="fi fi-rr-robot"></i></span> 🤖 Alpha Agents
+      </div>
+      <div class="nav-item" data-page="strategies">
+        <span class="nav-icon"><i class="fi fi-rr-bullseye"></i></span> Strategies
+      </div>
+    </div>
+
+    <!-- DISCOVERY -->
+    <div class="nav-group">
+      <div class="nav-group-label">Discovery</div>
+      <div class="nav-item" data-page="seedlab">
+        <span class="nav-icon"><i class="fi fi-rr-flask"></i></span> 🧪 SeedLab™
+      </div>
+      <div class="nav-item" data-page="research">
+        <span class="nav-icon"><i class="fi fi-rr-chart-line-up"></i></span> Research
+      </div>
+    </div>
+
+    <!-- RISK & MONITORING -->
+    <div class="nav-group">
+      <div class="nav-group-label">Risk & Monitoring</div>
+      <div class="nav-item" data-page="risk_dashboard">
+        <span class="nav-icon"><i class="fi fi-rr-shield-check"></i></span> 🛡️ Risk
+      </div>
+      <div class="nav-item" data-page="event_log">
+        <span class="nav-icon"><i class="fi fi-rr-time-past"></i></span> 📋 Event Log
+      </div>
+      <div class="nav-item" data-page="health">
+        <span class="nav-icon"><i class="fi fi-rr-heart-rate"></i></span> 💚 Health
+      </div>
+    </div>
+
+    <!-- SYSTEM -->
+    <div class="nav-group">
+      <div class="nav-group-label">System</div>
+      <div class="nav-item" data-page="tools">
+        <span class="nav-icon"><i class="fi fi-rr-settings-sliders"></i></span> 🛠️ Tools
+      </div>
+      <div class="nav-item" data-page="ai_hub">
+        <span class="nav-icon"><i class="fi fi-rr-brain"></i></span> 🧠 AI Hub
+      </div>
+      <div class="nav-item" data-page="settings">
+        <span class="nav-icon"><i class="fi fi-rr-settings"></i></span> ⚙️ Settings
+      </div>
+    </div>
+
+    <!-- Theme Toggle (sidebar footer) -->
+    <div class="sidebar-footer">
+      <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">
+        <span class="theme-toggle-icon" id="theme-icon">🌙</span>
+        <span id="theme-label">Dark Mode</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Mobile sidebar overlay (tap-to-close) -->
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+  <!-- Main content -->
+  <main class="main" id="main">
+    <!-- Hamburger toggle (mobile only, shown via CSS) -->
+    <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle navigation" aria-expanded="false" aria-controls="sidebar">
+      <span class="hamburger-bar"></span>
+      <span class="hamburger-bar"></span>
+      <span class="hamburger-bar"></span>
+    </button>
+    <div id="page-content">
+      <div class="page-title">Loading...</div>
+    </div>
+  </main>
+
+  <!-- Status bar -->
+  <div class="status-bar" id="status-bar">
+    <span id="ws-status" class="ws-disconnected">WS: disconnected</span>
+    <span id="last-update"></span>
+  </div>
+
+  <!-- Lightweight Charts CDN (for Live tab) -->
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+
+  <!-- JS modules -->
+  <script type="module" src="/static/js/app.js?v=6.2"></script>
+</body>
+</html>
