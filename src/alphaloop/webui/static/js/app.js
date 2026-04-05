@@ -1,7 +1,7 @@
 /**
  * AlphaLoop™ — SPA Router, Theme Manager & WebSocket Manager
  */
-import { getAuthToken } from './api.js';
+import { getAuthToken, setAuthToken } from './api.js';
 
 // Component registry — lazy-loaded on first navigate
 const components = {};
@@ -16,10 +16,12 @@ const ROUTES = [
 const ALIASES = {
   bots: 'agents',
   backtests: 'seedlab',
+  ai_signal_discovery: 'strategies',
+  'ai-signal-discovery': 'strategies',
 };
 
 // Cache-bust version — increment when deploying new JS
-const _V = '6.2';
+const _V = '7.1';
 
 /**
  * Load a component module on demand.
@@ -162,9 +164,9 @@ function connectWebSocket() {
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const token = getAuthToken();
-  const url = `${proto}//${location.host}/ws${token ? '?token=' + token : ''}`;
-
-  ws = new WebSocket(url);
+  const url = `${proto}//${location.host}/ws`;
+  // Pass auth token as WebSocket subprotocol (not in URL — invisible to server logs)
+  ws = token ? new WebSocket(url, [token]) : new WebSocket(url);
 
   const statusEl = document.getElementById('ws-status');
   const updateEl = document.getElementById('last-update');
@@ -305,6 +307,19 @@ window.showToast = function(message, type = 'success') {
 
 initTheme();
 initSidebar();
+
+// ── Auth bootstrap — prompt for token if server requires it ─────────────
+(async () => {
+  try {
+    const res = await fetch('/api/auth/status');
+    const { required } = await res.json();
+    if (required && !getAuthToken()) {
+      const token = prompt('AUTH_TOKEN required. Paste your token:');
+      if (token) setAuthToken(token.trim());
+    }
+  } catch { /* server unreachable — proceed without auth */ }
+})();
+
 initRouter();
 connectWebSocket();
 initEventHandlers();

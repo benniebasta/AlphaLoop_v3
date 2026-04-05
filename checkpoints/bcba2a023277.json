@@ -1,0 +1,19 @@
+{
+  "run_id": "bcba2a023277",
+  "generation": 3,
+  "best_sharpe": -2.797,
+  "data_hash": "52bf7579089eb5e9",
+  "saved_at": "2026-04-01T18:24:46.089178+00:00",
+  "best_params": {
+    "ema_fast": 21,
+    "ema_slow": 55,
+    "sl_atr_mult": 2.0,
+    "tp1_rr": 2.0,
+    "tp2_rr": 4.0,
+    "rsi_ob": 70.0,
+    "rsi_os": 30.0,
+    "rsi_period": 14,
+    "risk_pct": 0.01,
+    "max_param_change_pct": 0.15
+  }
+}

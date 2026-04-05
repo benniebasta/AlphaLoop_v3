@@ -1,0 +1,19 @@
+{
+  "run_id": "e6bbd4378088",
+  "generation": 3,
+  "best_sharpe": 5.116,
+  "data_hash": "dbf4991f434e6b62",
+  "saved_at": "2026-03-30T11:36:20.598969+00:00",
+  "best_params": {
+    "ema_fast": 27,
+    "ema_slow": 41,
+    "sl_atr_mult": 2.581,
+    "tp1_rr": 2.124,
+    "tp2_rr": 4.563,
+    "rsi_ob": 65.0,
+    "rsi_os": 35.0,
+    "rsi_period": 14,
+    "risk_pct": 0.01,
+    "max_param_change_pct": 0.15
+  }
+}

@@ -7,7 +7,7 @@ SELL: entry must not be > vwap_extension_max_atr below VWAP
 
 from __future__ import annotations
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
 
 class VWAPGuard(BaseTool):
@@ -20,6 +20,7 @@ class VWAPGuard(BaseTool):
 
     name = "vwap_guard"
     description = "VWAP alignment check — blocks overextended entries"
+    requires_direction = True
 
     MAX_EXTENSION_ATR = 1.5
 
@@ -74,4 +75,62 @@ class VWAPGuard(BaseTool):
             passed=True,
             reason=f"VWAP extension within bounds ({extension:.2f}x ATR)",
             data={"vwap": vwap_val, "atr": atr_val, "extension_atr": round(extension, 3)},
+        )
+
+    async def extract_features(self, context) -> FeatureResult:
+        m15_ind = context.indicators.get("M15", {})
+        vwap_val = m15_ind.get("vwap")
+        atr_val = m15_ind.get("atr")
+
+        direction = getattr(context, "trade_direction", "")
+        if direction:
+            direction = direction.upper()
+
+        # Use directional price
+        price_obj = getattr(context, "price", None)
+        if price_obj is None:
+            price = 0.0
+        elif direction == "BUY":
+            price = float(getattr(price_obj, "ask", 0) or 0)
+        elif direction == "SELL":
+            price = float(getattr(price_obj, "bid", 0) or 0)
+        else:
+            price = float(getattr(price_obj, "ask", 0) or getattr(price_obj, "bid", 0) or 0)
+
+        if vwap_val is None or atr_val is None or atr_val == 0 or price == 0:
+            return FeatureResult(
+                group="structure",
+                features={"vwap_position": 50.0},
+                meta={"status": "unavailable"},
+            )
+
+        # Signed extension: positive = price above VWAP
+        signed_ext = (price - vwap_val) / atr_val
+
+        # Direction-aware scoring:
+        #   BUY overextended above VWAP = bad (chasing)
+        #   BUY near/below VWAP = good (mean-reversion entry)
+        #   SELL overextended below VWAP = bad
+        #   SELL near/above VWAP = good
+        if direction == "BUY":
+            # Positive extension is bad for BUY (overextended up)
+            directional_ext = max(0, signed_ext)
+        elif direction == "SELL":
+            # Negative extension is bad for SELL (overextended down)
+            directional_ext = max(0, -signed_ext)
+        else:
+            directional_ext = abs(signed_ext)
+
+        vwap_position = max(0.0, 100.0 - directional_ext / self.MAX_EXTENSION_ATR * 100)
+
+        return FeatureResult(
+            group="structure",
+            features={"vwap_position": round(vwap_position, 1)},
+            reference_thresholds={"max_extension_atr": self.MAX_EXTENSION_ATR},
+            meta={
+                "vwap": vwap_val,
+                "signed_extension_atr": round(signed_ext, 3),
+                "directional_extension_atr": round(directional_ext, 3),
+                "scored_direction": direction or "none",
+            },
         )

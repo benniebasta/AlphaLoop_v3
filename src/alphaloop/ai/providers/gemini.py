@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from alphaloop.core.errors import AlphaLoopError
+from alphaloop.core.errors import AlphaLoopError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,8 @@ class GeminiProvider:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
                 body = resp.text
+                if resp.status_code == 429:
+                    raise RateLimitError(f"Gemini quota exceeded: {body}") from e
                 raise type(e)(f"{e}: {body}", request=e.request, response=e.response) from e
             data = resp.json()
 
@@ -125,15 +127,33 @@ class GeminiProvider:
                 f"Gemini returned no candidates for model {model_id}"
             )
 
-        parts = candidates[0].get("content", {}).get("parts", [])
+        candidate = candidates[0]
+
+        # Check finish_reason — SAFETY / RECITATION means the response was blocked
+        finish_reason = candidate.get("finishReason", "")
+        if finish_reason in ("SAFETY", "RECITATION", "OTHER"):
+            raise AlphaLoopError(
+                f"Gemini response blocked (finishReason={finish_reason}) for model {model_id}"
+            )
+
+        parts = candidate.get("content", {}).get("parts", [])
         text = parts[0].get("text", "") if parts else ""
+
+        # AI-01: A completely empty response must be treated as a provider error,
+        # not silently returned to the caller where it would fail JSON parsing.
+        if not text or not text.strip():
+            raise AlphaLoopError(
+                f"Gemini returned an empty response for model {model_id} "
+                f"(finishReason={finish_reason!r}, parts={len(parts)})"
+            )
 
         usage = data.get("usageMetadata", {})
         logger.debug(
-            "[gemini] %s — in=%d out=%d",
+            "[gemini] %s — in=%d out=%d finish=%s",
             model_id,
             usage.get("promptTokenCount", 0),
             usage.get("candidatesTokenCount", 0),
+            finish_reason,
         )
 
         return text

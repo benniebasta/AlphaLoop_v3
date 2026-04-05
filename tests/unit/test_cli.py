@@ -23,7 +23,7 @@ def test_parse_args_defaults():
         args = parse_args()
         assert args.symbol == "XAUUSD"
         assert args.dry_run is True
-        assert args.port == 8888
+        assert args.port == 8090
         assert args.live is False
         assert args.web_only is False
         assert args.instance_id == ""

@@ -30,6 +30,13 @@ class Container:
         self.db_engine: AsyncEngine | None = None
         self._db_session_factory: async_sessionmaker | None = None
 
+        # Optional — set by main.py when running in bot mode
+        self.alert_engine = None
+        self.execution_service = None
+        self.risk_service = None
+        self.supervision_service = None
+        self.market_data_service = None
+
     @property
     def db_session_factory(self) -> async_sessionmaker:
         """Get session factory, raising if DB not initialized."""

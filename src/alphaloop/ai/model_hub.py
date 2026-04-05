@@ -6,10 +6,12 @@ Provides ModelConfig (Pydantic v2), a built-in model catalog covering all
 supported providers, and role-based model resolution.
 
 Roles:
-    signal    — generates trade signals
-    validator — validates signals before execution
-    research  — runs research + parameter evolution
-    fallback  — optional fallback if primary model fails
+    signal        — live cycle: AI review for algo_ai or direct signal generation in ai_signal
+    validator     — live cycle: gate before order execution (approve/reject JSON)
+    research      — background async: deep degradation analysis over full trade history
+    param_suggest — background async: step-by-step parameter change reasoning
+    regime        — background hourly: classify market regime (trending/ranging/high_vol)
+    fallback      — any role: used when primary provider is unavailable
 """
 
 from __future__ import annotations
@@ -27,13 +29,38 @@ logger = logging.getLogger(__name__)
 # Roles
 # ---------------------------------------------------------------------------
 
-ROLES: tuple[str, ...] = ("signal", "validator", "research", "fallback")
+ROLES: tuple[str, ...] = (
+    "signal",        # live cycle: AI review for algo_ai or direct signal generation in ai_signal
+    "validator",     # live cycle: approve/reject signal before execution
+    "research",      # background: deep performance degradation analysis
+    "param_suggest", # background: step-by-step parameter change reasoning
+    "regime",        # background (hourly): classify current market regime
+    "fallback",      # any role: used when primary provider is unavailable
+)
 
 DEFAULT_ROLES: dict[str, Optional[str]] = {
-    "signal": "gemini-2.5-flash",
-    "validator": "claude-sonnet-4-6",
-    "research": "claude-sonnet-4-6",
-    "fallback": None,
+    # Default live signal model for hybrid review and pure ai_signal generation.
+    # 300 tokens of numerical data → gemini-flash-lite is free and fast enough
+    "signal":        "gemini-2.5-flash-lite",
+
+    # Gate before execution: must reliably follow strict rules and output JSON
+    # haiku is 5× cheaper than sonnet, still conservative, sufficient for structured validation
+    "validator":     "claude-haiku-4-5-20251001",
+
+    # Background async analysis: receives full trade history JSON, identifies degradation root cause
+    # gemini-2.5-pro has 1M context and excels at quantitative data analysis; no latency pressure
+    "research":      "gemini-2.5-pro",
+
+    # Background: "if sl_atr_mult raised 2.0→2.3, expected impact = X" — step-by-step math reasoning
+    # deepseek-reasoner is a cheap reasoning model built exactly for this kind of chained inference
+    "param_suggest": "deepseek-reasoner",
+
+    # Hourly regime snapshot: macro context + DXY + structure → trending/ranging/high_vol label
+    # flash-lite is free, runs rarely, prompt is short
+    "regime":        "gemini-2.5-flash-lite",
+
+    # Provider-down fallback: grok-3-mini has 131K context, solid structured output, cheap
+    "fallback":      "grok-3-mini",
 }
 
 # Provider -> env-var name holding the API key
@@ -44,7 +71,7 @@ PROVIDER_KEY_ENV: dict[AIProvider, str] = {
     AIProvider.DEEPSEEK: "DEEPSEEK_API_KEY",
     AIProvider.XAI: "XAI_API_KEY",
     AIProvider.QWEN: "QWEN_API_KEY",
-    AIProvider.OLLAMA: "",
+    AIProvider.OLLAMA: "OLLAMA_API_KEY",  # optional — not required for local instances
 }
 
 # ---------------------------------------------------------------------------
@@ -104,7 +131,7 @@ BUILTIN_MODELS: list[ModelConfig] = [
         display_name="Gemini 2.5 Flash Lite",
         context_window=1_048_576,
         max_output=8_192,
-        roles=["signal"],
+        roles=["signal", "regime"],
         cost_tier=0,
         latency_ms=400,
     ),
@@ -114,7 +141,7 @@ BUILTIN_MODELS: list[ModelConfig] = [
         display_name="Gemini 2.5 Pro",
         context_window=1_048_576,
         max_output=8_192,
-        roles=["signal", "validator", "research"],
+        roles=["signal", "validator", "research", "param_suggest"],
         cost_tier=2,
         latency_ms=2000,
     ),
@@ -212,7 +239,7 @@ BUILTIN_MODELS: list[ModelConfig] = [
         display_name="DeepSeek R1",
         context_window=64_000,
         max_output=8_192,
-        roles=["research"],
+        roles=["research", "param_suggest"],
         cost_tier=1,
         endpoint="https://api.deepseek.com/v1",
         latency_ms=3000,
@@ -295,7 +322,7 @@ BUILTIN_MODELS: list[ModelConfig] = [
         roles=["signal"],
         cost_tier=0,
         endpoint="http://localhost:11434/v1",
-        enabled=False,
+        enabled=True,
         latency_ms=500,
     ),
     ModelConfig(
@@ -307,7 +334,7 @@ BUILTIN_MODELS: list[ModelConfig] = [
         roles=["signal", "validator"],
         cost_tier=0,
         endpoint="http://localhost:11434/v1",
-        enabled=False,
+        enabled=True,
         latency_ms=1200,
     ),
 ]

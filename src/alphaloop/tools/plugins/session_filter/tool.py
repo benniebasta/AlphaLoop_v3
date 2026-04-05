@@ -7,7 +7,7 @@ before any API call.
 
 from __future__ import annotations
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
 
 class SessionFilter(BaseTool):
@@ -30,13 +30,16 @@ class SessionFilter(BaseTool):
         session = context.session
 
         if session.is_weekend or session.name == "weekend":
-            return ToolResult(
-                passed=False,
-                reason="Weekend — markets closed",
-                severity="block",
-                size_modifier=0.0,
-                data={"session": session.name, "score": session.score},
-            )
+            from alphaloop.config.assets import get_asset_config
+
+            if get_asset_config(context.symbol).asset_class != "crypto":
+                return ToolResult(
+                    passed=False,
+                    reason="Weekend — markets closed",
+                    severity="block",
+                    size_modifier=0.0,
+                    data={"session": session.name, "score": session.score},
+                )
 
         min_score = 0.70  # configurable via strategy params
 
@@ -65,4 +68,20 @@ class SessionFilter(BaseTool):
             reason=f"Session '{session.name}' active (score={session.score:.2f})",
             size_modifier=size_mod,
             data={"session": session.name, "score": session.score},
+        )
+
+    async def extract_features(self, context) -> FeatureResult:
+        session = context.session
+
+        # session_quality: score * 100 (0 = weekend/off-hours, 100 = peak overlap)
+        # Crypto trades 24/7 — use actual score even on weekends
+        from alphaloop.config.assets import get_asset_config
+
+        is_crypto = get_asset_config(context.symbol).asset_class == "crypto"
+        quality = session.score * 100 if (is_crypto or not session.is_weekend) else 0.0
+
+        return FeatureResult(
+            group="volatility",
+            features={"session_quality": round(quality, 1)},
+            meta={"session": session.name, "score": session.score, "is_weekend": session.is_weekend},
         )

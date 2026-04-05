@@ -16,6 +16,8 @@ class BacktestRepository:
         "state", "generation", "phase", "message", "heartbeat_at",
         "best_fitness", "best_params", "result_json", "error",
         "started_at", "finished_at", "updated_at",
+        "best_sharpe", "best_wr", "best_pnl", "best_dd", "best_trades",
+        "error_message", "checkpoint_path", "pid",
     })
 
     def __init__(self, session: AsyncSession) -> None:
@@ -67,6 +69,7 @@ class BacktestRepository:
             if key in self._UPDATABLE_FIELDS and hasattr(run, key):
                 setattr(run, key, value)
         run.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()
         return run
 
     async def update_progress(
@@ -89,3 +92,4 @@ class BacktestRepository:
         for key, value in best.items():
             if key in self._UPDATABLE_FIELDS and hasattr(run, key):
                 setattr(run, key, value)
+        await self._session.flush()

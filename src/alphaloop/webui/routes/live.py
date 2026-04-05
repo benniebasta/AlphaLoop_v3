@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/live", tags=["live"])
 
 # ── yfinance timeframe map ───────────────────────────────────────────────────
-_YF_TF = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "1h", "1d": "1d"}
-_YF_PERIOD = {"1m": "5d", "5m": "5d", "15m": "5d", "30m": "5d", "1h": "30d", "4h": "30d", "1d": "90d"}
+_YF_TF = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "1h", "1d": "1d", "1w": "1wk"}
+_YF_PERIOD = {"1m": "5d", "5m": "5d", "15m": "5d", "30m": "5d", "1h": "30d", "4h": "60d", "1d": "90d", "1w": "2y"}
 
 # Simple in-memory cache (symbol+tf → (timestamp, data), 30s TTL)
 _cache: dict[str, tuple[float, tuple]] = {}
@@ -61,7 +61,7 @@ def _fetch_ohlc_sync(symbol: str, timeframe: str) -> tuple:
 
     df = yf.download(ticker, period=yf_period, interval=yf_tf, progress=False, auto_adjust=True)
     if df is None or df.empty:
-        return ([], None, None, None, None, "calm", None, None, None, "ranging", [])
+        return ([], None, None, None, None, "calm", None, None, None, "ranging", [], None)
 
     # Flatten multi-level columns if present
     if hasattr(df.columns, 'levels') and df.columns.nlevels > 1:
@@ -78,8 +78,24 @@ def _fetch_ohlc_sync(symbol: str, timeframe: str) -> tuple:
             "close": round(float(row["Close"]), 5),
         })
 
+    # Aggregate 1H → 4H if requested (yfinance has no native 4h interval)
+    if timeframe == "4h" and ohlc:
+        agg = []
+        for i in range(0, len(ohlc), 4):
+            chunk = ohlc[i:i+4]
+            if not chunk:
+                break
+            agg.append({
+                "time": chunk[0]["time"],
+                "open": chunk[0]["open"],
+                "high": max(b["high"] for b in chunk),
+                "low": min(b["low"] for b in chunk),
+                "close": chunk[-1]["close"],
+            })
+        ohlc = agg
+
     if not ohlc:
-        return ([], None, None, None, None, "calm", None, None, None, "ranging", [])
+        return ([], None, None, None, None, "calm", None, None, None, "ranging", [], None)
 
     # Current price
     price = ohlc[-1]["close"]
@@ -174,6 +190,17 @@ def _fetch_ohlc_sync(symbol: str, timeframe: str) -> tuple:
             direction = "SELL"
             confidence = min(0.95, 0.55 + (rsi_val - 65) / 100 if rsi_overbought else 0.60 + (e21 - e9) / e21 * 10)
 
+        # Always expose current EMA state for the scanning panel
+        ema_gap_pct = round((e9 - e21) / e21 * 100, 3) if e21 else 0.0
+        ema_state = {
+            "ema9": round(e9, 5),
+            "ema21": round(e21, 5),
+            "ema50": round(e50, 5),
+            "rsi": rsi_val,
+            "gap_pct": ema_gap_pct,
+            "regime": market_regime,
+        }
+
         if direction:
             signal = {
                 "direction": direction,
@@ -194,7 +221,7 @@ def _fetch_ohlc_sync(symbol: str, timeframe: str) -> tuple:
                 recent_signals.append({"direction": "SELL", "time": ohlc[i]["time"], "price": ohlc[i]["close"]})
         recent_signals = recent_signals[-5:]  # keep last 5
 
-    return (ohlc, price, change_pct, day_high, day_low, vol_regime, atr_val, atr_pct, signal, market_regime, recent_signals)
+    return (ohlc, price, change_pct, day_high, day_low, vol_regime, atr_val, atr_pct, signal, market_regime, recent_signals, ema_state if 'ema_state' in dir() else None)
 
 
 # ── Session definitions (UTC) ────────────────────────────────────────────────
@@ -254,7 +281,15 @@ async def live_data(
 
     current_sess = _current_session()
 
-    # Fetch live OHLC data via yfinance
+    # Phase 7G: Data source disclosure — this endpoint uses yfinance analytics,
+    # NOT the actual bot's MT5 feed. Add source indicator for transparency.
+    _data_source = "yfinance_analytics"  # not the live bot feed
+    _bot_running = running_bot is not None
+    _disclaimer = None if _bot_running else (
+        "No bot running — data shown is from yfinance analytics, not live bot feed"
+    )
+
+    # Fetch OHLC data via yfinance (TODO: replace with bot event stream when available)
     ohlc = []
     price = None
     change_pct = None
@@ -266,9 +301,10 @@ async def live_data(
     computed_signal = None
     market_regime = "ranging"
     computed_recent_signals: list[dict] = []
+    computed_ema_state = None
 
     try:
-        ohlc, price, change_pct, day_high, day_low, vol_regime, atr_value, atr_pct, computed_signal, market_regime, computed_recent_signals = await _fetch_ohlc(
+        ohlc, price, change_pct, day_high, day_low, vol_regime, atr_value, atr_pct, computed_signal, market_regime, computed_recent_signals, computed_ema_state = await _fetch_ohlc(
             symbol, timeframe
         )
     except Exception as e:
@@ -284,7 +320,9 @@ async def live_data(
         "ohlc": ohlc,
         "session": current_sess,
         "signal": computed_signal,
-        "bot_running": running_bot is not None,
+        "bot_running": _bot_running,
+        "data_source": _data_source,
+        "disclaimer": _disclaimer,
         "market_regime": market_regime,
         "recent_signals": computed_recent_signals,
         "volatility": {
@@ -292,6 +330,7 @@ async def live_data(
             "atr_value": atr_value,
             "atr_pct": atr_pct,
         },
+        "ema_state": computed_ema_state,
         "next_news": None,
         "agent_thoughts": [],
         "pipeline_status": [],

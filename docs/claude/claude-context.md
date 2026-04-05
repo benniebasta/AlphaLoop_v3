@@ -104,6 +104,24 @@ DrawdownPauseGuard._losses: deque            # Recent loss streak
 _connections: set[WebSocket]  # Active WS connections
 ```
 
+### Event Ring Buffer
+```python
+# webui/routes/event_log.py
+_event_log: deque[dict]  # max 200 events, fed by ingest endpoint
+# Subprocess agents POST events to /api/events/ingest
+# Queryable by instance_id or symbol via GET /api/events
+```
+
+### Market Context (AttrDict)
+```python
+# trading/loop.py — _build_context() returns AttrDict (dict + __getattr__)
+# Supports both context.session (tools) and context.get("key") (algo engine)
+# Fields: session (SimpleNamespace with is_weekend), price, indicators (H1: ATR/EMA, M15: RSI),
+#          timeframes, news, dxy, sentiment, trade_direction, risk_monitor
+# MT5 candles fetched sync in main thread (thread-safe, <50ms)
+# Symbol auto-resolved: XAUUSD → XAUUSDm (Exness broker suffix)
+```
+
 ---
 
 ## Session Lifecycle

@@ -9,7 +9,7 @@ Pipeline order: FOURTH.
 
 from __future__ import annotations
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
 
 class DXYFilter(BaseTool):
@@ -22,6 +22,7 @@ class DXYFilter(BaseTool):
 
     name = "dxy_filter"
     description = "DXY correlation filter — blocks conflicting USD/gold trades"
+    requires_direction = True
 
     async def run(self, context) -> ToolResult:
         direction = context.trade_direction.upper()
@@ -62,10 +63,47 @@ class DXYFilter(BaseTool):
                 data=dxy_data,
             )
 
+        # Reduce size if mild conflict (strength < block threshold)
+        size_mod = max(0.5, 1.0 - strength) if block_dir == direction else 1.0
+
         return ToolResult(
             passed=True,
             reason=f"DXY {bias} — strength={strength:.2f}, size_mod={size_mod:.2f}",
             bias=tool_bias,
             size_modifier=size_mod,
             data=dxy_data,
+        )
+
+    async def extract_features(self, context) -> FeatureResult:
+        dxy_data = context.dxy
+
+        if not dxy_data:
+            return FeatureResult(
+                group="trend",
+                features={"dxy_alignment": 50.0, "dxy_strength_norm": 50.0},
+                meta={"status": "unavailable"},
+            )
+
+        bias = dxy_data.get("bias", "neutral")
+        strength = float(dxy_data.get("strength", 0))
+
+        # dxy_strength_norm: how strong is USD move (0=none, 100=extreme)
+        dxy_strength = min(100.0, strength * 200)
+
+        # dxy_alignment: direction-agnostic
+        # For gold: bearish_usd = bullish gold = high score
+        if bias == "bearish_usd":
+            dxy_alignment = min(100.0, 50 + strength * 100)
+        elif bias == "bullish_usd":
+            dxy_alignment = max(0.0, 50 - strength * 100)
+        else:
+            dxy_alignment = 50.0
+
+        return FeatureResult(
+            group="trend",
+            features={
+                "dxy_alignment": round(dxy_alignment, 1),
+                "dxy_strength_norm": round(dxy_strength, 1),
+            },
+            meta=dxy_data,
         )

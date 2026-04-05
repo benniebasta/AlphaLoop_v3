@@ -9,7 +9,7 @@ Uses close-only confirmation to avoid false wick breaks.
 
 from __future__ import annotations
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
 
 class BOSGuard(BaseTool):
@@ -24,6 +24,7 @@ class BOSGuard(BaseTool):
 
     name = "bos_guard"
     description = "Break of structure confirmation — validates structural break"
+    requires_direction = True
 
     async def run(self, context) -> ToolResult:
         direction = context.trade_direction.upper()
@@ -99,4 +100,53 @@ class BOSGuard(BaseTool):
             passed=False,
             reason=f"Unknown direction '{direction}'",
             severity="warn",
+        )
+
+    async def extract_features(self, context) -> FeatureResult:
+        m15_ind = context.indicators.get("M15", {})
+        bos_data = m15_ind.get("bos")
+
+        if bos_data is None:
+            return FeatureResult(
+                group="structure",
+                features={"bos_strength": 50.0},
+                meta={"status": "unavailable"},
+            )
+
+        bull_mult = float(bos_data.get("bullish_break_atr", 0))
+        bear_mult = float(bos_data.get("bearish_break_atr", 0))
+        has_bull = bos_data.get("bullish_bos", False)
+        has_bear = bos_data.get("bearish_bos", False)
+
+        # Direction-aware: score BOS in the trade direction
+        direction = getattr(context, "trade_direction", "")
+        if direction:
+            direction = direction.upper()
+
+        if direction == "BUY":
+            if has_bull:
+                bos_strength = min(100.0, bull_mult / 1.0 * 100)
+            else:
+                bos_strength = 0.0
+        elif direction == "SELL":
+            if has_bear:
+                bos_strength = min(100.0, bear_mult / 1.0 * 100)
+            else:
+                bos_strength = 0.0
+        else:
+            # No direction: take the stronger BOS (legacy behaviour)
+            if has_bull or has_bear:
+                magnitude = max(bull_mult, bear_mult)
+                bos_strength = min(100.0, magnitude / 1.0 * 100)
+            else:
+                bos_strength = 0.0
+
+        return FeatureResult(
+            group="structure",
+            features={"bos_strength": round(bos_strength, 1)},
+            meta={
+                "bullish_bos": has_bull, "bearish_bos": has_bear,
+                "bull_break_atr": bull_mult, "bear_break_atr": bear_mult,
+                "scored_direction": direction or "none",
+            },
         )

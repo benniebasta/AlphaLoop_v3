@@ -1,7 +1,7 @@
 """
 Dry-run overlay loader — per-card tool overlay for experimentation.
 
-Overlay tools run AFTER the strategy's baked-in tools in the pipeline.
+Overlay tools are loaded from DB to extend a strategy's tool set during dry-run.
 Only active in dry-run mode. Ignored in live mode.
 Strategy JSON remains immutable.
 """
@@ -13,7 +13,6 @@ import logging
 from dataclasses import dataclass, field
 
 from alphaloop.config.settings_service import SettingsService
-from alphaloop.tools.registry import ToolRegistry, _DEFAULT_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -51,42 +50,3 @@ async def load_overlay_config(
         return None
 
     return DryRunOverlayConfig(extra_tools=extra)
-
-
-def build_overlay_pipeline(
-    config: DryRunOverlayConfig,
-    registry: ToolRegistry,
-    exclude_tools: set[str] | None = None,
-):
-    """
-    Build a FilterPipeline from overlay tools, excluding any already in the strategy.
-
-    Returns a FilterPipeline with the extra tools in default pipeline order.
-    """
-    from alphaloop.tools.pipeline import FilterPipeline
-
-    exclude = exclude_tools or set()
-    tools = []
-
-    for name in config.extra_tools:
-        if name in exclude:
-            logger.debug("[overlay-loader] Skipping '%s' (already in strategy)", name)
-            continue
-        tool = registry.get_tool(name)
-        if tool:
-            tools.append((name, tool))
-        else:
-            logger.debug("[overlay-loader] Tool '%s' not found in registry", name)
-
-    tools.sort(key=lambda t: _DEFAULT_ORDER.get(t[0], 99))
-
-    if tools:
-        logger.info(
-            "[overlay-loader] Built overlay pipeline: %s",
-            [name for name, _ in tools],
-        )
-
-    return FilterPipeline(
-        tools=[inst for _, inst in tools],
-        short_circuit=True,
-    )

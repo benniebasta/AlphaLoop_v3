@@ -22,9 +22,10 @@ class OllamaProvider:
     def __init__(
         self,
         base_url: str = "http://localhost:11434/v1",
+        api_key: str = "local",
     ) -> None:
         self._inner = OpenAICompatProvider(
-            api_key="local",
+            api_key=api_key or "local",
             base_url=base_url,
             provider=AIProvider.OLLAMA,
         )

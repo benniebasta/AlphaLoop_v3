@@ -29,17 +29,21 @@ All runtime agents (Python components that run autonomously), their responsibili
 **Cycle:**
 1. Check RiskMonitor (kill switch, daily limits)
 2. Load active strategy config (`strategy_loader.py`)
-3. Build market context (OHLCV + indicators)
-4. Run filter pipeline (tool plugins)
-5. Branch by signal mode: AI or Algorithmic
+3. Build market context (`_build_context` — fetches H1/M15 candles from MT5 sync, computes ATR/EMA/RSI, returns `AttrDict` supporting both `context.session` and `context.get("key")`)
+4. Run filter pipeline (tool plugins, checks `not allow_trade` not `blocked`)
+5. Branch by signal mode (per-strategy, set on Strategy Card):
+   - `algo_only`: AlgorithmicSignalEngine only, hard-rule validation only
+   - `algo_plus_ai`: AlgorithmicSignalEngine + AI validation gate
 6. Generate signal → TradeSignal
-7. Validate signal (hard rules + optional AI)
+7. Validate signal (hard rules + optional AI depending on mode)
 8. Run risk guards (7 stateful guards)
 9. Size position (ATR-based + confidence multiplier)
 10. Execute order (MT5 or dry-run)
-11. Log to DB + publish events + notify
+11. Log to DB + publish events (bridged to web server via HTTP POST) + notify
 
-**Events Published:** `SignalGenerated`, `SignalValidated`, `SignalRejected`, `TradeOpened`, `PipelineBlocked`
+**Events Published:** `CycleStarted`, `SignalGenerated`, `SignalValidated`, `SignalRejected`, `TradeOpened`, `PipelineBlocked`
+**Event Bridge:** Events POST to `http://localhost:8090/api/events/ingest` for Raw Signal Log in WebUI
+**MT5:** Always connects (even dry-run), auto-resolves broker symbol suffix (e.g. `XAUUSD → XAUUSDm`)
 
 **Injected Dependencies:** signal_engine, validator, sizer, executor, risk_monitor, filter_pipeline, trade_repo, notifier, ai_caller, settings_service, tool_registry
 
@@ -181,11 +185,14 @@ health_score = w_sharpe * sharpe_norm + w_winrate * winrate - w_drawdown * drawd
 ## Event Bus Topology
 
 ```
-TradingLoop ──→ SignalGenerated ──→ WebSocket, Metrics
-            ──→ SignalValidated ──→ WebSocket
-            ──→ SignalRejected  ──→ WebSocket
-            ──→ TradeOpened     ──→ WebSocket, Telegram, Metrics
-            ──→ PipelineBlocked ──→ WebSocket
+TradingLoop ──→ CycleStarted    ──→ EventBridge (HTTP POST /api/events/ingest)
+            ──→ SignalGenerated ──→ WebSocket, Metrics, EventBridge
+            ──→ SignalValidated ──→ WebSocket, EventBridge
+            ──→ SignalRejected  ──→ WebSocket, EventBridge
+            ──→ TradeOpened     ──→ WebSocket, Telegram, Metrics, EventBridge
+            ──→ PipelineBlocked ──→ WebSocket, EventBridge
+            │   (blocked_by: cross_instance_risk | risk_monitor |
+            │    circuit_breaker | filter_pipeline | overlay | risk_guard)
 
 MT5/Executor ──→ TradeClosed ──→ MetaLoop, MicroLearner, HealthMonitor, WebSocket, Telegram
 

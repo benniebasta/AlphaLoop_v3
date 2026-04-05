@@ -69,13 +69,14 @@ def test_equity_curve_scaler_above_ma():
 
 
 def test_equity_curve_scaler_below_ma():
+    """Graduated scale: far below MA → 0.25x (quarter size)."""
     e = EquityCurveScaler(window=5)
     e.record_pnl(200.0)
     e.record_pnl(100.0)
     e.record_pnl(-50.0)
     e.record_pnl(-100.0)
     e.record_pnl(-200.0)
-    assert e.risk_scale() == 0.5
+    assert e.risk_scale() == 0.25
 
 
 def test_drawdown_pause_no_trigger():

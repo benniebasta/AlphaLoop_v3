@@ -73,6 +73,10 @@ class TradeLog(Base):
     # Strategy version
     strategy_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # Broker order ticket — critical for reconciliation (Phase 2A)
+    order_ticket: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    client_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
     # Instance tracking
     instance_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     is_dry_run: Mapped[bool | None] = mapped_column(Boolean, default=True, nullable=True)

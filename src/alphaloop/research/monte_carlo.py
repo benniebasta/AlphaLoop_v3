@@ -49,6 +49,15 @@ class MonteCarloSimulator:
             }
 
         arr = np.array(pnl_values, dtype=np.float64)
+
+        # Validate input — reject NaN/inf values
+        if not np.all(np.isfinite(arr)):
+            non_finite = (~np.isfinite(arr)).sum()
+            logger.warning("[monte-carlo] %d non-finite values in PnL array — filtering", non_finite)
+            arr = arr[np.isfinite(arr)]
+            if len(arr) < 20:
+                return {"status": "insufficient_data", "trade_count": len(arr)}
+
         observed_sharpe = self._sharpe(arr)
         if observed_sharpe is None:
             return {"status": "sharpe_undefined"}
@@ -128,6 +137,8 @@ class MonteCarloSimulator:
             return {"status": "insufficient_data"}
 
         arr = np.array(pnl_values, dtype=np.float64)
+        # Clamp ruin threshold to valid range
+        ruin_threshold_pct = max(0.0, min(100.0, ruin_threshold_pct))
         ruin_level = initial_balance * (1 - ruin_threshold_pct / 100)
 
         # Offload CPU work to a thread

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn-uicons.flaticon.com/2.6.0/uicons-regular-rounded/css/uicons-regular-rounded.css">
-  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/app.css?v=7.2">
 </head>
 <body>
   <!-- Sidebar -->
@@ -86,6 +86,9 @@
       <div class="nav-item" data-page="settings">
         <span class="nav-icon"><i class="fi fi-rr-settings"></i></span> ⚙️ Settings
       </div>
+      <a class="nav-item nav-item-link" href="/metrics" target="_blank" title="Prometheus metrics endpoint">
+        <span class="nav-icon"><i class="fi fi-rr-chart-histogram"></i></span> 📊 Metrics
+      </a>
     </div>
 
     <!-- Theme Toggle (sidebar footer) -->
@@ -123,6 +126,6 @@
   <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 
   <!-- JS modules -->
-  <script type="module" src="/static/js/app.js?v=6.2"></script>
+  <script type="module" src="/static/js/app.js?v=7.1"></script>
 </body>
 </html>

@@ -106,7 +106,7 @@ function buildHTML() {
         <!-- Left: Candlestick Chart -->
         <div class="live-chart-card card">
           <div class="live-chart-header">
-            <span id="live-chart-title">${selectedSymbol} · ${selectedTf.toUpperCase()}</span>
+            <span id="live-chart-title">${selectedSymbol} · ${selectedTf.toUpperCase()} <span class="live-data-source-badge" title="Analytics data via yfinance. Bot trades use the MT5 live feed.">yfinance</span></span>
             <div class="live-chart-controls">
               <span id="live-bar-count" class="live-bar-count">— BARS</span>
               <button class="btn btn-sm ${showEMA ? 'btn-primary' : ''}" id="btn-ema">EMA</button>
@@ -151,8 +151,21 @@ function buildHTML() {
               <span id="live-sig-time" class="live-meta-value">— —</span>
             </div>
             <div class="live-meta-row">
+              <span class="live-meta-label">AI CONFIDENCE</span>
+              <span id="live-ai-confidence" class="live-meta-value">—</span>
+            </div>
+            <div class="live-meta-row">
               <span class="live-meta-label">MARKET REGIME</span>
               <span id="live-regime" class="live-meta-value">● —</span>
+              <div id="live-ema-values" class="live-ema-values"></div>
+            </div>
+            <div class="live-meta-row">
+              <span class="live-meta-label">RSI (14)</span>
+              <span id="live-rsi" class="live-meta-value">—</span>
+            </div>
+            <div class="live-meta-row">
+              <span class="live-meta-label">VOLATILITY</span>
+              <span id="live-volatility" class="live-meta-value">—</span>
             </div>
             <div class="live-meta-row">
               <span class="live-meta-label">RECENT SIGNALS</span>
@@ -314,6 +327,7 @@ function buildHTML() {
       .live-gauge-val { font-size: 20px; font-weight: 700; margin-top: -8px; }
       .live-gauge-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
 
+      .live-ema-values { margin-top: 3px; }
       .live-signal-meta { flex: 1; display: flex; flex-direction: column; gap: 0; }
       .live-meta-row { padding: 8px 0; border-bottom: 1px solid var(--border); }
       .live-meta-row:last-child { border-bottom: none; }
@@ -321,10 +335,20 @@ function buildHTML() {
       .live-meta-value { font-size: 12px; color: var(--text); }
 
       .live-thoughts-log {
-        max-height: 80px; overflow-y: auto; font-family: 'Fira Code', monospace;
+        max-height: 160px; overflow-y: auto; font-family: 'Fira Code', monospace;
         font-size: 10px; color: var(--code-fg); background: var(--code-bg);
         padding: 6px 8px; border-radius: 4px; margin-top: 4px;
       }
+      .live-thoughts-log:empty::before {
+        content: 'Waiting for bot events...';
+        color: var(--muted); font-style: italic;
+      }
+      .thought-line {
+        padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .thought-line:first-child { border-top: none; }
+      .thought-line:last-child { border-bottom: none; }
 
       /* Session Timeline */
       .live-session-timeline { padding: 12px 16px; }
@@ -381,6 +405,8 @@ function initSymbolPills() {
     btn.addEventListener('click', () => {
       selectedSymbol = btn.dataset.sym;
       document.querySelectorAll('.sym-pill').forEach(b => b.classList.toggle('active', b.dataset.sym === selectedSymbol));
+      const title = document.getElementById('live-chart-title');
+      if (title) title.innerHTML = `${selectedSymbol} · ${selectedTf.toUpperCase()} <span class="live-data-source-badge" title="Analytics data via yfinance. Bot trades use the MT5 live feed.">yfinance</span>`;
       destroyCharts();
       refreshLive();
     });
@@ -393,7 +419,7 @@ function initTimeframeButtons() {
       selectedTf = btn.dataset.tf;
       document.querySelectorAll('.tf-btn').forEach(b => b.classList.toggle('active', b.dataset.tf === selectedTf));
       const title = document.getElementById('live-chart-title');
-      if (title) title.textContent = `${selectedSymbol} · ${selectedTf.toUpperCase()}`;
+      if (title) title.innerHTML = `${selectedSymbol} · ${selectedTf.toUpperCase()} <span class="live-data-source-badge" title="Analytics data via yfinance. Bot trades use the MT5 live feed.">yfinance</span>`;
       destroyCharts();
       refreshLive();
     });
@@ -420,6 +446,8 @@ function initSymbolInput() {
     const input = document.getElementById('sym-custom');
     if (input?.value.trim()) {
       selectedSymbol = input.value.trim().toUpperCase();
+      const title = document.getElementById('live-chart-title');
+      if (title) title.innerHTML = `${selectedSymbol} · ${selectedTf.toUpperCase()} <span class="live-data-source-badge" title="Analytics data via yfinance. Bot trades use the MT5 live feed.">yfinance</span>`;
       destroyCharts();
       refreshLive();
     }
@@ -428,8 +456,85 @@ function initSymbolInput() {
 
 function onWsEvent(e) {
   const data = e.detail;
-  if (data.type === 'signal' && data.symbol === selectedSymbol) {
-    updateSignalPanel(data);
+  if (!data || !data.type) return;
+
+  // Real-time signal from the trading bot
+  if (data.type === 'SignalGenerated' && data.symbol === selectedSymbol) {
+    updateSignalPanel(data, true);
+    const confidence = data.confidence ?? data.signal?.confidence;
+    const direction = data.direction || data.signal?.direction || 'SIGNAL';
+    const setup = data.setup || data.signal?.setup || '';
+    const conf = confidence != null ? `${Math.round(confidence * 100)}%` : '';
+    const agentEl = document.getElementById('live-agent-detail');
+    if (agentEl) {
+      agentEl.textContent = `Bot signal: ${direction} ${conf}`.trim();
+      agentEl.style.color = direction === 'BUY' ? 'var(--green)' : direction === 'SELL' ? 'var(--red)' : 'var(--primary)';
+    }
+    appendThought(
+      'signal_gen',
+      'generated',
+      `${direction}${conf ? ` confidence:${conf}` : ''}${setup ? ` setup:${setup}` : ''}`,
+      data.timestamp,
+    );
+  }
+
+  // Pipeline steps → Live Thoughts
+  if (data.type === 'PipelineStep' && data.symbol === selectedSymbol) {
+    appendThought(data.stage, data.status, data.detail, data.timestamp);
+  }
+
+  // Cycle markers → Live Thoughts
+  if (data.type === 'CycleStarted' && data.symbol === selectedSymbol) {
+    appendThought('cycle', 'started', `Cycle #${data.cycle}`, data.timestamp);
+  }
+  if (data.type === 'CycleCompleted' && data.symbol === selectedSymbol) {
+    appendThought('cycle', data.outcome || 'done', data.detail || '', data.timestamp);
+    const agentEl = document.getElementById('live-agent-detail');
+    if (agentEl) {
+      agentEl.textContent = `Cycle #${data.cycle} — ${data.outcome || 'done'}`;
+      agentEl.style.color = 'var(--primary)';
+    }
+  }
+}
+
+/* ── Live Thoughts ────────────────────────────────────── */
+
+const _THOUGHT_ICONS = {
+  cycle: '\u{1F504}', risk_check: '\u{1F6E1}', filters: '\u{1F50D}', signal_gen: '\u{1F4E1}',
+  validation: '\u{2705}', guards: '\u{1F3F0}', sizing: '\u{1F4D0}', execution: '\u{26A1}',
+};
+const _THOUGHT_STATUS_COLOR = {
+  passed: 'var(--green)', generated: 'var(--green)', approved: 'var(--green)', filled: 'var(--green)',
+  started: 'var(--primary)',
+  blocked: 'var(--red)', rejected: 'var(--red)', failed: 'var(--red)',
+  no_signal: 'var(--muted)', no_construction: 'var(--muted)', skipped: 'var(--muted)', done: 'var(--muted)',
+};
+const MAX_THOUGHTS = 20;
+
+function appendThought(stage, status, detail, timestamp) {
+  const el = document.getElementById('live-thoughts');
+  if (!el) return;
+
+  const time = timestamp
+    ? new Date(typeof timestamp === 'number' ? timestamp * 1000 : timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const icon = _THOUGHT_ICONS[stage] || '\u{2022}';
+  const color = _THOUGHT_STATUS_COLOR[status] || 'var(--muted)';
+  const label = (stage || '').replace(/_/g, ' ');
+  const badge = status || '';
+  const text = detail ? ` \u2014 ${detail}` : '';
+
+  const line = document.createElement('div');
+  line.className = 'thought-line';
+  line.innerHTML = `<span style="color:var(--muted)">${time}</span> ${icon} <span style="text-transform:capitalize">${label}</span> <span style="color:${color};font-weight:600">${badge}</span><span style="color:var(--text-secondary)">${text}</span>`;
+
+  // Prepend newest at top
+  el.insertBefore(line, el.firstChild);
+
+  // Trim to max
+  while (el.children.length > MAX_THOUGHTS) {
+    el.removeChild(el.lastChild);
   }
 }
 
@@ -515,14 +620,18 @@ function initChart(ohlc) {
     rightPriceScale: { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' },
   });
 
-  candleSeries = lwChart.addCandlestickSeries({
-    upColor: '#1D9E75',
-    downColor: '#E24B4A',
-    borderUpColor: '#1D9E75',
-    borderDownColor: '#E24B4A',
-    wickUpColor: '#1D9E75',
-    wickDownColor: '#E24B4A',
-  });
+  const _csOpts = {
+    upColor: '#1D9E75', downColor: '#E24B4A',
+    borderUpColor: '#1D9E75', borderDownColor: '#E24B4A',
+    wickUpColor: '#1D9E75', wickDownColor: '#E24B4A',
+  };
+  const LC = window.LightweightCharts;
+  // v4: addSeries(CandlestickSeries, opts) — fallback to v3 addCandlestickSeries
+  try {
+    candleSeries = LC.CandlestickSeries ? lwChart.addSeries(LC.CandlestickSeries, _csOpts) : lwChart.addCandlestickSeries(_csOpts);
+  } catch {
+    candleSeries = lwChart.addCandlestickSeries(_csOpts);
+  }
 
   if (ohlc.length) {
     candleSeries.setData(ohlc);
@@ -537,59 +646,92 @@ function initChart(ohlc) {
   ro.observe(chartDiv);
 }
 
+function _dedup(ohlc) {
+  // Remove duplicate timestamps — yfinance can return dupes which cause setData to throw
+  const seen = new Set();
+  return ohlc.filter(b => {
+    if (seen.has(b.time)) return false;
+    seen.add(b.time);
+    return true;
+  });
+}
+
 function updateChart(ohlc) {
   if (!ohlc.length) return;
+  // Deduplicate before any series use — duplicate timestamps cause LightweightCharts to throw
+  const bars = _dedup(ohlc);
+
   if (!lwChart) {
-    initChart(ohlc);
+    initChart(bars);
   } else if (candleSeries) {
-    candleSeries.setData(ohlc);
+    try { candleSeries.setData(bars); } catch (e) { console.warn('[chart] candleSeries.setData failed:', e.message); }
     const countEl = document.getElementById('live-bar-count');
-    if (countEl) countEl.textContent = `${ohlc.length} BARS · ${selectedTf.toUpperCase()}`;
+    if (countEl) countEl.textContent = `${bars.length} BARS · ${selectedTf.toUpperCase()}`;
   }
 
   // EMA overlay
-  if (showEMA && lwChart && ohlc.length > 21) {
-    // Remove old EMA series
-    emaSeries.forEach(s => { try { lwChart.removeSeries(s); } catch {} });
+  if (showEMA && lwChart && bars.length > 55) {
+    emaSeries.forEach(s => { try { if (s.detach) s.detach(); else lwChart.removeSeries(s); } catch {} });
     emaSeries = [];
 
-    const ema21 = calcEMA(ohlc.map(b => b.close), 21);
-    const ema55 = calcEMA(ohlc.map(b => b.close), 55);
+    const closes = bars.map(b => b.close);
+    const ema21data = calcEMA(closes, 21)
+      .map((v, i) => ({ time: bars[i].time, value: v }))
+      .filter(d => d.value !== null);
+    const ema55data = calcEMA(closes, 55)
+      .map((v, i) => ({ time: bars[i].time, value: v }))
+      .filter(d => d.value !== null);
 
-    const s21 = lwChart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceLineVisible: false });
-    s21.setData(ema21.map((v, i) => ({ time: ohlc[i].time, value: v })).filter(d => d.value !== null));
-    emaSeries.push(s21);
+    try {
+      const s21 = lwChart.addLineSeries({ color: '#3b82f6', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      s21.setData(ema21data);
+      emaSeries.push(s21);
+    } catch (e) { console.warn('[chart] EMA-21 failed:', e.message); }
 
-    if (ema55.some(v => v !== null)) {
-      const s55 = lwChart.addLineSeries({ color: '#f59e0b', lineWidth: 1, priceLineVisible: false });
-      s55.setData(ema55.map((v, i) => ({ time: ohlc[i].time, value: v })).filter(d => d.value !== null));
+    try {
+      const s55 = lwChart.addLineSeries({ color: '#f59e0b', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      s55.setData(ema55data);
       emaSeries.push(s55);
-    }
+    } catch (e) { console.warn('[chart] EMA-55 failed:', e.message); }
+
   } else if (!showEMA && emaSeries.length && lwChart) {
-    emaSeries.forEach(s => { try { lwChart.removeSeries(s); } catch {} });
+    emaSeries.forEach(s => { try { if (s.detach) s.detach(); else lwChart.removeSeries(s); } catch {} });
     emaSeries = [];
   }
 
   // RSI sub-chart
-  if (showRSI && ohlc.length > 14) {
-    const rsiDiv = document.getElementById('rsi-chart-div');
-    if (rsiDiv && !rsiChart && window.LightweightCharts) {
-      const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-      rsiChart = window.LightweightCharts.createChart(rsiDiv, {
-        width: rsiDiv.clientWidth,
-        height: 80,
-        layout: { background: { type: 'solid', color: 'transparent' }, textColor: isDark ? '#a1a1aa' : '#71717a' },
-        grid: { vertLines: { color: 'rgba(255,255,255,0.02)' }, horzLines: { color: 'rgba(255,255,255,0.02)' } },
-        crosshair: { mode: 0 },
-        timeScale: { visible: false },
-        rightPriceScale: { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' },
-      });
-      rsiSeries = rsiChart.addLineSeries({ color: '#8b5cf6', lineWidth: 1.5, priceLineVisible: false });
-    }
-    if (rsiSeries) {
-      const rsiVals = calcRSI(ohlc.map(b => b.close), 14);
-      rsiSeries.setData(rsiVals.map((v, i) => ({ time: ohlc[i].time, value: v })).filter(d => d.value !== null));
-    }
+  if (showRSI && bars.length > 14) {
+    const _buildRsiChart = () => {
+      const rsiDiv = document.getElementById('rsi-chart-div');
+      if (!rsiDiv || !window.LightweightCharts) return;
+      if (!rsiChart) {
+        const LC = window.LightweightCharts;
+        const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+        const w = rsiDiv.clientWidth || rsiDiv.offsetWidth || 400;
+        rsiChart = LC.createChart(rsiDiv, {
+          width: w,
+          height: 80,
+          layout: { background: { type: 'solid', color: 'transparent' }, textColor: isDark ? '#a1a1aa' : '#71717a' },
+          grid: { vertLines: { color: 'rgba(255,255,255,0.02)' }, horzLines: { color: 'rgba(255,255,255,0.02)' } },
+          crosshair: { mode: 0 },
+          timeScale: { visible: false },
+          rightPriceScale: { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' },
+        });
+        try {
+          rsiSeries = rsiChart.addLineSeries({ color: '#8b5cf6', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false });
+        } catch (e) { console.warn('[chart] RSI series failed:', e.message); rsiSeries = null; }
+      }
+      if (rsiSeries) {
+        try {
+          const rsiData = calcRSI(bars.map(b => b.close), 14)
+            .map((v, i) => ({ time: bars[i].time, value: v }))
+            .filter(d => d.value !== null);
+          rsiSeries.setData(rsiData);
+        } catch (e) { console.warn('[chart] RSI setData failed:', e.message); }
+      }
+    };
+    // Use rAF to ensure rsi-pane-wrap has been laid out before reading clientWidth
+    requestAnimationFrame(_buildRsiChart);
   }
 }
 
@@ -636,14 +778,64 @@ function destroyCharts() {
 
 /* ── Signal Panel ──────────────────────────────────────── */
 
-function updateSignalPanel(data) {
+let _botSignalActive = false;  // true when a bot SignalGenerated was received
+let _botSignalExpiry = 0;      // auto-expire after 5 minutes
+
+function updateSignalPanel(data, fromBot = false) {
   const signal = data?.signal ?? data;  // accept full data obj or bare signal
   const badge = document.getElementById('sig-badge');
   if (!badge) return;
 
+  // If bot sent a signal, mark it active (expires after 5 min)
+  if (fromBot && signal?.direction) {
+    _botSignalActive = true;
+    _botSignalExpiry = Date.now() + 300000;
+  }
+  // Don't let the 5s poll overwrite an active bot signal with "SCANNING..."
+  if (!fromBot && _botSignalActive && Date.now() < _botSignalExpiry && (!signal || !signal.direction)) {
+    return;
+  }
+  if (_botSignalActive && Date.now() >= _botSignalExpiry) {
+    _botSignalActive = false;
+  }
+
   if (!signal || !signal.direction) {
-    badge.className = 'live-signal-badge';
-    badge.querySelector('.sig-text').textContent = 'SCANNING...';
+    const emaRegime = data?.ema_state?.regime || data?.market_regime;
+    const biasBadge = emaRegime === 'trending_up' ? 'BUY' : emaRegime === 'trending_down' ? 'SELL' : 'NEUTRAL';
+    const biasCls   = emaRegime === 'trending_up' ? 'buy' : emaRegime === 'trending_down' ? 'sell' : '';
+    badge.className = `live-signal-badge${biasCls ? ' ' + biasCls : ''}`;
+    badge.querySelector('.sig-text').textContent = biasBadge;
+
+    // Derive bias from EMA alignment when no active crossover
+    const ema = data?.ema_state;
+    const arc = document.getElementById('gauge-arc');
+    const val = document.getElementById('gauge-val');
+    const lbl = document.getElementById('gauge-label');
+    if (ema) {
+      // Use market_regime (EMA stack alignment) — more reliable than raw gap_pct on short TFs
+      const regime = ema.regime || data?.market_regime || 'ranging';
+      let bias, biasColor, biasArc;
+      if (regime === 'trending_up') {
+        bias = 'BUY'; biasColor = 'var(--green)';
+        const strength = Math.min(Math.max(Math.abs(ema.gap_pct || 0) / 5, 0.2), 0.9);
+        biasArc = Math.round(strength * 251);
+      } else if (regime === 'trending_down') {
+        bias = 'SELL'; biasColor = 'var(--red)';
+        const strength = Math.min(Math.max(Math.abs(ema.gap_pct || 0) / 5, 0.2), 0.9);
+        biasArc = Math.round(strength * 251);
+      } else {
+        bias = 'NEUTRAL'; biasColor = 'var(--amber)'; biasArc = Math.round(0.15 * 251);
+      }
+      if (arc) { arc.setAttribute('stroke-dasharray', `${biasArc} 251`); arc.style.stroke = biasColor; }
+      if (val) { val.textContent = bias; val.style.color = biasColor; }
+      if (lbl) lbl.textContent = 'EMA BIAS';
+    } else {
+      if (arc) arc.setAttribute('stroke-dasharray', '0 251');
+      if (val) { val.textContent = '—'; val.style.color = ''; }
+      if (lbl) lbl.textContent = 'AWAITING SIGNAL';
+    }
+    const aiConfidenceEl = document.getElementById('live-ai-confidence');
+    if (aiConfidenceEl) aiConfidenceEl.textContent = '—';
   } else {
     const dir = signal.direction.toLowerCase();
     badge.className = `live-signal-badge ${dir}`;
@@ -654,14 +846,17 @@ function updateSignalPanel(data) {
       const arc = document.getElementById('gauge-arc');
       const val = document.getElementById('gauge-val');
       const label = document.getElementById('gauge-label');
+      const aiConfidenceEl = document.getElementById('live-ai-confidence');
       if (arc) arc.setAttribute('stroke-dasharray', `${(pct / 100) * 251} 251`);
       if (val) val.textContent = `${pct}%`;
       if (label) label.textContent = dir.toUpperCase();
+      if (aiConfidenceEl) aiConfidenceEl.textContent = `${pct}%`;
     }
 
     const sigTime = document.getElementById('live-sig-time');
     if (sigTime && signal.timestamp) {
-      sigTime.textContent = new Date(signal.timestamp * 1000).toLocaleTimeString();
+      const ts = typeof signal.timestamp === 'number' ? signal.timestamp * 1000 : signal.timestamp;
+      sigTime.textContent = new Date(ts).toLocaleTimeString();
     }
   }
 
@@ -679,6 +874,53 @@ function updateSignalPanel(data) {
     regimeEl.style.color = r.color;
   }
 
+  // EMA values
+  const emaValEl = document.getElementById('live-ema-values');
+  if (emaValEl) {
+    const ema = data?.ema_state;
+    if (ema && ema.ema9 != null) {
+      const trendCol = ema.ema9 > ema.ema21 ? 'var(--green)' : 'var(--red)';
+      emaValEl.innerHTML = `<span style="color:${trendCol};font-family:'Fira Code',monospace;font-size:10px">` +
+        `9: ${ema.ema9.toFixed(1)} &nbsp; 21: ${ema.ema21.toFixed(1)} &nbsp; 50: ${ema.ema50.toFixed(1)}` +
+        `</span>`;
+    } else {
+      emaValEl.textContent = '';
+    }
+  }
+
+  // RSI
+  const rsiEl = document.getElementById('live-rsi');
+  if (rsiEl) {
+    const rsi = data?.ema_state?.rsi;
+    if (rsi != null) {
+      const rsiVal = rsi.toFixed(1);
+      let rsiColor, rsiLabel;
+      if (rsi < 35)      { rsiColor = 'var(--green)'; rsiLabel = `${rsiVal} — oversold`; }
+      else if (rsi > 65) { rsiColor = 'var(--red)';   rsiLabel = `${rsiVal} — overbought`; }
+      else               { rsiColor = 'var(--amber)';  rsiLabel = rsiVal; }
+      rsiEl.textContent = rsiLabel;
+      rsiEl.style.color = rsiColor;
+    } else {
+      rsiEl.textContent = '—';
+      rsiEl.style.color = '';
+    }
+  }
+
+  // Volatility
+  const volEl = document.getElementById('live-volatility');
+  if (volEl) {
+    const volRegime = data?.volatility?.regime;
+    const volMap = {
+      calm:     { label: 'Calm',     color: 'var(--green)' },
+      normal:   { label: 'Normal',   color: 'var(--text)' },
+      elevated: { label: 'Elevated', color: 'var(--amber)' },
+      extreme:  { label: 'Extreme',  color: 'var(--red)' },
+    };
+    const v = volMap[volRegime] || { label: volRegime || '—', color: 'var(--muted)' };
+    volEl.textContent = v.label;
+    volEl.style.color = v.color;
+  }
+
   // Recent signals
   const recentEl = document.getElementById('live-recent');
   if (recentEl) {
@@ -689,7 +931,8 @@ function updateSignalPanel(data) {
       recentEl.innerHTML = sigs.map(s => {
         const col = s.direction === 'BUY' ? 'var(--green)' : 'var(--red)';
         const t = new Date(s.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        return `<span style="color:${col};margin-right:8px">${s.direction} @ ${t}</span>`;
+        const price = s.price != null ? ` (${s.price.toFixed(2)})` : '';
+        return `<span style="color:${col};margin-right:8px">${s.direction} @ ${t}${price}</span>`;
       }).join('');
     }
   }
@@ -723,6 +966,25 @@ function updateInfoCards(data) {
   if (data?.session) {
     const nameEl = document.getElementById('session-name');
     if (nameEl) nameEl.textContent = data.session.name;
+
+    // Populate session countdown using closes_at from API
+    const closesRaw = data.session.closes_at; // e.g. "12:00 UTC"
+    const countdownEl = document.getElementById('session-countdown');
+    const closesEl = document.getElementById('session-closes');
+    if (closesEl && closesRaw) closesEl.textContent = `Closes ${closesRaw}`;
+    if (countdownEl && closesRaw) {
+      try {
+        const [hStr] = closesRaw.split(':');
+        const closeHour = parseInt(hStr, 10);
+        const now = new Date();
+        const closeUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), closeHour, 0, 0));
+        if (closeUtc <= now) closeUtc.setUTCDate(closeUtc.getUTCDate() + 1);
+        const diffMs = closeUtc - now;
+        const hh = Math.floor(diffMs / 3600000);
+        const mm = Math.floor((diffMs % 3600000) / 60000);
+        countdownEl.textContent = `${hh}h ${mm}m remaining`;
+      } catch { countdownEl.textContent = '—'; }
+    }
   }
 
   const agentEl = document.getElementById('live-agent-status');

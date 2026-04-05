@@ -6,6 +6,7 @@ import logging
 from decimal import Decimal, ROUND_DOWN
 
 from alphaloop.config.assets import get_asset_config, AssetConfig
+from alphaloop.core.normalization import normalize_distance
 from alphaloop.signals.schema import ValidatedSignal
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,9 @@ class PositionSizer:
                 f"Risk score {validated_signal.risk_score:.2f} > threshold {self.risk_score_threshold}"
             )
 
-        sl_distance_points = abs(entry - sl) / self.asset.pip_size
+        # Centralised distance normalization (core/normalization.py)
+        _dist = normalize_distance(entry, sl, self.asset.pip_size)
+        sl_distance_points = _dist.points
         if sl_distance_points <= 0:
             raise ValueError("SL distance is zero")
 

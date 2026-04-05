@@ -10,11 +10,20 @@ Step-by-step flow for each major pipeline: live trading, backtesting, SeedLab di
 **Entry:** `TradingLoop.run_cycle()` in `src/alphaloop/trading/loop.py`
 
 ```
+┌─ Step 0: Cycle Announced ────────────────────────────────────┐
+│  → CycleStarted(symbol, instance_id, cycle) published        │
+│  → Always fires — even if subsequent guards block the cycle  │
+│  → Activates the 🔄 Cycle tile in the Raw Signal Log modal   │
+└───────────────────────────────────────────────────────────────┘
+        │
+        v
 ┌─ Step 1: Risk Check ──────────────────────────────────────────┐
-│  RiskMonitor.check_kill_switch()                              │
-│  RiskMonitor.check_daily_loss()                               │
-│  RiskMonitor.check_consecutive_losses()                       │
-│  → If blocked: log + sleep → next cycle                       │
+│  CrossInstanceRiskAggregator.can_open_trade()                 │
+│  → If blocked: PipelineBlocked(blocked_by="cross_instance_risk") │
+│  RiskMonitor.can_open_trade()                                 │
+│  → If blocked: PipelineBlocked(blocked_by="risk_monitor")    │
+│  CircuitBreaker.is_open                                       │
+│  → If open:   PipelineBlocked(blocked_by="circuit_breaker")  │
 └───────────────────────────────────────────────────────────────┘
         │
         v
@@ -26,10 +35,15 @@ Step-by-step flow for each major pipeline: live trading, backtesting, SeedLab di
 └───────────────────────────────────────────────────────────────┘
         │
         v
-┌─ Step 3: Market Context ─────────────────────────────────────┐
-│  OHLCVFetcher.fetch(symbol, timeframe)                        │
-│  → indicators: RSI, EMA(21/55/200), ATR, VWAP, BOS, FVG     │
-│  → MarketContext Pydantic model                               │
+┌─ Step 3: Market Context (_build_context) ────────────────────┐
+│  MT5 sync calls (main thread, <50ms — thread-safe):           │
+│  ├── mt5.copy_rates_from_pos(H1, 50) → ATR(14), EMA(21/55)  │
+│  ├── mt5.copy_rates_from_pos(M15, 100) → RSI(14)             │
+│  ├── Symbol auto-resolved (XAUUSD → XAUUSDm on Exness)       │
+│  └── MT5 connects even in dry-run mode (needed for data)      │
+│  Returns AttrDict — supports both context.session (tools)     │
+│  and context.get("timeframes") (algo engine)                  │
+│  Includes: session(+is_weekend), price, indicators, risk_mon  │
 └───────────────────────────────────────────────────────────────┘
         │
         v
@@ -38,27 +52,38 @@ Step-by-step flow for each major pipeline: live trading, backtesting, SeedLab di
 │  → session_filter → news_filter → volatility_filter →        │
 │    dxy_filter → sentiment_filter → risk_filter               │
 │  → Short-circuit on first block                               │
+│  → Check: not pipeline_result.get("allow_trade", True)        │
 │  → If blocked: PipelineBlocked event → next cycle             │
+│  → Event bridged to web server via HTTP POST /api/events/ingest│
 └───────────────────────────────────────────────────────────────┘
         │
         v
 ┌─ Step 5: Signal Generation ──────────────────────────────────┐
-│  Branch by signal_mode:                                       │
-│  ├── "ai": MultiAssetSignalEngine.generate_signal()           │
-│  │         → AICaller.call_role("signal") → parse JSON        │
-│  └── "a"/"b": AlgorithmicSignalEngine.generate()              │
-│               → EMA crossover + RSI filter                    │
-│  → TradeSignal (direction, entry, SL, TP, confidence)         │
-│  → SignalGenerated event                                      │
+│  Branch by signal_mode (per-strategy, set on Strategy Card):  │
+│  Three modes:                                                  │
+│  ├── "algo_only":  AlgorithmicSignalEngine → deterministic    │
+│  │                 direction hypothesis; no AI cost            │
+│  ├── "algo_ai":    AlgorithmicSignalEngine → FeaturePipeline  │
+│  │                 (22 scoring tools) → conviction blend       │
+│  └── "ai_signal":  SignalEngine LLM query → DirectionHypo-    │
+│                    thesis from AI; AI validator required       │
+│  → All modes: TradeConstructor (constraint-first SL/TP)       │
+│  → SignalGenerated event                                       │
 └───────────────────────────────────────────────────────────────┘
         │
         v
-┌─ Step 6: Validation ─────────────────────────────────────────┐
-│  HardRuleChecker.check_all(signal, context) — 13 rules        │
-│  → If any fail: SignalRejected event → next cycle             │
-│  UniversalValidator.validate(signal, context)                  │
-│  → Optional AI validation (call_role("validator"))             │
-│  → ValidatedSignal + SignalValidated event                    │
+┌─ Step 6: v4 Pipeline (pipeline/orchestrator.py) ─────────────┐
+│  Stage 4A: StructuralInvalidator — hard blocks only           │
+│            (SL/TP ordering, R:R, SL distance, setup type)     │
+│  Stage 4B: StructuralQuality — soft scoring                   │
+│  Stage 5:  ConvictionScorer — HOLD / TRADE decision           │
+│  Stage 6:  BoundedAIValidator (conditional)                   │
+│            → Required for algo_ai and ai_signal modes         │
+│            → Skipped for algo_only                            │
+│            → Bounded: confidence adjust only (±0.05 max)      │
+│            → Live mode: AI error → REJECT (fail-closed)       │
+│  Stage 7:  RiskGate — daily loss, kill switch, concurrent cap │
+│  Stage 8:  ExecutionGuard — tick jump, volatility spike       │
 └───────────────────────────────────────────────────────────────┘
         │
         v
@@ -202,16 +227,30 @@ Canary Deployment (optional):
 
 ## 5. AI Override Hooks
 
-AI can influence each pipeline stage:
+AI can influence each pipeline stage. Signal mode is set per-strategy on the Strategy Card;
+only two modes exist: `algo_only` and `algo_plus_ai` (there is no `ai_only` mode).
 
-| Stage | AI Role | Override |
-|-------|---------|----------|
-| Signal generation | `signal` model | Per-strategy model override |
-| Signal validation | `validator` model | Per-strategy model override |
-| Research analysis | `research` model | Per-strategy model override |
-| Auto-improvement | `autolearn` model | Per-strategy model override |
+| Stage | AI Role | Default Model | When Active |
+|-------|---------|---------------|-------------|
+| Signal generation | `signal` | `gemini-2.5-flash-lite` | `ai_signal` mode only |
+| Signal validation | `validator` | `claude-haiku-4-5-20251001` | `algo_ai` and `ai_signal` modes (Stage 6) |
+| Research analysis | `research` | `gemini-2.5-pro` | Background MetaLoop analysis |
+| Parameter suggestion | `param_suggest` | `deepseek-reasoner` | Background MetaLoop optimization |
+| Regime classification | `regime` | `gemini-2.5-flash-lite` | Hourly background task |
+| Provider fallback | `fallback` | `grok-3-mini` | When primary provider is down |
 
-Model overrides set via:
-- `PUT /api/strategies/{symbol}/v{version}/models`
-- Stored in strategy version JSON
-- Falls back to global defaults from AI Hub
+**Signal modes:**
+- `algo_only` — AlgorithmicSignalEngine only; no AI call; validation via structural invalidation only
+- `algo_ai` — AlgorithmicSignalEngine + FeaturePipeline (22 tools); optional AI validator at Stage 6
+- `ai_signal` — LLM generates direction hypothesis; AI validator at Stage 6 is required
+
+**Model overrides set via:**
+- `PUT /api/strategies/{symbol}/v{version}/models` — accepts all 6 role keys
+- Stored in strategy version JSON under `ai_models{}`
+- Falls back to `DEFAULT_ROLES` in `ai/model_hub.py`
+
+**Model availability filtering:**
+- `GET /api/test/models` returns only models from providers with a configured API key
+- Ollama: live-pinged at `QWEN_LOCAL_BASE` (default `http://localhost:11434`) with 2 s timeout
+- Response includes `roles[]` and `cost_tier` per model for UI population
+- Strategy Card dropdowns are populated from this endpoint — prevents selecting unconfigured models

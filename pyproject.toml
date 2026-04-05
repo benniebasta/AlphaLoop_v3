@@ -34,6 +34,7 @@ dependencies = [
 
     # Backtesting / Optimisation
     "optuna>=3.6.0",
+    "vectorbt>=0.28.0",
 
     # Logging
     "structlog>=24.0.0",
@@ -45,6 +46,7 @@ dependencies = [
 [project.optional-dependencies]
 mt5 = ["MetaTrader5>=5.0.45"]
 postgres = ["asyncpg>=0.29.0"]
+redis = ["redis>=5.0.0"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -62,6 +64,14 @@ packages = ["src/alphaloop"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.coverage.report]
+fail_under = 80
+exclude_lines = ["if TYPE_CHECKING:", "pragma: no cover"]
+
+[tool.coverage.run]
+source = ["src/alphaloop"]
+omit = ["*/migrations/*", "*/webui/static/*"]
 
 [tool.mypy]
 python_version = "3.11"

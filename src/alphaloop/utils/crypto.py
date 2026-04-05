@@ -2,7 +2,26 @@
 
 import base64
 import hashlib
+import logging
+import os
 import secrets
+import uuid
+
+logger = logging.getLogger(__name__)
+
+_CRYPTO_AVAILABLE: bool | None = None
+
+
+def _check_crypto() -> bool:
+    """Check if cryptography package is available."""
+    global _CRYPTO_AVAILABLE
+    if _CRYPTO_AVAILABLE is None:
+        try:
+            from cryptography.fernet import Fernet  # noqa: F401
+            _CRYPTO_AVAILABLE = True
+        except ImportError:
+            _CRYPTO_AVAILABLE = False
+    return _CRYPTO_AVAILABLE
 
 
 def generate_key() -> str:
@@ -33,6 +52,15 @@ def is_sensitive(key: str) -> bool:
     return any(key.upper().endswith(s) for s in _SENSITIVE_SUFFIXES)
 
 
+def _get_machine_id() -> str:
+    """Get a stable machine identifier. Falls back to hostname if UUID unavailable."""
+    try:
+        return str(uuid.getnode())
+    except Exception:
+        import socket
+        return socket.gethostname()
+
+
 def _derive_key() -> bytes:
     """Derive a 32-byte Fernet key from machine-local seed (v2-compatible)."""
     import socket
@@ -43,16 +71,41 @@ def _derive_key() -> bytes:
     return base64.urlsafe_b64encode(raw)
 
 
+
+def _is_production() -> bool:
+    """Check if running in production environment."""
+    return os.environ.get("ENVIRONMENT", "dev").lower() in ("production", "prod")
+
+
 def encrypt_value(plaintext: str) -> str:
-    """Encrypt a value for storage. Returns 'enc::...' prefixed ciphertext."""
+    """Encrypt a value for storage. Returns 'enc::...' prefixed ciphertext.
+
+    In production mode, raises RuntimeError if cryptography is unavailable.
+    """
+    if not _check_crypto():
+        if _is_production():
+            logger.critical(
+                "[crypto] FATAL: cryptography package not installed in PRODUCTION mode. "
+                "Sensitive data CANNOT be stored securely. Install with: pip install cryptography"
+            )
+            raise RuntimeError(
+                "cryptography package required in production mode for secret storage"
+            )
+        logger.warning(
+            "[crypto] cryptography package not installed — storing value as PLAINTEXT. "
+            "Install cryptography for encrypted storage."
+        )
+        return plaintext
+
     try:
         from cryptography.fernet import Fernet
         f = Fernet(_derive_key())
         ct = f.encrypt(plaintext.encode()).decode()
         return f"{_ENC_PREFIX}{ct}"
-    except ImportError:
-        return plaintext
-    except Exception:
+    except Exception as e:
+        logger.error("[crypto] Encryption failed: %s", e)
+        if _is_production():
+            raise RuntimeError(f"Encryption failed in production mode: {e}") from e
         return plaintext
 
 
@@ -60,12 +113,23 @@ def decrypt_value(stored: str) -> str:
     """Decrypt a value if it has the enc:: prefix. Returns plaintext."""
     if not stored or not stored.startswith(_ENC_PREFIX):
         return stored
+
+    if not _check_crypto():
+        if _is_production():
+            logger.critical(
+                "[crypto] FATAL: Cannot decrypt in PRODUCTION without cryptography package"
+            )
+            raise RuntimeError(
+                "cryptography package required in production mode for secret decryption"
+            )
+        logger.warning("[crypto] Cannot decrypt without cryptography — returning raw ciphertext")
+        return stored[len(_ENC_PREFIX):]
+
     try:
         from cryptography.fernet import Fernet
         f = Fernet(_derive_key())
         ct = stored[len(_ENC_PREFIX):]
         return f.decrypt(ct.encode()).decode()
-    except ImportError:
-        return stored[len(_ENC_PREFIX):]
-    except Exception:
+    except Exception as e:
+        logger.error("[crypto] Decryption failed: %s", e)
         return stored

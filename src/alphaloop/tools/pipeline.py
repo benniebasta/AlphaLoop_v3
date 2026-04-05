@@ -1,147 +1,77 @@
 """
 tools/pipeline.py
-Async FilterPipeline — runs tools in sequence with short-circuit on block.
+FeaturePipeline — runs all tools via extract_features() for algo_ai scoring.
 
-Pipeline order follows the trading decision flow:
-  1. session_filter   — Is this a tradeable session?
-  2. news_filter      — High-impact news blackout?
-  3. volatility_filter — ATR within range?
-  4. dxy_filter       — USD direction conflict?
-  5. sentiment_filter  — Macro sentiment conflict?
-  6. risk_filter      — Risk limits allow new trade?
-  7+ guards          — BOS, FVG, VWAP, correlation checks
-
-Short-circuit: pipeline stops on first block (passed=False with severity="block").
+The v4 institutional pipeline (PipelineOrchestrator) in
+``alphaloop.pipeline.orchestrator`` is the primary 8-stage live-trading path.
+This module only provides FeaturePipeline for algo_ai feature extraction.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Optional
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, FeatureResult
+
+_TOOL_TIMEOUT_SEC = 5.0
 
 logger = logging.getLogger(__name__)
 
 
-class FilterPipeline:
+class FeaturePipeline:
     """
-    Async pipeline that runs filter tools sequentially.
+    Async pipeline that runs ALL tools via extract_features() — no short-circuit.
 
-    - Short-circuits on first block (severity="block" and passed=False)
-    - Accumulates size_modifier as product of all tool modifiers
-    - Tracks last non-neutral bias
-    - Crash in any tool results in fail-safe block
+    Unlike the v4 PipelineOrchestrator (short-circuits on block), this pipeline:
+      - Calls timed_extract_features() on every tool
+      - Skips tools that return None (no extract_features impl)
+      - Catches per-tool exceptions without crashing the pipeline
+      - Returns list[FeatureResult] for the scoring engine
 
-    Args:
-        tools: List of BaseTool instances to run in order
-        short_circuit: Stop on first block (default True)
-        size_floor: Minimum aggregate size_modifier — below this, block trade
+    Used exclusively in algo_ai signal mode.
     """
 
-    def __init__(
-        self,
-        tools: list[BaseTool] | None = None,
-        short_circuit: bool = True,
-        size_floor: float = 0.20,
-    ) -> None:
+    def __init__(self, tools: list[BaseTool] | None = None) -> None:
         self._tools = tools or []
-        self.short_circuit = short_circuit
-        self.size_floor = size_floor
-        self._crash_counts: dict[str, int] = {}
-        self._CRASH_ALERT_THRESHOLD = 3
 
-    async def run(self, context) -> dict:
+    async def run(self, context) -> list[FeatureResult]:
         """
-        Run all tools against the given MarketContext.
+        Run all tools' extract_features() and collect results.
 
-        Returns a summary dict:
-        {
-            "allow_trade":   bool,
-            "block_reason":  str | None,
-            "blocked_by":    str | None,
-            "size_modifier": float,
-            "bias":          str,
-            "results":       list[dict],
-        }
+        Returns list of FeatureResult (only from tools that produced one).
         """
-        results: list[ToolResult] = []
-        blocked_by: Optional[str] = None
-        block_reason: Optional[str] = None
-        combined_size = 1.0
-        last_bias = "neutral"
+        results: list[FeatureResult] = []
 
         for tool in self._tools:
             try:
-                result = await tool.timed_run(context)
-                self._crash_counts[tool.name] = 0
-                logger.info(
-                    f"[filter] {result.tool_name}: passed={result.passed} "
-                    f"bias={result.bias} size_mod={result.size_modifier:.2f} "
-                    f"({result.latency_ms}ms) — {result.reason}"
+                result = await asyncio.wait_for(
+                    tool.timed_extract_features(context), timeout=_TOOL_TIMEOUT_SEC
+                )
+                if result is not None:
+                    logger.info(
+                        "[FEATURE] %s: %s (%.1fms)",
+                        result.tool_name,
+                        " ".join(f"{k}={v:.1f}" for k, v in result.features.items()),
+                        result.latency_ms,
+                    )
+                    results.append(result)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[feature-pipeline] %s timed out after %.1fs — skipping",
+                    tool.name, _TOOL_TIMEOUT_SEC,
                 )
             except Exception as e:
-                logger.exception(f"[pipeline] Tool {tool.name} crashed — fail-safe block: {e}")
-                crash_count = self._crash_counts.get(tool.name, 0) + 1
-                self._crash_counts[tool.name] = crash_count
-                if crash_count == self._CRASH_ALERT_THRESHOLD:
-                    logger.critical(
-                        f"[pipeline] ALERT: {tool.name} has crashed "
-                        f"{crash_count} consecutive times"
-                    )
-                result = ToolResult(
-                    tool_name=tool.name,
-                    passed=False,
-                    reason=f"Tool error (fail-safe block): {e}",
-                    severity="block",
+                logger.warning(
+                    "[feature-pipeline] %s crashed — skipping: %s",
+                    tool.name, e,
                 )
 
-            results.append(result)
-
-            if result.bias != "neutral":
-                last_bias = result.bias
-
-            combined_size *= result.size_modifier
-
-            if not result.passed and result.severity == "block":
-                blocked_by = result.tool_name
-                block_reason = result.reason
-                if self.short_circuit:
-                    logger.info(f"[pipeline] BLOCKED by {blocked_by}: {block_reason}")
-                    break
-
-        # Clamp aggregate size_modifier
-        combined_size = max(0.0, min(1.0, combined_size))
-
-        allow = blocked_by is None
-
-        # Block if combined modifier below floor
-        if allow and combined_size < self.size_floor:
-            allow = False
-            blocked_by = "pipeline_size_floor"
-            block_reason = (
-                f"Combined size_modifier {combined_size:.3f} below floor "
-                f"{self.size_floor} — signal quality too degraded"
-            )
-            logger.warning(f"[pipeline] BLOCKED: {block_reason}")
-
-        if allow:
-            logger.info(
-                f"[pipeline] ALLOWED | size_mod={combined_size:.2f} | bias={last_bias}"
-            )
-
-        return {
-            "allow_trade": allow,
-            "block_reason": block_reason,
-            "blocked_by": blocked_by,
-            "size_modifier": round(combined_size, 4),
-            "bias": last_bias,
-            "results": [r.model_dump() for r in results],
-        }
-
-    def get_tool(self, name: str) -> Optional[BaseTool]:
-        """Get a specific tool by name."""
-        return next((t for t in self._tools if t.name == name), None)
+        logger.info(
+            "[feature-pipeline] Collected %d feature results from %d tools",
+            len(results), len(self._tools),
+        )
+        return results
 
     @property
     def tools(self) -> list[BaseTool]:

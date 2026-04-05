@@ -59,6 +59,14 @@ class StrategyCard(BaseModel):
     stability_passed: bool = False
     stability_reasons: list[str] = Field(default_factory=list)
 
+    # Construction stats (constraint-first pipeline)
+    total_opportunities: int = 0
+    valid_constructed: int = 0
+    skipped_reasons: dict[str, int] = Field(default_factory=dict)
+    execution_rate: float = 0.0       # valid_constructed / total_opportunities
+    avg_sl_distance_pts: float = 0.0
+    avg_rr_actual: float = 0.0
+
     # Metadata
     created_at: str = ""
     backtest_bars: int = 0
@@ -88,6 +96,8 @@ def build_strategy_card(
     score: SeedScore,
     backtest_bars: int = 0,
     backtest_days: int = 0,
+    # Construction stats (from VBTBacktestResult)
+    construction_stats: dict[str, Any] | None = None,
 ) -> StrategyCard:
     """
     Construct a StrategyCard from all evaluation artifacts.
@@ -139,6 +149,9 @@ def build_strategy_card(
         "equity": score.equity_score,
     }
 
+    # Construction stats (from VBTBacktestResult)
+    cs = construction_stats or {}
+
     card = StrategyCard(
         name=name,
         seed_hash=compute_seed_hash(sorted(filters)),
@@ -155,6 +168,12 @@ def build_strategy_card(
         score_breakdown=score_breakdown,
         stability_passed=stability.passed,
         stability_reasons=stability.rejection_reasons,
+        total_opportunities=cs.get("opportunities", 0),
+        valid_constructed=cs.get("valid_constructed", 0),
+        skipped_reasons=cs.get("skipped_by_reason", {}),
+        execution_rate=cs.get("execution_rate", 0.0),
+        avg_sl_distance_pts=cs.get("avg_sl_distance_pts", 0.0),
+        avg_rr_actual=cs.get("avg_rr", 0.0),
         backtest_bars=backtest_bars,
         backtest_days=backtest_days,
         status="candidate" if stability.passed else "rejected",

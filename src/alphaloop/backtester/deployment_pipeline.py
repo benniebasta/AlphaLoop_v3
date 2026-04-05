@@ -48,9 +48,10 @@ DEFAULT_GATES: list[StageGate] = [
     StageGate(
         from_status=StrategyStatus.CANDIDATE,
         to_status=StrategyStatus.DRY_RUN,
-        min_trades=30,
-        min_sharpe=0.3,
-        min_win_rate=0.40,
+        min_trades=40,
+        min_sharpe=1.0,
+        min_win_rate=0.42,
+        max_drawdown_pct=-25.0,
     ),
     StageGate(
         from_status=StrategyStatus.DRY_RUN,
@@ -105,6 +106,8 @@ class DeploymentPipeline:
         metrics: dict[str, Any],
         cycles_completed: int = 0,
         pnl_history: list[float] | None = None,
+        holdout_result: dict[str, Any] | None = None,
+        bypass_candidate_gate: bool = False,
     ) -> dict[str, Any]:
         """
         Evaluate whether a strategy is ready for promotion.
@@ -116,6 +119,9 @@ class DeploymentPipeline:
             metrics: Current performance metrics.
             cycles_completed: Number of evaluation cycles completed.
             pnl_history: Optional trade PnL list for Monte Carlo analysis.
+            holdout_result: Walk-forward holdout validation result dict.
+                Required for DEMO → LIVE. Must contain 'sharpe' key.
+                Pass None to block promotion with a clear reason.
 
         Returns:
             dict with "eligible", "target_status", "reasons", "monte_carlo".
@@ -126,6 +132,28 @@ class DeploymentPipeline:
                 "eligible": False,
                 "target_status": None,
                 "reasons": [f"No promotion path from {current_status}"],
+            }
+
+        # Walk-forward rejection blocks ALL promotion paths regardless of metrics.
+        # The operator must re-train or manually override status before promoting.
+        if current_status == StrategyStatus.WF_REJECTED:
+            return {
+                "eligible": False,
+                "target_status": None,
+                "reasons": [
+                    "Strategy failed walk-forward gate (status=wf_rejected). "
+                    "Re-train with more data or set status=candidate manually to override."
+                ],
+            }
+
+        if (
+            current_status == StrategyStatus.CANDIDATE
+            and bypass_candidate_gate
+        ):
+            return {
+                "eligible": True,
+                "target_status": gate.to_status,
+                "reasons": [],
             }
 
         reasons: list[str] = []
@@ -161,6 +189,24 @@ class DeploymentPipeline:
             reasons.append(
                 f"Cycles {cycles_completed} < required {gate.min_cycles}"
             )
+
+        # Walk-forward holdout check (required for DEMO → LIVE)
+        if gate.to_status == StrategyStatus.LIVE:
+            if holdout_result is None:
+                reasons.append(
+                    "Walk-forward holdout not provided — required for DEMO → LIVE promotion. "
+                    "Run backtester with holdout set and pass result."
+                )
+            else:
+                holdout_sharpe = holdout_result.get("sharpe") or holdout_result.get("sharpe_ratio")
+                holdout_min = 0.3  # minimum Sharpe on holdout slice
+                if holdout_sharpe is None:
+                    reasons.append("Holdout result missing 'sharpe' field")
+                elif holdout_sharpe < holdout_min:
+                    reasons.append(
+                        f"Holdout Sharpe {holdout_sharpe:.2f} < required {holdout_min} "
+                        f"— strategy may be overfit to in-sample data"
+                    )
 
         # Monte Carlo robustness check for promotions to demo or live
         mc_result = None
@@ -210,6 +256,7 @@ class DeploymentPipeline:
         current_status: StrategyStatus,
         metrics: dict[str, Any],
         cycles_completed: int = 0,
+        bypass_candidate_gate: bool = False,
     ) -> dict[str, Any]:
         """
         Attempt to promote a strategy to the next stage.
@@ -218,6 +265,7 @@ class DeploymentPipeline:
         """
         evaluation = await self.evaluate_promotion(
             current_status, metrics, cycles_completed,
+            bypass_candidate_gate=bypass_candidate_gate,
         )
 
         if not evaluation["eligible"]:

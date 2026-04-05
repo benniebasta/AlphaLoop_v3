@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import uuid
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -72,10 +73,48 @@ class BacktestCreate(BaseModel):
     use_adx_filter: bool = False
     use_volume_filter: bool = False
     use_swing_structure: bool = False
-    signal_mode: str | None = None  # "ai" or "algorithmic" — frontend selector
+    signal_mode: str | None = None  # "algo_only" or "algo_ai"
+    # Configurable signal sources
+    signal_rules: list[dict] | None = None   # e.g. [{"source": "ema_crossover"}]
+    signal_logic: str = "AND"                # "AND" | "OR" | "MAJORITY"
+    signal_auto: bool = False                # let Optuna auto-pick sources
+
+
+def _normalize_backtest_signal_mode(raw_mode: str | None) -> str:
+    """SeedLab/backtests only emit algorithmic strategy families."""
+    mode = (raw_mode or "algo_ai").strip().lower()
+    if mode in {"algo_only", "algo_ai"}:
+        return mode
+    return "algo_ai"
+
+
+def _extract_backtest_signal_mode(plan: str | None) -> str:
+    if not plan:
+        return "algo_ai"
+    try:
+        data = json.loads(plan)
+    except (json.JSONDecodeError, TypeError):
+        return _normalize_backtest_signal_mode(plan)
+    if isinstance(data, dict):
+        return _normalize_backtest_signal_mode(data.get("signal_mode"))
+    return "algo_ai"
+
+
+def _extract_plan_field(plan: str | None, field: str, default):
+    """Extract a field from the plan JSON, falling back to default."""
+    if not plan:
+        return default
+    try:
+        data = json.loads(plan)
+        if isinstance(data, dict):
+            return data.get(field, default)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return default
 
 
 def _run_to_dict(r) -> dict:
+    plan = getattr(r, "plan", None)
     return {
         "id": r.id,
         "run_id": r.run_id,
@@ -98,6 +137,10 @@ def _run_to_dict(r) -> dict:
         "updated_at": r.updated_at.isoformat() if r.updated_at else None,
         "error_message": r.error_message,
         "is_running": bt_runner.is_running(r.run_id),
+        "signal_mode": _extract_backtest_signal_mode(plan),
+        "signal_rules": _extract_plan_field(plan, "signal_rules", [{"source": "ema_crossover"}]),
+        "signal_logic": _extract_plan_field(plan, "signal_logic", "AND"),
+        "signal_auto": _extract_plan_field(plan, "signal_auto", False),
     }
 
 
@@ -141,6 +184,8 @@ async def create_backtest(
         noun = random.choice(_NOUNS)
         name = f"{adj}-{noun}-{body.symbol}_v1"
 
+    signal_mode = _normalize_backtest_signal_mode(body.signal_mode)
+
     tools = [k.replace("use_", "") for k, v in {
         "use_session_filter": body.use_session_filter,
         "use_volatility_filter": body.use_volatility_filter,
@@ -156,10 +201,18 @@ async def create_backtest(
         "use_volume_filter": body.use_volume_filter,
         "use_swing_structure": body.use_swing_structure,
     }.items() if v]
+    signal_rules = body.signal_rules or [{"source": "ema_crossover"}]
+    plan_payload = {
+        "signal_mode": signal_mode,
+        "signal_rules": signal_rules,
+        "signal_logic": body.signal_logic,
+        "signal_auto": body.signal_auto,
+    }
     run = await repo.create(
         run_id=uuid.uuid4().hex[:12],
         symbol=body.symbol,
         name=name,
+        plan=json.dumps(plan_payload),
         days=body.days,
         timeframe=body.timeframe,
         balance=body.balance,
@@ -183,6 +236,10 @@ async def create_backtest(
             timeframe=body.timeframe,
             tools=tools,
             name=name,
+            signal_mode=signal_mode,
+            signal_rules=signal_rules,
+            signal_logic=body.signal_logic,
+            signal_auto=body.signal_auto,
         )
 
     return {"status": "ok", "backtest": _run_to_dict(run)}
@@ -231,6 +288,7 @@ async def resume_backtest(
     sf = _get_session_factory()
     if sf:
         tools = run.tools_json if isinstance(run.tools_json, list) else []
+        plan = getattr(run, "plan", None)
         await bt_runner.start_backtest(
             run_id=run.run_id,
             symbol=run.symbol,
@@ -241,6 +299,10 @@ async def resume_backtest(
             timeframe=run.timeframe or "1h",
             tools=tools,
             name=run.name or "",
+            signal_mode=_extract_backtest_signal_mode(plan),
+            signal_rules=_extract_plan_field(plan, "signal_rules", None),
+            signal_logic=_extract_plan_field(plan, "signal_logic", "AND"),
+            signal_auto=_extract_plan_field(plan, "signal_auto", False),
         )
     return {"status": "ok", "message": "Resumed"}
 

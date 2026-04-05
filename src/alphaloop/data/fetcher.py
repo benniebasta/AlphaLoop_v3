@@ -133,6 +133,19 @@ class OHLCVFetcher:
                     f"(limit: {staleness_limit}min)"
                 )
 
+        # OHLC integrity validation
+        if not df.empty:
+            from alphaloop.data.validators import validate_ohlcv
+            valid, issues = validate_ohlcv(df, symbol=self.symbol)
+            if not valid:
+                critical = [i for i in issues if "negative" in i.lower() or "empty" in i.lower() or "missing" in i.lower()]
+                if critical:
+                    raise DataFetchError(
+                        f"Critical OHLCV data issues for {self.symbol} {timeframe}: {critical}"
+                    )
+                for issue in issues:
+                    logger.warning("[fetcher] OHLCV quality issue [%s %s]: %s", self.symbol, timeframe, issue)
+
         self._cache[cache_key] = (now, df)
         return df
 
@@ -163,6 +176,10 @@ class OHLCVFetcher:
 
     def _fetch_mt5_sync(self, timeframe: str, bars: int) -> pd.DataFrame:
         import MetaTrader5 as mt5
+
+        # MT5 API is thread-local — re-initialize in this thread if needed
+        if not mt5.terminal_info():
+            mt5.initialize()
 
         tf_map = {
             "M1": mt5.TIMEFRAME_M1,

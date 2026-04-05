@@ -54,12 +54,12 @@ async def get_ai_hub(
         "models": models,
         "providers": ["gemini", "openai", "claude", "deepseek", "qwen", "xai"],
         "api_keys_configured": {
-            "gemini": bool(api_cfg.gemini_api_key),
-            "openai": bool(api_cfg.openai_api_key),
-            "claude": bool(api_cfg.claude_api_key),
-            "deepseek": bool(api_cfg.deepseek_api_key),
-            "qwen": bool(api_cfg.qwen_api_key),
-            "xai": bool(api_cfg.xai_api_key),
+            "gemini": bool(api_cfg.gemini_api_key.get_secret_value()),
+            "openai": bool(api_cfg.openai_api_key.get_secret_value()),
+            "claude": bool(api_cfg.claude_api_key.get_secret_value()),
+            "deepseek": bool(api_cfg.deepseek_api_key.get_secret_value()),
+            "qwen": bool(api_cfg.qwen_api_key.get_secret_value()),
+            "xai": bool(api_cfg.xai_api_key.get_secret_value()),
         },
     }
 
@@ -73,3 +73,33 @@ async def update_ai_hub(
     repo = SettingsRepository(session)
     await repo.set_many(body.settings)
     return {"status": "ok", "updated": list(body.settings.keys())}
+
+
+@router.get("/performance")
+async def get_model_performance() -> dict:
+    """
+    Per-model AI performance metrics — latency, error rate, call count.
+    Data is in-memory and resets on process restart.
+    """
+    try:
+        from alphaloop.ai.performance import model_performance_tracker
+        return model_performance_tracker.get_summary()
+    except Exception as e:
+        return {"models": {}, "worst_model": None, "total_calls": 0, "error": str(e)}
+
+
+@router.get("/calibration")
+async def get_calibration() -> dict:
+    """
+    AI validator calibration — Expected Calibration Error (ECE) and calibration curve.
+
+    ECE measures how well the validator's risk_score matches actual approval outcomes.
+    ECE < 0.10 = well calibrated; ECE > 0.10 = drift detected.
+    """
+    return {
+        "ece": None,
+        "n_samples": 0,
+        "calibration_curve": [],
+        "well_calibrated": None,
+        "note": "ECE calibration removed (v3 validator path deleted)",
+    }

@@ -1,0 +1,63 @@
+# AlphaLoop v3 — Docker Compose for production deployment
+version: "3.8"
+
+services:
+  # ── Web UI + API Server ────────────────────────────────────────────────────
+  webui:
+    build: .
+    container_name: alphaloop-webui
+    ports:
+      - "8090:8090"
+    environment:
+      - ENVIRONMENT=production
+      - DATABASE_URL=postgresql+asyncpg://alphaloop:${DB_PASSWORD:-changeme}@postgres:5432/alphaloop
+      - LOG_LEVEL=INFO
+      - DRY_RUN=true
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - app-data:/app/data
+      - app-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── PostgreSQL Database ────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: alphaloop-db
+    environment:
+      POSTGRES_DB: alphaloop
+      POSTGRES_USER: alphaloop
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alphaloop"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis (optional, for cross-instance state) ─────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: alphaloop-redis
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  app-data:
+  app-logs:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,21 +24,74 @@ from typing import Any
 import numpy as np
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from alphaloop.backtester.engine import BacktestEngine
 from alphaloop.backtester.params import BacktestParams
-from alphaloop.backtester.runner import make_signal_fn, _fetch_data, _log
+from alphaloop.backtester.runner import _run_vbt, _fetch_data, _log
+from alphaloop.config.assets import get_asset_config
+from alphaloop.core.constants import STRATEGY_VERSIONS_DIR
 from alphaloop.core.types import StrategyStatus
 from alphaloop.db.repositories.backtest_repo import BacktestRepository
 
 logger = logging.getLogger(__name__)
 
-STRATEGY_VERSIONS_DIR = Path("strategy_versions")
+_ADJECTIVES = [
+    "alpha", "blazing", "cosmic", "dark", "electric", "fierce", "golden",
+    "hyper", "iron", "jade", "kinetic", "lunar", "mystic", "nova", "omega",
+    "phantom", "quantum", "rapid", "shadow", "turbo", "ultra", "vortex",
+    "wild", "xenon", "zen", "atomic", "binary", "cyber", "delta", "echo",
+    "flash", "ghost", "hawk", "ice", "jet", "krypton", "laser", "matrix",
+    "neon", "orbit", "pulse", "rogue", "sonic", "titan", "volt", "warp",
+]
+
+_NOUNS = [
+    "archer", "bolt", "cobra", "dagger", "eagle", "falcon", "griffin",
+    "hunter", "impulse", "javelin", "knight", "lion", "mantis", "nexus",
+    "oracle", "panther", "quasar", "raptor", "serpent", "thunder", "viper",
+    "wolf", "blade", "comet", "drift", "forge", "glacier", "hornet",
+    "inferno", "kraken", "leopard", "meteor", "nova", "onyx", "phoenix",
+    "raven", "storm", "trident", "wraith", "zenith", "blaze", "claw",
+]
 
 
-def _compute_fingerprint(params, tools, validation, ai_models) -> str:
+def _generate_card_name(symbol: str, signal_mode: str) -> str:
+    """Generate a friendly card name when the user leaves it blank."""
+    adj = random.choice(_ADJECTIVES)
+    noun = random.choice(_NOUNS)
+    suffix = "ai" if signal_mode == "ai_signal" else signal_mode
+    return f"{adj}-{noun}-{symbol}_{suffix}"
+
+
+def _default_ai_signal_prompts(symbol: str) -> dict[str, str]:
+    """Create starter prompt instructions for a new AI_SIGNAL card."""
+    asset = get_asset_config(symbol)
+    signal_instruction = (
+        f"You are the dedicated AI signal engine for {asset.display_name} ({asset.symbol}). "
+        "Generate one high-quality trade idea only when the setup is clean and the edge is clear. "
+        "Use market structure, higher-timeframe bias, session context, news risk, and DXY/sentiment only as supporting evidence. "
+        "Return strict JSON and nothing else. If no valid setup exists, return a neutral HOLD outcome."
+    )
+    validator_instruction = (
+        f"You are the AI validator for {asset.display_name} ({asset.symbol}). "
+        "Be conservative and capital-preserving. Reject low-quality, news-exposed, overextended, or poorly structured setups. "
+        "Only approve signals with clear edge, valid risk:reward, and coherent stop-loss placement. "
+        "Return strict JSON and nothing else."
+    )
+    return {
+        "signal_instruction": signal_instruction,
+        "validator_instruction": validator_instruction,
+    }
+
+
+def _compute_fingerprint(params, tools, validation, ai_models, signal_instruction="", validator_instruction="") -> str:
     """Deterministic SHA256 hash of strategy config for change detection."""
     canonical = json.dumps(
-        {"params": params, "tools": tools, "validation": validation, "ai_models": ai_models},
+        {
+            "params": params,
+            "tools": tools,
+            "validation": validation,
+            "ai_models": ai_models,
+            "signal_instruction": signal_instruction,
+            "validator_instruction": validator_instruction,
+        },
         sort_keys=True, default=str,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
@@ -66,6 +120,12 @@ def create_strategy_version(
     ai_models: dict[str, str] | None = None,
     seed_hash: str | None = None,
     name: str = "",
+    timeframe: str = "1h",
+    days: int = 365,
+    initial_capital: float = 10000.0,
+    signal_mode: str = "algo_ai",
+    signal_instruction: str = "",
+    validator_instruction: str = "",
 ) -> dict[str, Any]:
     """
     Create a strategy version JSON file in strategy_versions/.
@@ -74,14 +134,24 @@ def create_strategy_version(
     """
     version = _next_version(symbol)
     STRATEGY_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    normalized_mode = signal_mode.strip().lower()
+    if normalized_mode == "ai_signal":
+        defaults = _default_ai_signal_prompts(symbol)
+        signal_instruction = signal_instruction or defaults["signal_instruction"]
+        validator_instruction = validator_instruction or defaults["validator_instruction"]
+
+    if not name:
+        name = _generate_card_name(symbol, normalized_mode) if normalized_mode == "ai_signal" else f"{symbol}_v{version}"
 
     # Build tool toggles
     all_tools = [
         "session_filter", "news_filter", "volatility_filter",
         "dxy_filter", "sentiment_filter", "risk_filter",
+        "ema200_filter", "macd_filter", "bollinger_filter", "adx_filter",
+        "volume_filter", "swing_structure", "tick_jump_guard", "liq_vacuum_guard",
         "bos_guard", "fvg_guard", "vwap_guard", "correlation_guard",
-        "macd_filter", "bollinger_filter", "adx_filter",
-        "volume_filter", "swing_structure",
+        "ema_crossover", "rsi_feature", "trendilo", "fast_fingers",
+        "choppiness_index", "alma_filter",
     ]
     tool_config = {t: (t in tools) for t in all_tools}
 
@@ -98,13 +168,13 @@ def create_strategy_version(
         "check_tick_jump": True,
         "check_liq_vacuum": True,
         "check_regime": True,
-        "claude_enabled": True,
+        "validation_level": "strict",
     }
 
     version_data = {
         "symbol": symbol,
         "version": version,
-        "name": name or f"{symbol}_v{version}",
+        "name": name,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
         "seed_hash": seed_hash,
@@ -119,6 +189,16 @@ def create_strategy_version(
             "rsi_ob": params.rsi_ob,
             "rsi_os": params.rsi_os,
             "risk_pct": params.risk_pct,
+            "macd_fast": params.macd_fast,
+            "macd_slow": params.macd_slow,
+            "macd_signal": params.macd_signal,
+            "bb_period": params.bb_period,
+            "bb_std_dev": round(params.bb_std_dev, 3),
+            "adx_period": params.adx_period,
+            "adx_min_threshold": round(params.adx_min_threshold, 1),
+            "volume_ma_period": params.volume_ma_period,
+            "signal_rules": list(params.signal_rules or [{"source": "ema_crossover"}]),
+            "signal_logic": params.signal_logic or "AND",
         },
         "summary": {
             "total_trades": metrics.get("total_trades", 0),
@@ -126,18 +206,26 @@ def create_strategy_version(
             "sharpe": round(metrics.get("sharpe", 0) or 0, 3),
             "max_dd_pct": round(metrics.get("max_drawdown_pct", 0) or 0, 1),
             "total_pnl": round(metrics.get("total_pnl", 0) or 0, 2),
+            "timeframe": timeframe,
+            "days": days,
+            "initial_capital": initial_capital,
         },
         "status": status,
         "tools": tool_config,
         "validation": validation_config,
         "ai_models": ai_models or {
-            "signal": "gemini-2.5-flash",
-            "validator": "claude-sonnet-4-6",
-            "research": "claude-sonnet-4-6",
-            "autolearn": "gemini-2.5-flash",
-            "fallback": "gpt-4o-mini",
+            "signal":        "gemini-2.5-flash-lite",   # ai_signal generation (cheap + fast)
+            "validator":     "claude-haiku-4-5-20251001", # gate: structured approve/reject
+            "research":      "gemini-2.5-pro",           # deep degradation analysis
+            "param_suggest": "deepseek-reasoner",        # parameter change reasoning
+            "regime":        "gemini-2.5-flash-lite",    # hourly regime classification
+            "fallback":      "grok-3-mini",              # provider-down fallback
         },
-        "signal_mode": "algo_plus_ai",
+        "signal_mode": normalized_mode,
+        "signal_instruction": signal_instruction,
+        "validator_instruction": validator_instruction,
+        "scoring_weights": {},
+        "confidence_thresholds": {},
         "fingerprint": "",  # computed below after ai_models resolved
     }
 
@@ -145,6 +233,7 @@ def create_strategy_version(
     version_data["fingerprint"] = _compute_fingerprint(
         version_data["params"], version_data["tools"],
         version_data["validation"], version_data["ai_models"],
+        version_data["signal_instruction"], version_data["validator_instruction"],
     )
 
     # Write atomically
@@ -173,6 +262,7 @@ async def train_from_card(
     max_generations: int = 5,
     session_factory: async_sessionmaker | None = None,
     timeframe: str = "1h",
+    signal_mode: str = "algo_ai",
     stop_check: Any = None,
     log_fn: Any = None,
 ) -> dict[str, Any]:
@@ -206,15 +296,27 @@ async def train_from_card(
     filters = card_dict.get("filters", [])
     base_params_dict = card_dict.get("params", {})
 
-    # Build base params from card
+    # Build base params from card (full extraction including per-source params)
     base_params = BacktestParams(
         ema_fast=base_params_dict.get("ema_fast", 21),
         ema_slow=base_params_dict.get("ema_slow", 55),
         sl_atr_mult=base_params_dict.get("sl_atr_mult", 2.0),
         tp1_rr=base_params_dict.get("tp1_rr", 2.0),
         tp2_rr=base_params_dict.get("tp2_rr", 4.0),
+        rsi_period=base_params_dict.get("rsi_period", 14),
         rsi_ob=base_params_dict.get("rsi_ob", 70.0),
         rsi_os=base_params_dict.get("rsi_os", 30.0),
+        macd_fast=base_params_dict.get("macd_fast", 12),
+        macd_slow=base_params_dict.get("macd_slow", 26),
+        macd_signal=base_params_dict.get("macd_signal", 9),
+        bb_period=base_params_dict.get("bb_period", 20),
+        bb_std_dev=base_params_dict.get("bb_std_dev", 2.0),
+        adx_period=base_params_dict.get("adx_period", 14),
+        adx_min_threshold=base_params_dict.get("adx_min_threshold", 20.0),
+        volume_ma_period=base_params_dict.get("volume_ma_period", 20),
+        risk_pct=base_params_dict.get("risk_pct", 0.01),
+        signal_rules=base_params_dict.get("signal_rules", [{"source": "ema_crossover"}]),
+        signal_logic=base_params_dict.get("signal_logic", "AND"),
     )
 
     run_id = f"train_{symbol}_{int(time.time())}"
@@ -232,7 +334,6 @@ async def train_from_card(
 
     _log_fn(f"Loaded {len(closes)} bars")
 
-    engine = BacktestEngine(session_factory=session_factory)
     best_params = base_params
     best_sharpe = -999.0
     best_result = None
@@ -241,18 +342,13 @@ async def train_from_card(
 
     # Baseline
     _log_fn("Running baseline...")
-    sig_fn = make_signal_fn(base_params, filters)
-    result = await engine.run(
-        symbol=symbol,
-        opens=opens, highs=highs, lows=lows, closes=closes,
-        timestamps=timestamps, balance=balance,
-        risk_pct=base_params.risk_pct, filters=filters,
-        signal_fn=sig_fn,
-        stop_check=stop_check,
+    result = await asyncio.to_thread(
+        _run_vbt,
+        symbol, opens, highs, lows, closes, timestamps, balance, base_params,
     )
     best_sharpe = result.sharpe or -999.0
     best_result = result
-    _log_fn(f"Baseline: {len(result.closed_trades)} trades, Sharpe={best_sharpe:.3f}")
+    _log_fn(f"Baseline: {result.trade_count} trades, Sharpe={best_sharpe:.3f}")
 
     # Optimize
     no_improve = 0
@@ -263,16 +359,13 @@ async def train_from_card(
         _log_fn(f"Generation {gen}/{max_generations}...")
 
         def run_on_train(params: BacktestParams) -> float:
-            sig_fn = make_signal_fn(params, filters)
             try:
-                r = asyncio.run(engine.run(
-                    symbol=symbol,
-                    opens=train_data["opens"], highs=train_data["highs"],
-                    lows=train_data["lows"], closes=train_data["closes"],
-                    timestamps=train_data["timestamps"], balance=balance,
-                    risk_pct=params.risk_pct, filters=filters, signal_fn=sig_fn,
-                    stop_check=stop_check,
-                ))
+                r = _run_vbt(
+                    symbol,
+                    train_data["opens"], train_data["highs"],
+                    train_data["lows"], train_data["closes"],
+                    train_data["timestamps"], balance, params,
+                )
                 return r.sharpe or -999.0
             except Exception:
                 return -999.0
@@ -293,13 +386,12 @@ async def train_from_card(
             continue
 
         # Validate
-        sig_fn_val = make_signal_fn(opt_params, filters)
-        val_result = await engine.run(
-            symbol=symbol,
-            opens=val_data["opens"], highs=val_data["highs"],
-            lows=val_data["lows"], closes=val_data["closes"],
-            timestamps=val_data["timestamps"], balance=balance,
-            risk_pct=opt_params.risk_pct, filters=filters, signal_fn=sig_fn_val,
+        val_result = await asyncio.to_thread(
+            _run_vbt,
+            symbol,
+            val_data["opens"], val_data["highs"],
+            val_data["lows"], val_data["closes"],
+            val_data["timestamps"], balance, opt_params,
         )
         gap = train_sharpe - (val_result.sharpe or -999.0)
 
@@ -309,13 +401,9 @@ async def train_from_card(
             continue
 
         # Full data confirmation
-        sig_fn_full = make_signal_fn(opt_params, filters)
-        full_result = await engine.run(
-            symbol=symbol,
-            opens=opens, highs=highs, lows=lows, closes=closes,
-            timestamps=timestamps, balance=balance,
-            risk_pct=opt_params.risk_pct, filters=filters, signal_fn=sig_fn_full,
-            stop_check=stop_check,
+        full_result = await asyncio.to_thread(
+            _run_vbt,
+            symbol, opens, highs, lows, closes, timestamps, balance, opt_params,
         )
         full_sharpe = full_result.sharpe or -999.0
 
@@ -333,21 +421,66 @@ async def train_from_card(
         return {"success": False, "error": "No valid backtest result"}
 
     metrics = {
-        "total_trades": len(best_result.closed_trades),
+        "total_trades": best_result.trade_count,
         "win_rate": best_result.win_rate or 0,
         "sharpe": best_result.sharpe or 0,
         "max_drawdown_pct": best_result.max_drawdown_pct or 0,
         "total_pnl": best_result.total_pnl or 0,
     }
 
+    # Walk-forward promotion gate (S-01) ─────────────────────────────────────
+    # Build a DataFrame for the walk-forward engine from raw arrays.
+    wf_passed = False
+    wf_result = None
+    wf_reason = "walk-forward not run"
+    try:
+        import pandas as pd
+        from alphaloop.backtester.walk_forward import run_walk_forward
+        from alphaloop.config.assets import get_asset_config as _get_ac
+
+        _ac = _get_ac(symbol)
+        ts_index = pd.to_datetime(timestamps) if timestamps else None
+        ohlcv_df = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes},
+            index=ts_index,
+        )
+
+        _log_fn("Running walk-forward gate (70% IS / 30% OOS)...")
+        wf_result = await asyncio.to_thread(
+            run_walk_forward,
+            ohlcv_df, best_params, _ac,
+            symbol=symbol,
+            log_fn=_log_fn,
+        )
+        wf_passed = wf_result.passes_gate
+        wf_reason = wf_result.gate_reason
+        _log_fn(
+            f"Walk-forward gate: {'PASSED' if wf_passed else 'FAILED'} — {wf_reason}"
+        )
+    except Exception as _wf_exc:
+        _log_fn(f"Walk-forward gate skipped (error): {_wf_exc}")
+        logger.warning("[asset_trainer] Walk-forward gate error: %s", _wf_exc)
+        # Fail-open: let candidate through if walk-forward itself errors
+        wf_passed = True
+        wf_reason = f"gate skipped (error): {_wf_exc}"
+
+    # Gate status: passed → "candidate", failed → "wf_rejected"
+    version_status = "candidate" if wf_passed else "wf_rejected"
+    if not wf_passed:
+        _log_fn(
+            f"Strategy version will be written with status='wf_rejected' — "
+            "review walk-forward results before deploying."
+        )
+
     version_data = create_strategy_version(
         symbol=symbol,
         params=best_params,
         metrics=metrics,
         tools=filters,
-        status="candidate",
+        status=version_status,
         source="asset_trainer",
         seed_hash=card_dict.get("seed_hash"),
+        signal_mode=signal_mode,
     )
 
     _log_fn(f"Created version: {symbol} v{version_data['_version']}")
@@ -358,4 +491,6 @@ async def train_from_card(
         "best_params": best_params.model_dump(),
         "best_sharpe": best_sharpe,
         "metrics": metrics,
+        "walk_forward": wf_result.summary() if wf_result else {"passed": wf_passed, "reason": wf_reason},
+        "walk_forward_passed": wf_passed,
     }

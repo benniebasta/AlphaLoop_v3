@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class BacktestParams(BaseModel):
@@ -40,6 +40,11 @@ class BacktestParams(BaseModel):
 
     # Risk
     risk_pct: float = 0.01    # 1% per trade
+
+    # Signal source configuration
+    signal_rules: list[dict] = Field(default_factory=lambda: [{"source": "ema_crossover"}])
+    signal_logic: str = "AND"   # "AND" | "OR" | "MAJORITY"
+    signal_auto: bool = False    # let Optuna auto-pick sources + logic
 
     # Bounds for optimizer (not tuned directly, used by suggest())
     max_param_change_pct: float = 0.15  # max ±15% per generation

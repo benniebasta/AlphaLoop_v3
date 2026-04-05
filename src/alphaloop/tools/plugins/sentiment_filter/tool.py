@@ -9,7 +9,7 @@ Pipeline order: FIFTH.
 
 from __future__ import annotations
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
 
 class SentimentFilter(BaseTool):
@@ -23,6 +23,7 @@ class SentimentFilter(BaseTool):
 
     name = "sentiment_filter"
     description = "Polymarket sentiment alignment — reduces size on conflict"
+    requires_direction = True
 
     async def run(self, context) -> ToolResult:
         direction = context.trade_direction.upper()
@@ -62,4 +63,38 @@ class SentimentFilter(BaseTool):
             bias=bias,
             size_modifier=size_mod,
             data=sentiment,
+        )
+
+    async def extract_features(self, context) -> FeatureResult:
+        sentiment = context.sentiment
+
+        if not sentiment:
+            return FeatureResult(
+                group="volume",
+                features={"sentiment_alignment": 50.0, "sentiment_confidence": 50.0},
+                meta={"status": "unavailable"},
+            )
+
+        bias = sentiment.get("bias", "neutral")
+        try:
+            confidence = max(0.0, min(1.0, float(sentiment.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            confidence = 0.5
+
+        # sentiment_alignment: direction-agnostic
+        # bullish=high, bearish=low, neutral=50
+        if bias == "bullish":
+            alignment = min(100.0, 50 + confidence * 50)
+        elif bias == "bearish":
+            alignment = max(0.0, 50 - confidence * 50)
+        else:
+            alignment = 50.0
+
+        return FeatureResult(
+            group="volume",
+            features={
+                "sentiment_alignment": round(alignment, 1),
+                "sentiment_confidence": round(confidence * 100, 1),
+            },
+            meta=sentiment,
         )

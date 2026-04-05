@@ -7,7 +7,7 @@ other filters pass. Must have final authority.
 
 from __future__ import annotations
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
 
 class RiskFilter(BaseTool):
@@ -36,7 +36,7 @@ class RiskFilter(BaseTool):
             )
 
         try:
-            can_open, reason = monitor.can_open_trade()
+            can_open, reason = await monitor.can_open_trade()
             status = monitor.status if hasattr(monitor, "status") else {}
 
             if not can_open:
@@ -65,3 +65,42 @@ class RiskFilter(BaseTool):
                 size_modifier=0.0,
                 data={"error": str(e)},
             )
+
+    async def extract_features(self, context) -> FeatureResult:
+        monitor = context.risk_monitor
+        status = {}
+
+        if monitor is not None:
+            try:
+                status = monitor.status if hasattr(monitor, "status") else {}
+            except Exception:
+                pass
+
+        daily_pnl_pct = float(status.get("daily_pnl_pct", 0.0))
+        daily_loss_limit = float(status.get("daily_loss_limit_pct", 3.0)) or 3.0
+        consecutive_losses = int(status.get("consecutive_losses", 0))
+        max_losses = int(status.get("max_consecutive_losses", 3)) or 3
+        open_trades = int(status.get("open_trades", 0))
+        max_trades = int(status.get("max_concurrent_trades", 3)) or 3
+        kill_switch = bool(status.get("kill_switch", False))
+
+        # risk_headroom: 100 = no risk used, 0 = at/past daily limit
+        if kill_switch:
+            risk_headroom = 0.0
+        else:
+            pnl_used = min(1.0, max(0.0, abs(min(daily_pnl_pct, 0.0)) / daily_loss_limit))
+            loss_used = min(1.0, consecutive_losses / max_losses)
+            trade_used = min(1.0, open_trades / max_trades)
+            worst = max(pnl_used, loss_used, trade_used)
+            risk_headroom = round((1.0 - worst) * 100, 1)
+
+        return FeatureResult(
+            group="volatility",
+            features={"risk_headroom": risk_headroom},
+            meta={
+                "daily_pnl_pct": daily_pnl_pct,
+                "consecutive_losses": consecutive_losses,
+                "open_trades": open_trades,
+                "kill_switch": kill_switch,
+            },
+        )

@@ -1,7 +1,8 @@
 /**
- * 🧪 SeedLab™ — Strategy Discovery Engine (renamed from Backtests)
+ * 🧪 SeedLab™ — Algo Strategy Discovery Engine
  */
 import { apiGet, apiPost, apiPatch, apiDelete } from '../api.js';
+import { playSeedLabDone } from '../sounds.js';
 
 const STATE_META = {
   pending:   { color: 'var(--amber)',  icon: '⏳', badge: 'badge-amber' },
@@ -29,6 +30,7 @@ function progressBar(gen, max, color) {
 
 function runCard(r) {
   const meta = STATE_META[r.state] || STATE_META.pending;
+  const modeLabel = r.signal_mode === 'algo_only' ? 'Algo Only' : 'Algo + AI';
   // is_running = actual asyncio task alive; state = DB state (can be stale after restart)
   const active = r.is_running;
   const staleRunning = r.state === 'running' && !r.is_running; // task lost on restart
@@ -44,7 +46,7 @@ function runCard(r) {
           <span class="bt-state-icon" style="color:${meta.color}">${meta.icon}</span>
           <div>
             <div class="bt-name">${r.name || r.run_id}</div>
-            <div class="bt-meta">${r.symbol} · ${r.timeframe || '1h'} · ${r.days}d · $${r.balance?.toLocaleString() ?? '10,000'}</div>
+            <div class="bt-meta">${r.symbol} · ${modeLabel} · ${r.timeframe || '1h'} · ${r.days}d · $${r.balance?.toLocaleString() ?? '10,000'}</div>
           </div>
         </div>
         <div class="bt-live-actions">
@@ -159,14 +161,7 @@ export async function render(container) {
   container.innerHTML = `
     <div class="page-header">
       <div class="page-title">🧪 SeedLab™</div>
-      <div class="page-subtitle">Strategy Discovery Engine — backtest, evolve, and discover winning strategies</div>
-    </div>
-
-    <!-- Signal Mode Selector -->
-    <div class="signal-mode-toggle" style="margin-bottom:16px">
-      <button class="signal-mode-btn active" data-mode="algo_plus_ai">🤖 Algorithm + AI</button>
-      <button class="signal-mode-btn" data-mode="algo_only">🔢 Algorithm Only</button>
-      <button class="signal-mode-btn" data-mode="ai_only">🧠 AI Signal Only</button>
+      <div class="page-subtitle">Backtest, evolve, and optimise algorithmic strategies</div>
     </div>
 
     <div class="section-label">New Discovery Run</div>
@@ -206,10 +201,44 @@ export async function render(container) {
           <label>Generations</label>
           <input type="number" id="bt-gens" value="3" min="1" max="100">
         </div>
+        <div class="form-group">
+          <label>Strategy Mode</label>
+          <select id="bt-signal-mode" class="field-input">
+            <option value="algo_ai" selected>Algo + AI</option>
+            <option value="algo_only">Algo Only</option>
+          </select>
+        </div>
         <div class="form-group" style="align-self:flex-end">
           <button class="btn-gradient" id="bt-start" style="width:100%">🚀 Launch Discovery</button>
         </div>
       </div>
+
+      <!-- Signal Rules Builder (full-width below the form row) -->
+      <div class="bt-signal-rules-section" style="margin-top:12px">
+        <div class="bt-tools-header" id="bt-rules-toggle" style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:6px 0">
+          <span>Signal Rules</span>
+          <span class="bt-rules-arrow" style="font-size:0.8em;color:var(--muted)">▶</span>
+        </div>
+        <div id="bt-rules-body" style="display:none;padding:8px 0 4px">
+          <div id="bt-signal-rules-list" style="display:flex;flex-direction:column;gap:6px"></div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
+            <button id="bt-add-rule" class="btn btn-sm">+ Add Rule</button>
+            <label style="display:flex;align-items:center;gap:6px;font-size:0.82rem">
+              Combine:
+              <select id="bt-signal-logic" class="field-input" style="padding:3px 6px;font-size:0.82rem">
+                <option value="AND" selected>AND — all must fire</option>
+                <option value="OR">OR — any fires</option>
+                <option value="MAJORITY">MAJORITY — &gt;50%</option>
+              </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:0.82rem">
+              <input type="checkbox" id="bt-signal-auto">
+              Let Optuna auto-pick sources
+            </label>
+          </div>
+        </div>
+      </div>
+
       <div id="bt-data-hint" style="font-size:0.72rem;color:var(--amber);padding:4px 0 0;min-height:1em"></div>
       <div class="bt-tools-section">
         <div class="bt-tools-header" id="bt-tools-toggle">
@@ -327,6 +356,157 @@ export async function render(container) {
     arrow.textContent = visible ? '▶' : '▼';
   });
 
+  // ── Signal Rules Builder ────────────────────────────────────────────────────
+
+  const SIGNAL_SOURCES = [
+    { value: 'ema_crossover',     label: 'EMA Crossover' },
+    { value: 'macd_crossover',    label: 'MACD Crossover' },
+    { value: 'rsi_reversal',      label: 'RSI Reversal' },
+    { value: 'bollinger_breakout',label: 'Bollinger Breakout' },
+    { value: 'adx_trend',         label: 'ADX Trend' },
+    { value: 'bos_confirm',       label: 'BOS Confirm' },
+  ];
+
+  const SOURCE_PARAMS = {
+    ema_crossover:     [{ id: 'ema_fast',  label: 'Fast',   def: 21, min: 3  }, { id: 'ema_slow', label: 'Slow', def: 55, min: 5 }],
+    macd_crossover:    [{ id: 'macd_fast', label: 'Fast',   def: 12, min: 2  }, { id: 'macd_slow', label: 'Slow', def: 26, min: 5 }, { id: 'macd_signal', label: 'Signal', def: 9, min: 2 }],
+    rsi_reversal:      [{ id: 'rsi_ob',    label: 'OB',     def: 70, min: 55, max: 90 }, { id: 'rsi_os', label: 'OS', def: 30, min: 10, max: 45 }],
+    bollinger_breakout:[{ id: 'bb_period', label: 'Period', def: 20, min: 5  }, { id: 'bb_std_dev', label: 'Std Dev', def: 2.0, min: 0.5, step: 0.1, float: true }],
+    adx_trend:         [{ id: 'adx_period',label: 'Period', def: 14, min: 5  }, { id: 'adx_min_threshold', label: 'Min ADX', def: 20, min: 5, max: 60 }],
+    bos_confirm:       [],
+  };
+
+  function buildRuleRow(src) {
+    const params = SOURCE_PARAMS[src] || [];
+    const paramHtml = params.map(p => `
+      <label class="rule-param" style="font-size:0.8rem;display:flex;align-items:center;gap:4px">
+        ${p.label}
+        <input type="${p.float ? 'number' : 'number'}" class="field-input rule-param-input"
+          data-param="${p.id}"
+          value="${p.def}"
+          min="${p.min ?? ''}"
+          ${p.max ? `max="${p.max}"` : ''}
+          ${p.step ? `step="${p.step}"` : ''}
+          style="width:60px;padding:3px 5px;font-size:0.8rem">
+      </label>`).join('');
+    const sourceOptions = SIGNAL_SOURCES.map(s =>
+      `<option value="${s.value}"${s.value === src ? ' selected' : ''}>${s.label}</option>`
+    ).join('');
+    return `
+      <div class="rule-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--card-bg);border-radius:6px;padding:6px 8px">
+        <select class="rule-source field-input" style="padding:3px 6px;font-size:0.82rem;width:auto">${sourceOptions}</select>
+        <span class="rule-params" style="display:flex;gap:8px;flex-wrap:wrap">${paramHtml}</span>
+        <button class="rule-remove btn btn-sm" style="margin-left:auto;padding:2px 8px;font-size:0.8rem">✕</button>
+      </div>`;
+  }
+
+  function renderRuleRows() {
+    const list = document.getElementById('bt-signal-rules-list');
+    if (!list) return;
+    if (list.children.length === 0) {
+      list.innerHTML = buildRuleRow('ema_crossover');
+      wireRuleRow(list.children[0]);
+    }
+  }
+
+  function wireRuleRow(row) {
+    row.querySelector('.rule-remove').addEventListener('click', () => {
+      row.remove();
+      if (document.getElementById('bt-signal-rules-list').children.length === 0) {
+        renderRuleRows(); // always keep at least one
+      }
+    });
+    row.querySelector('.rule-source').addEventListener('change', (e) => {
+      const newSrc = e.target.value;
+      const params = SOURCE_PARAMS[newSrc] || [];
+      const paramHtml = params.map(p => `
+        <label class="rule-param" style="font-size:0.8rem;display:flex;align-items:center;gap:4px">
+          ${p.label}
+          <input type="number" class="field-input rule-param-input"
+            data-param="${p.id}"
+            value="${p.def}"
+            min="${p.min ?? ''}"
+            ${p.max ? `max="${p.max}"` : ''}
+            ${p.step ? `step="${p.step}"` : ''}
+            style="width:60px;padding:3px 5px;font-size:0.8rem">
+        </label>`).join('');
+      row.querySelector('.rule-params').innerHTML = paramHtml;
+    });
+  }
+
+  function collectRules() {
+    const rows = document.querySelectorAll('#bt-signal-rules-list .rule-row');
+    return Array.from(rows).map(row => {
+      const src = row.querySelector('.rule-source').value;
+      const rule = { source: src };
+      row.querySelectorAll('.rule-param-input').forEach(inp => {
+        rule[inp.dataset.param] = parseFloat(inp.value) || parseInt(inp.value) || 0;
+      });
+      return rule;
+    });
+  }
+
+  // Signal Rules toggle
+  document.getElementById('bt-rules-toggle').addEventListener('click', () => {
+    const body = document.getElementById('bt-rules-body');
+    const arrow = document.querySelector('.bt-rules-arrow');
+    const visible = body.style.display !== 'none';
+    body.style.display = visible ? 'none' : 'block';
+    arrow.textContent = visible ? '▶' : '▼';
+    if (!visible) renderRuleRows(); // lazy init
+  });
+
+  document.getElementById('bt-add-rule').addEventListener('click', () => {
+    const list = document.getElementById('bt-signal-rules-list');
+    const div = document.createElement('div');
+    div.innerHTML = buildRuleRow('ema_crossover');
+    const row = div.children[0];
+    list.appendChild(row);
+    wireRuleRow(row);
+  });
+
+  // ── Asset tool preset cache (shared via window to survive Settings saves) ──
+  async function loadAssetPresets() {
+    if (window.__assetPresetsCache) return window.__assetPresetsCache;
+    try {
+      const data = await apiGet('/api/assets');
+      const map = {};
+      for (const a of (data.assets || [])) map[a.symbol] = a.tools;
+      window.__assetPresetsCache = map;
+    } catch (err) {
+      console.warn('Failed to load asset presets:', err);
+      window.__assetPresetsCache = {};
+    }
+    return window.__assetPresetsCache;
+  }
+
+  // Map from tools API key to bt-tool-* checkbox id suffix
+  const _toolIdMap = {
+    session:    'session',
+    volatility: 'volatility',
+    ema200:     'ema200',
+    bos:        'bos',
+    fvg:        'fvg',
+    tick_jump:  'tick-jump',
+    liq_vacuum: 'liq-vacuum',
+    vwap:       'vwap',
+    macd:       'macd',
+    bollinger:  'bollinger',
+    adx:        'adx',
+    volume:     'volume',
+    swing:      'swing',
+  };
+
+  async function applyAssetPreset(symbol) {
+    const presets = await loadAssetPresets();
+    const tools = presets[symbol];
+    if (!tools) return; // unknown symbol — leave checkboxes as-is
+    for (const [key, idSuffix] of Object.entries(_toolIdMap)) {
+      const cb = document.getElementById(`bt-tool-${idSuffix}`);
+      if (cb && key in tools) cb.checked = tools[key];
+    }
+  }
+
   // ── Symbol picker: load catalog + search/filter ──
   let _symbolCatalog = [];
   let _symbolGroups = [];
@@ -388,6 +568,8 @@ export async function render(container) {
     document.getElementById('symbol-selected').style.display = 'block';
     document.getElementById('bt-symbol-search').value = '';
     document.getElementById('bt-symbol-search').style.display = 'none';
+    // Apply the asset's saved filter preset (async, non-blocking)
+    applyAssetPreset(symbol);
   }
 
   // Search input events
@@ -448,34 +630,33 @@ export async function render(container) {
   // Load catalog on mount
   loadSymbolCatalog();
 
-  // Timeframe → show yfinance fallback warning if days exceed yfinance limits
-  const _yfMaxDaysMap = { '1m': 7, '5m': 60, '15m': 60, '30m': 60, '1h': 730, '1d': 9999, '1wk': 9999, '1mo': 9999 };
-  function applyDaysCap() {
+  // MT5 max history days per timeframe (100k bar hard cap)
+  const _mt5MaxDaysMap = { '1m': 69, '5m': 347, '15m': 1041, '30m': 2083, '1h': 4166, '4h': 16666, '1d': 9999, '1wk': 9999, '1mo': 9999 };
+  const _yfMaxDaysMap  = { '1m': 7,  '5m': 60,  '15m': 60,   '30m': 60,   '1h': 730,  '4h': 730,  '1d': 9999, '1wk': 9999, '1mo': 9999 };
+
+  function applyDaysCap(autoFill = false) {
     const tf = document.getElementById('bt-timeframe').value;
     const daysInput = document.getElementById('bt-days');
     const hintEl = document.getElementById('bt-data-hint');
-    daysInput.max = 730;
-    const yfMax = _yfMaxDaysMap[tf] || 730;
-    if (parseInt(daysInput.value) > yfMax && yfMax < 730) {
+    const mt5Max = _mt5MaxDaysMap[tf] || 365;
+    const yfMax  = _yfMaxDaysMap[tf]  || 730;
+    daysInput.max = mt5Max;
+    // Auto-fill the recommended MT5 max when timeframe changes
+    if (autoFill) {
+      daysInput.value = Math.min(mt5Max, 365);
+    }
+    const cur = parseInt(daysInput.value);
+    if (cur > yfMax && yfMax < mt5Max) {
       hintEl.textContent = `Without MT5: yfinance limits ${tf} to ${yfMax} days`;
     } else {
       hintEl.textContent = '';
     }
   }
-  document.getElementById('bt-timeframe').addEventListener('change', applyDaysCap);
-  document.getElementById('bt-days').addEventListener('input', applyDaysCap);
-  applyDaysCap();
+  document.getElementById('bt-timeframe').addEventListener('change', () => applyDaysCap(true));
+  document.getElementById('bt-days').addEventListener('input', () => applyDaysCap(false));
+  applyDaysCap(false);
 
   // Start button
-  // Signal mode selector
-  let selectedSignalMode = 'algo_plus_ai';
-  document.querySelectorAll('.signal-mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      selectedSignalMode = btn.dataset.mode;
-      document.querySelectorAll('.signal-mode-btn').forEach(b => b.classList.toggle('active', b === btn));
-    });
-  });
-
   document.getElementById('bt-start').addEventListener('click', async () => {
     const btn = document.getElementById('bt-start');
     btn.disabled = true; btn.textContent = 'Launching…';
@@ -486,7 +667,10 @@ export async function render(container) {
         days:                parseInt(document.getElementById('bt-days').value),
         balance:             parseFloat(document.getElementById('bt-balance').value),
         max_generations:     parseInt(document.getElementById('bt-gens').value),
-        signal_mode:         selectedSignalMode,
+        signal_mode:         document.getElementById('bt-signal-mode').value,
+        signal_rules:        collectRules(),
+        signal_logic:        document.getElementById('bt-signal-logic').value,
+        signal_auto:         document.getElementById('bt-signal-auto').checked,
         use_session_filter:  document.getElementById('bt-tool-session').checked,
         use_volatility_filter: document.getElementById('bt-tool-volatility').checked,
         use_ema200_filter:   document.getElementById('bt-tool-ema200').checked,
@@ -533,6 +717,7 @@ export async function render(container) {
           if (bt.state === 'completed' || bt.state === 'failed' || bt.state === 'paused') {
             stopLogPoll(bt.run_id);
           }
+          if (bt.state === 'completed') playSeedLabDone();
           continue;
         }
 

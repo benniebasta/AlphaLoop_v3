@@ -7,7 +7,7 @@ primary timeframe in the direction of the proposed trade.
 
 from __future__ import annotations
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
 
 class FVGGuard(BaseTool):
@@ -22,6 +22,7 @@ class FVGGuard(BaseTool):
 
     name = "fvg_guard"
     description = "Fair value gap confirmation — validates imbalance zones"
+    requires_direction = True
 
     MIN_SIZE_ATR = 0.15
 
@@ -78,5 +79,63 @@ class FVGGuard(BaseTool):
                 "fvg_top": best["top"],
                 "midpoint": best.get("midpoint"),
                 "size_atr": best.get("size_atr"),
+            },
+        )
+
+    async def extract_features(self, context) -> FeatureResult:
+        m15_ind = context.indicators.get("M15", {})
+        fvg_data = m15_ind.get("fvg")
+
+        if fvg_data is None:
+            return FeatureResult(
+                group="structure",
+                features={"fvg_presence": 50.0, "fvg_quality": 50.0},
+                meta={"status": "unavailable"},
+            )
+
+        bull_gaps = fvg_data.get("bullish", [])
+        bear_gaps = fvg_data.get("bearish", [])
+
+        # Direction-aware: score FVGs in the trade direction
+        direction = getattr(context, "trade_direction", "")
+        if direction:
+            direction = direction.upper()
+
+        if direction == "BUY":
+            gaps = bull_gaps
+        elif direction == "SELL":
+            gaps = bear_gaps
+        else:
+            gaps = bull_gaps + bear_gaps  # legacy: all gaps
+
+        if not gaps:
+            return FeatureResult(
+                group="structure",
+                features={"fvg_presence": 0.0, "fvg_quality": 0.0},
+                meta={
+                    "bullish_count": len(bull_gaps),
+                    "bearish_count": len(bear_gaps),
+                    "scored_direction": direction or "none",
+                },
+            )
+
+        # fvg_presence: weighted by count of directional gaps
+        fvg_presence = min(100.0, len(gaps) * 33.0)
+
+        # fvg_quality: best gap size in ATR terms
+        best_size = max(g.get("size_atr", 0) for g in gaps)
+        fvg_quality = min(100.0, best_size / 0.5 * 100)
+
+        return FeatureResult(
+            group="structure",
+            features={
+                "fvg_presence": round(fvg_presence, 1),
+                "fvg_quality": round(fvg_quality, 1),
+            },
+            meta={
+                "bullish_count": len(bull_gaps),
+                "bearish_count": len(bear_gaps),
+                "best_size_atr": best_size,
+                "scored_direction": direction or "none",
             },
         )

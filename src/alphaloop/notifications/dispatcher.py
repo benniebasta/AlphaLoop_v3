@@ -1,6 +1,7 @@
 """Notification dispatcher with batching and dedup."""
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections import deque
@@ -25,12 +26,12 @@ class NotificationDispatcher:
         self._queue: list[str] = []
         self._flush_interval = flush_interval_sec
         self._dedup_window = dedup_window_sec
-        self._recent_hashes: deque[tuple[float, int]] = deque(maxlen=100)
+        self._recent_hashes: deque[tuple[float, str]] = deque(maxlen=100)
         self._last_flush = time.time()
 
     async def enqueue(self, message: str) -> None:
         """Add a message to the queue, skipping duplicates."""
-        msg_hash = hash(message)
+        msg_hash = hashlib.sha256(message.encode()).hexdigest()[:16]
         now = time.time()
 
         # Check dedup

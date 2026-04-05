@@ -1,7 +1,7 @@
 """
 Backtest runner — manages background execution of backtest runs.
 
-Picks up pending backtests, runs them via BacktestEngine, and streams logs.
+Picks up pending backtests, runs them via vectorbt (construction-parity), and streams logs.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from alphaloop.backtester.engine import BacktestEngine
+from alphaloop.backtester.vbt_engine import run_vectorbt_backtest
 from alphaloop.core.types import TradeDirection
 from alphaloop.db.repositories.backtest_repo import BacktestRepository
 
@@ -302,8 +302,92 @@ def _swing_structure_simple(highs: np.ndarray, lows: np.ndarray, lookback: int =
     return "ranging"
 
 
+def _bollinger_pct_b(closes: np.ndarray, period: int, std_dev: float) -> np.ndarray:
+    """Bollinger %B array: 0 = at lower band, 1 = at upper band."""
+    out = np.full(len(closes), np.nan)
+    for idx in range(period - 1, len(closes)):
+        sl = closes[idx - period + 1:idx + 1]
+        mid = float(np.mean(sl))
+        std = float(np.std(sl))
+        if std > 0:
+            lower = mid - std_dev * std
+            upper = mid + std_dev * std
+            out[idx] = (closes[idx] - lower) / (upper - lower)
+    return out
+
+
+def _adx_arrays(
+    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (adx, plus_di, minus_di) arrays using Wilder smoothing."""
+    n = len(closes)
+    adx_out = np.full(n, np.nan)
+    plus_di_out = np.full(n, np.nan)
+    minus_di_out = np.full(n, np.nan)
+    if n < period * 2 + 2:
+        return adx_out, plus_di_out, minus_di_out
+
+    h_diff = np.diff(highs)
+    l_diff = -np.diff(lows)
+    pdm = np.where((h_diff > l_diff) & (h_diff > 0), h_diff, 0.0)
+    ndm = np.where((l_diff > h_diff) & (l_diff > 0), l_diff, 0.0)
+    tr = np.maximum(
+        highs[1:] - lows[1:],
+        np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1]))
+    )
+
+    sm_tr = np.empty(n - 1)
+    sm_pdm = np.empty(n - 1)
+    sm_ndm = np.empty(n - 1)
+    sm_tr[period - 1] = np.sum(tr[:period])
+    sm_pdm[period - 1] = np.sum(pdm[:period])
+    sm_ndm[period - 1] = np.sum(ndm[:period])
+    for j in range(period, n - 1):
+        sm_tr[j] = sm_tr[j - 1] - sm_tr[j - 1] / period + tr[j]
+        sm_pdm[j] = sm_pdm[j - 1] - sm_pdm[j - 1] / period + pdm[j]
+        sm_ndm[j] = sm_ndm[j - 1] - sm_ndm[j - 1] / period + ndm[j]
+
+    dx_arr = np.full(n - 1, np.nan)
+    for j in range(period - 1, n - 1):
+        if sm_tr[j] > 0:
+            pd_val = 100.0 * sm_pdm[j] / sm_tr[j]
+            nd_val = 100.0 * sm_ndm[j] / sm_tr[j]
+            plus_di_out[j + 1] = pd_val
+            minus_di_out[j + 1] = nd_val
+            denom = pd_val + nd_val
+            dx_arr[j] = 100.0 * abs(pd_val - nd_val) / denom if denom > 0 else 0.0
+
+    # Smooth DX into ADX using Wilder averaging
+    start = period * 2 - 1
+    if start < n - 1:
+        adx_out[start + 1] = float(np.nanmean(dx_arr[period - 1:start]))
+        for j in range(start, n - 2):
+            if not np.isnan(adx_out[j + 1]) and not np.isnan(dx_arr[j]):
+                adx_out[j + 2] = (adx_out[j + 1] * (period - 1) + dx_arr[j]) / period
+
+    return adx_out, plus_di_out, minus_di_out
+
+
+def _rolling_swing_hi_lo(
+    highs: np.ndarray, lows: np.ndarray, lookback: int = 20
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rolling prior swing high/low arrays (max/min over last `lookback` bars, excluding current)."""
+    n = len(highs)
+    sh = np.full(n, np.nan)
+    sl = np.full(n, np.nan)
+    for idx in range(lookback, n):
+        sh[idx] = float(np.max(highs[idx - lookback:idx]))
+        sl[idx] = float(np.min(lows[idx - lookback:idx]))
+    return sh, sl
+
+
 def make_signal_fn(params: BacktestParams, filters: list[str]):
-    """Create a signal function with the given tunable params and active filters."""
+    """Create a signal function with the given tunable params and active filters.
+
+    Indicators (EMA fast/slow, RSI, EMA200, MACD) are pre-computed once on the
+    full price array and cached by array id — O(n) total instead of O(n²).
+    """
+    _cache: dict = {}
 
     async def signal_fn(
         i: int,
@@ -318,47 +402,73 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
         if i < warmup:
             return None
 
-        sl_data = closes[:i + 1]
-        ema_fast = _ema(sl_data, params.ema_fast)
-        ema_slow = _ema(sl_data, params.ema_slow)
-        rsi_arr = _rsi(sl_data, params.rsi_period)
+        # Pre-compute full indicator arrays once per unique price array (O(n) total)
+        cid = id(closes)
+        if cid not in _cache:
+            c: dict = {
+                'ema_f': _ema(closes, params.ema_fast),
+                'ema_s': _ema(closes, params.ema_slow),
+                'rsi':   _rsi(closes, params.rsi_period),
+            }
+            if "ema200_filter" in filters:
+                c['ema200'] = _ema(closes, 200)
+            if "macd_filter" in filters or any(
+                r.get("source") == "macd_crossover"
+                for r in (params.signal_rules or [])
+            ):
+                mf = _ema(closes, params.macd_fast)
+                ms = _ema(closes, params.macd_slow)
+                ml = mf - ms
+                c['macd_line'] = ml
+                c['macd_sig']  = _ema_from_array(ml, params.macd_signal)
+            sources = {r.get("source") for r in (params.signal_rules or [{"source": "ema_crossover"}])}
+            if "bollinger_breakout" in sources:
+                c['bb_pct_b'] = _bollinger_pct_b(closes, params.bb_period, params.bb_std_dev)
+            if "adx_trend" in sources:
+                c['adx_arr'], c['plus_di_arr'], c['minus_di_arr'] = _adx_arrays(
+                    highs, lows, closes, params.adx_period
+                )
+            if "bos_confirm" in sources:
+                c['swing_h_arr'], c['swing_l_arr'] = _rolling_swing_hi_lo(highs, lows, lookback=20)
+            _cache[cid] = c
+        c = _cache[cid]
 
-        if np.isnan(ema_fast[-1]) or np.isnan(ema_slow[-1]):
+        ema_f = c['ema_f']
+        ema_s = c['ema_s']
+
+        if np.isnan(ema_f[i]) or np.isnan(ema_s[i]):
             return None
 
-        price = closes[i]
-        rsi_val = rsi_arr[-1]
+        # Phase 7J: Use next-bar open for entry to avoid look-ahead bias.
+        # Signal is decided at bar i close, but entry is at bar i+1 open.
+        if i + 1 >= len(opens):
+            return None  # no next bar available for entry
+        price   = opens[i + 1]
+        rsi_val = c['rsi'][i]
         atr_period = min(14, i)
         h_slice = highs[i - atr_period:i + 1]
         l_slice = lows[i - atr_period:i + 1]
         c_prev = closes[i - atr_period - 1:i] if i > atr_period else closes[max(0, i - atr_period - 1):i]
-        # Align c_prev length with h_slice/l_slice
         min_len = min(len(h_slice), len(l_slice), len(c_prev))
         h_slice = h_slice[-min_len:]
         l_slice = l_slice[-min_len:]
-        c_prev = c_prev[-min_len:]
-        tr = np.maximum(h_slice - l_slice, np.abs(h_slice - c_prev))
+        c_prev  = c_prev[-min_len:]
+        tr  = np.maximum(h_slice - l_slice, np.abs(h_slice - c_prev))
         atr = float(np.mean(tr)) if len(tr) > 0 else price * 0.01
 
-        # --- Session Filter (backtest-compatible: checks bar timestamp) ---
+        # --- Session Filter ---
         if "session_filter" in filters and hasattr(_filters, '__len__'):
             try:
                 from alphaloop.utils.time import get_session_score_for_hour
                 if timestamps is not None and i < len(timestamps):
-                    # Use actual bar timestamp to derive UTC hour
                     ts = timestamps[i]
-                    if hasattr(ts, 'hour'):
-                        bar_hour = ts.hour  # datetime object
-                    else:
-                        bar_hour = int(ts) % (24 * 3600) // 3600  # unix timestamp
+                    bar_hour = ts.hour if hasattr(ts, 'hour') else int(ts) % (24 * 3600) // 3600
                 else:
-                    # No timestamps — skip session filter rather than guess
-                    bar_hour = 12  # Assume overlap session (always passes)
-                session_score = get_session_score_for_hour(bar_hour)
-                if session_score < 0.50:
+                    bar_hour = 12
+                if get_session_score_for_hour(bar_hour) < 0.50:
                     return None
             except (ImportError, Exception):
-                pass  # fail-open if util not available
+                pass
 
         # --- Volatility Filter ---
         if "volatility_filter" in filters:
@@ -366,37 +476,83 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
             if atr_pct > 2.5 or atr_pct < 0.05:
                 return None
 
-        # Detect crossover with tunable RSI thresholds
-        is_cross_up = (ema_fast[-1] > ema_slow[-1] and ema_fast[-2] <= ema_slow[-2]
-                       and rsi_val < params.rsi_ob)
-        is_cross_down = (ema_fast[-1] < ema_slow[-1] and ema_fast[-2] >= ema_slow[-2]
-                         and rsi_val > params.rsi_os)
+        # --- Signal source dispatcher ---
+        from alphaloop.signals.conditions import (
+            check_ema_crossover, check_macd_crossover, check_rsi_reversal,
+            check_bollinger, check_adx_trend, check_bos, combine,
+        )
+        signal_rules = params.signal_rules or [{"source": "ema_crossover"}]
+        signal_logic = params.signal_logic or "AND"
 
-        if not is_cross_up and not is_cross_down:
+        rule_results: list[tuple[bool, bool]] = []
+        for rule in signal_rules:
+            src = rule.get("source", "ema_crossover")
+            if src == "ema_crossover":
+                rule_results.append(check_ema_crossover(
+                    float(ema_f[i]), float(ema_f[i - 1]),
+                    float(ema_s[i]), float(ema_s[i - 1]),
+                    rsi_val, params.rsi_ob, params.rsi_os,
+                ))
+            elif src == "macd_crossover" and "macd_line" in c:
+                hist = c["macd_line"][i] - c["macd_sig"][i]
+                hist_prev = c["macd_line"][i - 1] - c["macd_sig"][i - 1]
+                if not (np.isnan(hist) or np.isnan(hist_prev)):
+                    rule_results.append(check_macd_crossover(float(hist), float(hist_prev)))
+            elif src == "rsi_reversal":
+                rule_results.append(check_rsi_reversal(
+                    rsi_val, float(c["rsi"][i - 1]), params.rsi_ob, params.rsi_os,
+                ))
+            elif src == "bollinger_breakout" and "bb_pct_b" in c:
+                pb = c["bb_pct_b"][i]
+                if not np.isnan(pb):
+                    rule_results.append(check_bollinger(float(pb)))
+            elif src == "adx_trend" and "adx_arr" in c:
+                adx_v = c["adx_arr"][i]
+                if not np.isnan(adx_v):
+                    rule_results.append(check_adx_trend(
+                        float(adx_v),
+                        float(c["plus_di_arr"][i]),
+                        float(c["minus_di_arr"][i]),
+                        params.adx_min_threshold,
+                    ))
+            elif src == "bos_confirm" and "swing_h_arr" in c:
+                sh = c["swing_h_arr"][i]
+                sl_v = c["swing_l_arr"][i]
+                rule_results.append(check_bos(
+                    float(closes[i]),
+                    None if np.isnan(sh) else float(sh),
+                    None if np.isnan(sl_v) else float(sl_v),
+                ))
+
+        if not rule_results:
             return None
 
-        direction = "BUY" if is_cross_up else "SELL"
+        is_bull, is_bear = combine(rule_results, signal_logic)
+        if not is_bull and not is_bear:
+            return None
+
+        direction = "BUY" if is_bull else "SELL"
 
         # --- EMA200 Trend Filter ---
         if "ema200_filter" in filters:
-            ema200 = _ema200(sl_data)
-            if ema200 is not None:
-                if direction == "BUY" and price < ema200:
+            e200 = c['ema200'][i]
+            if not np.isnan(e200):
+                if direction == "BUY" and price < e200:
                     return None
-                if direction == "SELL" and price > ema200:
+                if direction == "SELL" and price > e200:
                     return None
 
-        # --- BOS Guard ---
+        # --- BOS Guard (only needs last 21 bars) ---
         if "bos_guard" in filters:
-            bos = _detect_bos_simple(highs[:i + 1], lows[:i + 1])
+            bos = _detect_bos_simple(highs[max(0, i - 21):i + 1], lows[max(0, i - 21):i + 1])
             if direction == "BUY" and bos != "bullish":
                 return None
             if direction == "SELL" and bos != "bearish":
                 return None
 
-        # --- FVG Guard ---
+        # --- FVG Guard (only needs last 21 bars) ---
         if "fvg_guard" in filters:
-            if not _has_fvg(highs[:i + 1], lows[:i + 1], direction):
+            if not _has_fvg(highs[max(0, i - 21):i + 1], lows[max(0, i - 21):i + 1], direction):
                 return None
 
         # --- Tick Jump Guard ---
@@ -409,86 +565,97 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
         if "liq_vacuum_guard" in filters:
             bar_range = highs[i] - lows[i]
             body = abs(opens[i] - closes[i])
-            if bar_range > 0:
-                body_pct = (body / bar_range) * 100
-                if atr > 0 and bar_range / atr > 2.5 and body_pct < 30:
+            if bar_range > 0 and atr > 0:
+                if bar_range / atr > 2.5 and (body / bar_range) * 100 < 30:
                     return None
 
         # --- VWAP Guard ---
         if "vwap_guard" in filters:
-            vwap_proxy = float(ema_fast[-1])
-            dist = abs(price - vwap_proxy)
+            dist = abs(price - float(ema_f[i]))
             if atr > 0 and dist / atr > 1.5:
                 return None
 
-        # --- MACD Filter ---
+        # --- MACD Filter (pre-computed) ---
         if "macd_filter" in filters and i >= params.macd_slow + params.macd_signal:
-            macd_fast_ema = _ema(sl_data, params.macd_fast)
-            macd_slow_ema = _ema(sl_data, params.macd_slow)
-            macd_line = macd_fast_ema - macd_slow_ema
-            macd_sig = _ema_from_array(macd_line[-params.macd_signal * 3:], params.macd_signal)
-            histogram = macd_line[-1] - macd_sig[-1] if len(macd_sig) > 0 else 0
+            histogram = c['macd_line'][i] - c['macd_sig'][i]
             if direction == "BUY" and histogram < 0:
                 return None
             if direction == "SELL" and histogram > 0:
                 return None
 
-        # --- Bollinger Filter ---
+        # --- Bollinger Filter (only needs bb_period bars) ---
         if "bollinger_filter" in filters and i >= params.bb_period:
             bb_slice = closes[i - params.bb_period + 1:i + 1]
             bb_mid = float(np.mean(bb_slice))
             bb_std = float(np.std(bb_slice))
-            bb_upper = bb_mid + params.bb_std_dev * bb_std
-            bb_lower = bb_mid - params.bb_std_dev * bb_std
             if bb_std > 0:
-                pct_b = (price - bb_lower) / (bb_upper - bb_lower)
-                # BUY near lower band (pct_b < 0.4), SELL near upper (pct_b > 0.6)
+                pct_b = (price - (bb_mid - params.bb_std_dev * bb_std)) / (2 * params.bb_std_dev * bb_std)
                 if direction == "BUY" and pct_b > 0.7:
                     return None
                 if direction == "SELL" and pct_b < 0.3:
                     return None
 
-        # --- ADX Filter ---
+        # --- ADX Filter (only needs adx_period*3 bars) ---
         if "adx_filter" in filters and i >= params.adx_period * 2:
-            adx_val = _adx_simple(highs[:i + 1], lows[:i + 1], closes[:i + 1], params.adx_period)
+            win = params.adx_period * 3
+            adx_val = _adx_simple(highs[max(0, i - win):i + 1], lows[max(0, i - win):i + 1],
+                                  closes[max(0, i - win):i + 1], params.adx_period)
             if adx_val < params.adx_min_threshold:
                 return None
 
-        # --- Volume Filter ---
-        if "volume_filter" in filters and hasattr(_filters, '__len__'):
-            # Volume data not available in standard backtest args;
-            # this filter is a no-op in backtests without volume data.
-            # In live trading (AlgorithmicSignalEngine), volume comes from context.
-            pass
+        # --- Volume Filter (no-op in backtest — no volume data) ---
 
-        # --- Swing Structure Filter ---
+        # --- Swing Structure Filter (only needs last 40 bars) ---
         if "swing_structure" in filters and i >= 20:
-            swing = _swing_structure_simple(highs[:i + 1], lows[:i + 1])
+            swing = _swing_structure_simple(highs[max(0, i - 40):i + 1], lows[max(0, i - 40):i + 1])
             if direction == "BUY" and swing != "bullish":
                 return None
             if direction == "SELL" and swing != "bearish":
                 return None
 
         # Build trade with tunable SL/TP multipliers
-        sl_dist = params.sl_atr_mult * atr
+        sl_dist  = params.sl_atr_mult * atr
         tp1_dist = sl_dist * params.tp1_rr
         tp2_dist = sl_dist * params.tp2_rr
 
+        setup_label = "_".join(r.get("source", "ema_crossover") for r in signal_rules)
         if direction == "BUY":
-            return (TradeDirection.BUY, price, price - sl_dist, price + tp1_dist, price + tp2_dist, "ema_cross", 0.75)
+            return (TradeDirection.BUY, price, price - sl_dist, price + tp1_dist, price + tp2_dist, setup_label, 0.75)
         else:
-            return (TradeDirection.SELL, price, price + sl_dist, price - tp1_dist, price - tp2_dist, "ema_cross", 0.75)
+            return (TradeDirection.SELL, price, price + sl_dist, price - tp1_dist, price - tp2_dist, setup_label, 0.75)
 
     return signal_fn
 
 
 async def _run_engine_in_thread(**kwargs):
-    """Run BacktestEngine.run() in a thread pool to avoid blocking the event loop.
-    Creates a fresh event loop + lightweight engine (no DB) in the thread."""
-    def _run():
-        eng = BacktestEngine()  # no session_factory — runner handles DB
-        return asyncio.run(eng.run(**kwargs))
-    return await asyncio.to_thread(_run)
+    """Legacy stub — kept to avoid NameError if referenced elsewhere."""
+    raise NotImplementedError("_run_engine_in_thread removed; use _run_vbt via asyncio.to_thread")
+
+
+def _run_vbt(
+    symbol: str,
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    timestamps: list | None,
+    balance: float,
+    params: "BacktestParams",
+    **_kwargs,  # absorb legacy kwargs (signal_fn, run_id, stop_check, filters)
+):
+    """Run vectorbt backtest from numpy arrays using TradeConstructor (construction-parity)."""
+    import pandas as pd
+    df = pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": closes,
+                        "volume": np.ones(len(closes), dtype=float)})
+    if timestamps:
+        df["time"] = pd.Series(timestamps)
+    return run_vectorbt_backtest(
+        df,
+        params.model_dump() if hasattr(params, "model_dump") else vars(params),
+        symbol=symbol,
+        balance=balance,
+        risk_pct=params.risk_pct,
+    )
 
 
 # ── Main runner ──────────────────────────────────────────────────────────────
@@ -503,6 +670,10 @@ async def start_backtest(
     timeframe: str = "1h",
     tools: list[str] | None = None,
     name: str = "",
+    signal_mode: str = "algo_ai",
+    signal_rules: list[dict] | None = None,
+    signal_logic: str = "AND",
+    signal_auto: bool = False,
 ) -> None:
     """Spawn a background task to run the backtest."""
     if run_id in _tasks and not _tasks[run_id].done():
@@ -517,7 +688,8 @@ async def start_backtest(
 
     task = asyncio.create_task(
         _run_backtest(run_id, symbol, days, balance, max_generations,
-                      session_factory, timeframe, tools or [], name=name)
+                      session_factory, timeframe, tools or [], name=name, signal_mode=signal_mode,
+                      signal_rules=signal_rules, signal_logic=signal_logic, signal_auto=signal_auto)
     )
     _tasks[run_id] = task
 
@@ -532,10 +704,17 @@ async def _run_backtest(
     timeframe: str = "1h",
     tools: list[str] | None = None,
     name: str = "",
+    signal_mode: str = "algo_ai",
+    signal_rules: list[dict] | None = None,
+    signal_logic: str = "AND",
+    signal_auto: bool = False,
 ) -> None:
     """Background coroutine that runs one backtest."""
     tools = tools or []
-    _log(run_id, f"Starting backtest: {symbol}, {days}d, ${balance:.0f}, {max_generations} gens, TF={timeframe}")
+    _log(
+        run_id,
+        f"Starting backtest: {symbol}, {days}d, ${balance:.0f}, {max_generations} gens, TF={timeframe}, mode={signal_mode}",
+    )
     if tools:
         _log(run_id, f"Active tools: {', '.join(tools)}")
 
@@ -553,21 +732,33 @@ async def _run_backtest(
         is_synthetic = run_id in _synthetic_runs
         _log(run_id, f"Loaded {len(closes)} bars" + (" [SYNTHETIC DATA]" if is_synthetic else ""), "DATA")
 
+        # Peek at checkpoint BEFORE updating DB so the generation counter
+        # is not reset to 0 when resuming a paused run.
+        d_hash = _data_hash(closes)
+        _, cp_gen_peek, _ = _load_checkpoint(run_id, d_hash)
+
         async with session_factory() as session:
             repo = BacktestRepository(session)
-            await repo.update_progress(run_id, generation=0, phase="data_loaded",
-                                       message=f"{len(closes)} bars loaded")
+            await repo.update_progress(
+                run_id,
+                generation=cp_gen_peek if cp_gen_peek > 0 else 0,
+                phase="data_loaded",
+                message=f"{len(closes)} bars loaded",
+            )
             run = await repo.get_by_run_id(run_id)
             if run:
                 run.bars_loaded = len(closes)
             await session.commit()
 
         from alphaloop.backtester.optimizer import (
-            optimize, split_data, MIN_SHARPE_IMPROVEMENT, OVERFIT_GAP_THRESHOLD,
+            optimize, split_data, MIN_SHARPE_IMPROVEMENT, OVERFIT_GAP_THRESHOLD, MIN_TRADES,
         )
 
-        engine = BacktestEngine(session_factory=session_factory)
-        base_params = BacktestParams()
+        base_params = BacktestParams(
+            signal_rules=signal_rules or [{"source": "ema_crossover"}],
+            signal_logic=signal_logic,
+            signal_auto=signal_auto,
+        )
         best_params = base_params
         best_sharpe = -999.0
         best_result = None
@@ -578,7 +769,7 @@ async def _run_backtest(
         _log(run_id, f"Split: {len(train_data['closes'])} train bars, {len(val_data['closes'])} val bars", "DATA")
 
         # ── Check for checkpoint (resume support) ────────────────────────
-        d_hash = _data_hash(closes)
+        # d_hash already computed above; _load_checkpoint is idempotent (file read)
         cp_params, cp_gen, cp_sharpe = _load_checkpoint(run_id, d_hash)
         resume_from_gen = 0
         if cp_params is not None and cp_gen > 0:
@@ -587,39 +778,27 @@ async def _run_backtest(
             resume_from_gen = cp_gen
             _log(run_id, f"Resuming from checkpoint: gen={cp_gen}, sharpe={cp_sharpe:.3f}", "CKPT")
             # Run on full data with restored params to get best_result
-            sig_fn_cp = make_signal_fn(best_params, tools)
-            best_result = await _run_engine_in_thread(
-                symbol=symbol,
-                opens=opens, highs=highs, lows=lows, closes=closes,
-                timestamps=timestamps, balance=balance,
-                risk_pct=best_params.risk_pct, filters=tools,
-                signal_fn=sig_fn_cp, run_id=f"{run_id}_resume",
-                stop_check=lambda: _stop_flags.get(run_id, False),
-            )
-            _log(run_id, f"Restored result: {len(best_result.closed_trades)} trades, "
+            best_result = await asyncio.to_thread(_run_vbt, symbol=symbol, opens=opens, highs=highs,
+                lows=lows, closes=closes, timestamps=timestamps, balance=balance, params=best_params)
+            _log(run_id, f"Restored result: {best_result.trade_count} trades, "
                          f"Sharpe={best_result.sharpe or '—'}", "STAT")
 
         if resume_from_gen == 0:
             # ── Gen 1: Baseline ──────────────────────────────────────────
             _log(run_id, f"=== Generation 1/{max_generations}: Baseline ===", "GEN")
             t0 = time.time()
-            sig_fn = make_signal_fn(base_params, tools)
-            result = await _run_engine_in_thread(
-                symbol=symbol,
-                opens=opens, highs=highs, lows=lows, closes=closes,
-                timestamps=timestamps, balance=balance,
-                risk_pct=base_params.risk_pct, filters=tools,
-                signal_fn=sig_fn, run_id=f"{run_id}_g1",
-                stop_check=lambda: _stop_flags.get(run_id, False),
-            )
+            result = await asyncio.to_thread(_run_vbt, symbol=symbol, opens=opens, highs=highs,
+                lows=lows, closes=closes, timestamps=timestamps, balance=balance, params=base_params)
             elapsed = time.time() - t0
-            s = result.summary()
             baseline_sharpe = result.sharpe or -999.0
             best_sharpe = baseline_sharpe
             best_result = result
-            _log(run_id, f"Baseline: {s['total_trades']} trades, WR={s['win_rate']:.1%}, "
-                         f"Sharpe={s['sharpe'] or '—'}, PnL=${s['total_pnl']:.2f}, "
-                         f"DD={s['max_dd_pct']:.1f}% ({elapsed:.1f}s)", "STAT")
+            _log(run_id, f"Baseline: {result.trade_count} trades, WR={result.win_rate:.1%}, "
+                         f"Sharpe={result.sharpe or '—'}, PnL=${result.total_pnl:.2f}, "
+                         f"DD={result.max_drawdown_pct:.1f}% ({elapsed:.1f}s)", "STAT")
+            if result.trade_count < MIN_TRADES:
+                _log(run_id, f"⚠ Only {result.trade_count} trades — below minimum {MIN_TRADES}. "
+                             f"Try fewer filters, a shorter timeframe, or more history days.", "WARN")
             _log(run_id, f"Params: EMA={base_params.ema_fast}/{base_params.ema_slow}, "
                          f"SL={base_params.sl_atr_mult}, TP1={base_params.tp1_rr}, TP2={base_params.tp2_rr}, "
                          f"RSI={base_params.rsi_os}-{base_params.rsi_ob}", "STAT")
@@ -630,11 +809,11 @@ async def _run_backtest(
                 repo = BacktestRepository(session)
                 await repo.update_progress(
                     run_id, generation=1, phase="baseline",
-                    message=f"Baseline: WR={s['win_rate']:.1%} Sharpe={s['sharpe'] or '—'}",
+                    message=f"Baseline: WR={result.win_rate:.1%} Sharpe={result.sharpe or '—'}",
                     best_sharpe=best_sharpe if best_sharpe > -999 else None,
                     best_wr=result.win_rate, best_pnl=result.total_pnl,
                     best_dd=result.max_drawdown_pct,
-                    best_trades=len(result.closed_trades),
+                    best_trades=result.trade_count,
                 )
                 run_obj = await repo.get_by_run_id(run_id)
                 if run_obj:
@@ -656,7 +835,7 @@ async def _run_backtest(
                         best_wr=best_result.win_rate if best_result else None,
                         best_pnl=best_result.total_pnl if best_result else None,
                         best_dd=best_result.max_drawdown_pct if best_result else None,
-                        best_trades=len(best_result.closed_trades) if best_result else None,
+                        best_trades=best_result.trade_count if best_result else None,
                     )
                     await repo.update_state(run_id, "paused",
                                             message=f"Stopped at generation {gen - 1}")
@@ -666,19 +845,20 @@ async def _run_backtest(
             _log(run_id, f"=== Generation {gen}/{max_generations}: Optimizing ===", "GEN")
 
             # Run Optuna + backtests entirely in a thread to avoid blocking the event loop.
-            # The engine's signal_fn is async but only does numpy — safe to run via asyncio.run().
             def run_on_train(params: BacktestParams) -> float:
-                """Sync: run backtest on train split inside a fresh event loop."""
-                sig_fn = make_signal_fn(params, tools)
+                """Sync: run vbt backtest on train split (runs in Optuna's thread)."""
                 try:
-                    r = asyncio.run(engine.run(
+                    r = _run_vbt(
                         symbol=symbol,
                         opens=train_data["opens"], highs=train_data["highs"],
                         lows=train_data["lows"], closes=train_data["closes"],
-                        timestamps=train_data["timestamps"], balance=balance,
-                        risk_pct=params.risk_pct, filters=tools, signal_fn=sig_fn,
-                        stop_check=lambda: _stop_flags.get(run_id, False),
-                    ))
+                        timestamps=train_data["timestamps"],
+                        balance=balance, params=params,
+                    )
+                    if r.error:
+                        return -999.0
+                    if r.trade_count < MIN_TRADES:
+                        return -999.0
                     return r.sharpe or -999.0
                 except Exception:
                     return -999.0
@@ -707,7 +887,7 @@ async def _run_backtest(
                         best_wr=best_result.win_rate if best_result else None,
                         best_pnl=best_result.total_pnl if best_result else None,
                         best_dd=best_result.max_drawdown_pct if best_result else None,
-                        best_trades=len(best_result.closed_trades) if best_result else None,
+                        best_trades=best_result.trade_count if best_result else None,
                     )
                     await repo.update_state(run_id, "paused",
                                             message=f"Stopped during gen {gen} — checkpoint at gen {gen - 1}")
@@ -718,49 +898,44 @@ async def _run_backtest(
                 no_improve_count += 1
                 _log(run_id, f"Gen {gen}: No improvement (train Sharpe={train_sharpe:.3f} vs best={best_sharpe:.3f}). "
                              f"No-improve streak: {no_improve_count}", "STAT")
-                if no_improve_count >= 2:
-                    _log(run_id, "Early stop — no improvement for 2 consecutive generations", "WARN")
+                if no_improve_count >= 3:
+                    _log(run_id, "Early stop — no improvement for 3 consecutive generations", "WARN")
                     break
             else:
                 # Validate on holdout
                 _log(run_id, f"Gen {gen}: Train Sharpe={train_sharpe:.3f} — validating on holdout...", "STAT")
-                sig_fn_val = make_signal_fn(opt_params, tools)
-                val_result = await _run_engine_in_thread(
-                    symbol=symbol,
+                val_result = await asyncio.to_thread(_run_vbt, symbol=symbol,
                     opens=val_data["opens"], highs=val_data["highs"],
                     lows=val_data["lows"], closes=val_data["closes"],
-                    timestamps=val_data["timestamps"], balance=balance,
-                    risk_pct=opt_params.risk_pct, filters=tools, signal_fn=sig_fn_val,
-                )
+                    timestamps=val_data["timestamps"], balance=balance, params=opt_params)
+                val_trades = val_result.trade_count
                 val_sharpe = val_result.sharpe or -999.0
-                gap = train_sharpe - val_sharpe
 
-                _log(run_id, f"  Validation: Sharpe={val_sharpe:.3f}, gap={gap:.3f}", "STAT")
+                # Skip overfit check if val set has too few trades — not enough data to judge
+                if val_trades < MIN_TRADES:
+                    _log(run_id, f"  Validation: only {val_trades} trades — skipping overfit check, proceeding to full-data confirm", "WARN")
+                    gap = 0.0
+                else:
+                    gap = train_sharpe - val_sharpe
+                    _log(run_id, f"  Validation: Sharpe={val_sharpe:.3f}, gap={gap:.3f} ({val_trades} trades)", "STAT")
 
                 if gap > OVERFIT_GAP_THRESHOLD:
                     _log(run_id, f"  OVERFIT DETECTED (gap {gap:.3f} > {OVERFIT_GAP_THRESHOLD}) — skipping", "WARN")
                     no_improve_count += 1
                 else:
                     # Run on full data to confirm
-                    sig_fn_full = make_signal_fn(opt_params, tools)
-                    full_result = await _run_engine_in_thread(
-                        symbol=symbol,
+                    full_result = await asyncio.to_thread(_run_vbt, symbol=symbol,
                         opens=opens, highs=highs, lows=lows, closes=closes,
-                        timestamps=timestamps, balance=balance,
-                        risk_pct=opt_params.risk_pct, filters=tools,
-                        signal_fn=sig_fn_full, run_id=f"{run_id}_g{gen}",
-                        stop_check=lambda: _stop_flags.get(run_id, False),
-                    )
+                        timestamps=timestamps, balance=balance, params=opt_params)
                     full_sharpe = full_result.sharpe or -999.0
-                    fs = full_result.summary()
 
                     if full_sharpe > best_sharpe + MIN_SHARPE_IMPROVEMENT:
                         best_sharpe = full_sharpe
                         best_params = opt_params
                         best_result = full_result
                         no_improve_count = 0
-                        _log(run_id, f"  ACCEPTED: {fs['total_trades']} trades, WR={fs['win_rate']:.1%}, "
-                                     f"Sharpe={fs['sharpe'] or '—'}, PnL=${fs['total_pnl']:.2f}", "STAT")
+                        _log(run_id, f"  ACCEPTED: {full_result.trade_count} trades, WR={full_result.win_rate:.1%}, "
+                                     f"Sharpe={full_result.sharpe or '—'}, PnL=${full_result.total_pnl:.2f}", "STAT")
                         _log(run_id, f"  Params: EMA={opt_params.ema_fast}/{opt_params.ema_slow}, "
                                      f"SL={opt_params.sl_atr_mult}, TP1={opt_params.tp1_rr}, "
                                      f"TP2={opt_params.tp2_rr}, RSI={opt_params.rsi_os}-{opt_params.rsi_ob}", "STAT")
@@ -781,7 +956,7 @@ async def _run_backtest(
                     best_wr=best_result.win_rate if best_result else None,
                     best_pnl=best_result.total_pnl if best_result else None,
                     best_dd=best_result.max_drawdown_pct if best_result else None,
-                    best_trades=len(best_result.closed_trades) if best_result else None,
+                    best_trades=best_result.trade_count if best_result else None,
                 )
                 run_obj = await repo.get_by_run_id(run_id)
                 if run_obj:
@@ -792,9 +967,8 @@ async def _run_backtest(
         _log(run_id, "=" * 50, "GEN")
         _log(run_id, "Backtest completed!", "GEN")
         if best_result:
-            s = best_result.summary()
-            _log(run_id, f"Best: {s['total_trades']} trades, WR={s['win_rate']:.1%}, "
-                         f"Sharpe={s['sharpe'] or '—'}, PnL=${s['total_pnl']:.2f}", "STAT")
+            _log(run_id, f"Best: {best_result.trade_count} trades, WR={best_result.win_rate:.1%}, "
+                         f"Sharpe={best_result.sharpe or '—'}, PnL=${best_result.total_pnl:.2f}", "STAT")
             _log(run_id, f"Best params: EMA={best_params.ema_fast}/{best_params.ema_slow}, "
                          f"SL={best_params.sl_atr_mult}, TP1={best_params.tp1_rr}, "
                          f"TP2={best_params.tp2_rr}, RSI={best_params.rsi_os}-{best_params.rsi_ob}", "STAT")
@@ -802,23 +976,47 @@ async def _run_backtest(
             # Auto-create strategy version file from best result
             try:
                 from alphaloop.backtester.asset_trainer import create_strategy_version
+                from alphaloop.backtester.deployment_pipeline import DEFAULT_GATES
+                from alphaloop.core.types import StrategyStatus
                 metrics = {
-                    "total_trades": len(best_result.closed_trades),
+                    "total_trades": best_result.trade_count,
                     "win_rate": best_result.win_rate or 0,
                     "sharpe": best_result.sharpe or 0,
                     "max_drawdown_pct": best_result.max_drawdown_pct or 0,
                     "total_pnl": best_result.total_pnl or 0,
                 }
+
+                # Check if it meets the candidate→dry_run gate; retire immediately if not
+                gate = next((g for g in DEFAULT_GATES if g.from_status == StrategyStatus.CANDIDATE), None)
+                fails = []
+                if gate:
+                    if metrics["total_trades"] < gate.min_trades:
+                        fails.append(f"trades {metrics['total_trades']} < {gate.min_trades}")
+                    if gate.min_sharpe is not None and metrics["sharpe"] < gate.min_sharpe:
+                        fails.append(f"sharpe {metrics['sharpe']:.2f} < {gate.min_sharpe}")
+                    if gate.min_win_rate is not None and metrics["win_rate"] < gate.min_win_rate:
+                        fails.append(f"WR {metrics['win_rate']:.1%} < {gate.min_win_rate:.1%}")
+                    if gate.max_drawdown_pct is not None and metrics["max_drawdown_pct"] < gate.max_drawdown_pct:
+                        fails.append(f"DD {metrics['max_drawdown_pct']:.1f}% < {gate.max_drawdown_pct:.1f}%")
+
+                initial_status = "retired" if fails else "candidate"
+                if fails:
+                    _log(run_id, f"⚠ Strategy below promotion threshold — auto-retiring ({', '.join(fails)})", "WARN")
+
                 version_data = create_strategy_version(
                     symbol=symbol,
                     params=best_params,
                     metrics=metrics,
                     tools=tools,
-                    status="candidate",
+                    status=initial_status,
                     source="backtest_runner",
                     name=name or run_id,
+                    timeframe=timeframe,
+                    days=days,
+                    initial_capital=balance,
+                    signal_mode=signal_mode,
                 )
-                _log(run_id, f"Strategy version created: {symbol} v{version_data['_version']}")
+                _log(run_id, f"Strategy version created: {symbol} v{version_data['_version']} [{initial_status}]")
             except Exception as ve:
                 _log(run_id, f"Could not create strategy version: {ve}", "WARN")
                 logger.warning("Strategy version creation failed: %s", ve, exc_info=True)
@@ -878,6 +1076,16 @@ async def _fetch_data_mt5(
     except ImportError:
         return None
 
+    # Hard cap: MT5 copy_rates_range tops out at ~100k bars per call
+    _MT5_MAX_DAYS: dict[str, int] = {
+        "1m": 69, "5m": 347, "15m": 1041, "30m": 2083,
+        "1h": 4166, "4h": 16666, "1d": 99999, "1wk": 99999, "1mo": 99999,
+    }
+    max_days = _MT5_MAX_DAYS.get(timeframe, 365)
+    if days > max_days:
+        _log(run_id, f"MT5: capping {days}d → {max_days}d for {timeframe} (100k bar limit)", "WARN")
+        days = max_days
+
     _log(run_id, f"Trying MT5 for {symbol} ({days}d, {timeframe})...", "DATA")
 
     tf_map = {
@@ -892,13 +1100,8 @@ async def _fetch_data_mt5(
         _log(run_id, f"MT5: unsupported timeframe '{timeframe}'", "WARN")
         return None
 
-    # Estimate bars needed
-    tf_minutes = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440, "1wk": 10080, "1mo": 43200}
-    minutes_per_bar = tf_minutes.get(timeframe, 60)
-    bars_needed = int((days * 24 * 60) / minutes_per_bar)
-    bars_needed = max(bars_needed, 200)
-
     def _mt5_fetch():
+        from datetime import timedelta
         # Auto-connect: try stored broker credentials, then bare init
         init_ok = False
         try:
@@ -910,8 +1113,8 @@ async def _fetch_data_mt5(
                 kwargs["server"] = broker.server
             if broker.login:
                 kwargs["login"] = broker.login
-            if broker.password:
-                kwargs["password"] = broker.password
+            if broker.password.get_secret_value():
+                kwargs["password"] = broker.password.get_secret_value()
             if broker.terminal_path:
                 kwargs["path"] = broker.terminal_path
             if kwargs:
@@ -922,12 +1125,20 @@ async def _fetch_data_mt5(
             # Fallback: bare init (uses default MT5 terminal)
             init_ok = mt5.initialize()
         if not init_ok:
+            _log(run_id, f"MT5 init failed: {mt5.last_error()}", "WARN")
             return None
+        date_to = datetime.now(timezone.utc)
+        date_from = date_to - timedelta(days=days)
         # Try the symbol as-is first, then with 'm' suffix (broker convention)
+        tried = []
         for sym in [symbol, symbol + "m", symbol.rstrip("m")]:
-            rates = mt5.copy_rates_from_pos(sym, mt5_tf, 0, bars_needed)
+            if sym in tried:
+                continue
+            tried.append(sym)
+            rates = mt5.copy_rates_range(sym, mt5_tf, date_from, date_to)
             if rates is not None and len(rates) > 0:
                 return rates
+            _log(run_id, f"MT5: copy_rates_range({sym!r}) returned None — {mt5.last_error()}", "WARN")
         return None
 
     try:
@@ -951,6 +1162,17 @@ async def _fetch_data_mt5(
     timestamps = [dt.to_pydatetime() for dt in df["time"]]
 
     _log(run_id, f"Loaded {len(closes)} bars from MT5 ({timestamps[0].date()} to {timestamps[-1].date()})", "DATA")
+
+    if len(timestamps) >= 2:
+        actual_days = (timestamps[-1] - timestamps[0]).days
+        if actual_days > days * 1.1:
+            _log(
+                run_id,
+                f"MT5 date range mismatch: requested {days}d but got {actual_days}d "
+                f"({timestamps[0].date()} to {timestamps[-1].date()}) — terminal history may be incomplete.",
+                "WARN",
+            )
+
     return opens, highs, lows, closes, timestamps
 
 

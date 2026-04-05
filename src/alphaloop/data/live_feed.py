@@ -31,8 +31,11 @@ class LiveFeed:
     """
     Provides real-time price data for one or more symbols.
 
-    Caches the last tick per symbol and updates periodically.
-    The Live page polls this instead of hitting yfinance directly.
+    v3.1: When MT5 is available, uses TickAggregator (100ms polling via
+    background thread) instead of the 5s async sleep loop for lower latency.
+    Falls back to 5s yfinance polling when MT5 is unavailable.
+
+    Caches the last tick per symbol. The Live page polls this.
     """
 
     def __init__(self, poll_interval: float = 5.0) -> None:
@@ -40,6 +43,7 @@ class LiveFeed:
         self._ticks: dict[str, TickData] = {}
         self._running = False
         self._symbols: set[str] = set()
+        self._tick_aggregator = None  # TickAggregator instance if MT5 available
 
     def subscribe(self, symbol: str) -> None:
         self._symbols.add(symbol)
@@ -63,15 +67,56 @@ class LiveFeed:
         }
 
     async def start(self) -> None:
-        """Start the polling loop."""
+        """
+        Start the feed.
+
+        Attempts to use TickAggregator (MT5, 100ms) for lower latency.
+        Falls back to 5s yfinance polling if MT5 unavailable.
+        """
         self._running = True
-        logger.info("LiveFeed started for %d symbols", len(self._symbols))
+        logger.info("LiveFeed starting for %d symbols", len(self._symbols))
+
+        # Try to start high-frequency MT5 aggregator
+        try:
+            from alphaloop.data.tick_aggregator import TickAggregator
+            loop = asyncio.get_event_loop()
+            agg = TickAggregator(
+                symbols=list(self._symbols),
+                poll_interval_ms=100,
+            )
+            if await agg.start(loop):
+                self._tick_aggregator = agg
+                logger.info("LiveFeed: using TickAggregator (100ms MT5 polling)")
+                await self._run_aggregator_loop()
+                return
+        except (ImportError, Exception) as e:
+            logger.debug("LiveFeed: TickAggregator unavailable (%s) — using yfinance fallback", e)
+
+        # Fallback: 5s polling loop
+        logger.info("LiveFeed: using 5s yfinance polling")
         while self._running:
             await self._poll_all()
             await asyncio.sleep(self._poll_interval)
 
+    async def _run_aggregator_loop(self) -> None:
+        """Consumer loop for TickAggregator — drains the queue."""
+        while self._running and self._tick_aggregator and self._tick_aggregator.is_running:
+            try:
+                tick = await self._tick_aggregator.get_tick(timeout=1.0)
+                if tick:
+                    self._ticks[tick.symbol] = tick
+            except Exception as e:
+                logger.debug("[live_feed] Aggregator consume error: %s", e)
+        # Aggregator stopped — clean up
+        if self._tick_aggregator:
+            self._tick_aggregator.stop()
+            self._tick_aggregator = None
+
     def stop(self) -> None:
         self._running = False
+        if self._tick_aggregator:
+            self._tick_aggregator.stop()
+            self._tick_aggregator = None
 
     async def _poll_all(self) -> None:
         """Poll all subscribed symbols."""

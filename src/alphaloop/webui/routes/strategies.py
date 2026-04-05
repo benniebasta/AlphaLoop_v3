@@ -13,15 +13,35 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphaloop.backtester.asset_trainer import create_strategy_version
+from alphaloop.backtester.params import BacktestParams
+from alphaloop.core.constants import STRATEGY_VERSIONS_DIR
+from alphaloop.db.models.instance import RunningInstance
+from alphaloop.db.repositories.settings_repo import SettingsRepository
+from alphaloop.trading.strategy_loader import normalize_signal_mode
 from alphaloop.webui.deps import get_db_session
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
-STRATEGY_VERSIONS_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "strategy_versions"
+ALL_SIGNAL_MODES = {"algo_only", "algo_ai", "ai_signal"}
+LEGACY_SIGNAL_MODES = {"algo_only", "algo_ai"}
+DISCOVERY_SIGNAL_MODE = "ai_signal"
+DISCOVERY_SOURCES = {"ai_signal_discovery", "ui_ai_signal_card"}
+PROMOTION_GATE_KEYS = {
+    "algo_only": "PROMOTION_CANDIDATE_GATE_ALGO_ONLY",
+    "algo_ai": "PROMOTION_CANDIDATE_GATE_ALGO_AI",
+    "ai_signal": "PROMOTION_CANDIDATE_GATE_AI_SIGNAL",
+}
+PROMOTION_GATE_DEFAULTS = {
+    "algo_only": True,
+    "algo_ai": True,
+    "ai_signal": False,
+}
 
 
 class PromoteRequest(BaseModel):
@@ -33,6 +53,203 @@ class CanaryRequest(BaseModel):
     duration_hours: int = 24
 
 
+class CreateAISignalCardRequest(BaseModel):
+    symbol: str
+    name: str | None = None
+    signal_instruction: str | None = None
+    validator_instruction: str | None = None
+    source: str | None = None
+
+
+class UpdateStrategyRequest(BaseModel):
+    name: str | None = None
+    status: str | None = None
+    signal_mode: str | None = None
+    source: str | None = None
+    params: dict | None = None
+    tools: dict | None = None
+    validation: dict | None = None
+    ai_models: dict | None = None
+    signal_instruction: str | None = None
+    validator_instruction: str | None = None
+    scoring_weights: dict | None = None
+    confidence_thresholds: dict | None = None
+
+
+def _strict_signal_mode(raw_mode: str | None) -> str | None:
+    mode = (raw_mode or "").strip().lower()
+    return mode if mode in ALL_SIGNAL_MODES else None
+
+
+def _parse_signal_mode_filter(raw: str | None) -> set[str] | None:
+    if not raw:
+        return None
+    modes: set[str] = set()
+    for part in raw.split(","):
+        mode = _strict_signal_mode(part)
+        if mode:
+            modes.add(mode)
+    return modes or None
+
+
+def _resolve_update_source(body_source: str | None, existing_source: str | None) -> str:
+    return (body_source or existing_source or "").strip().lower()
+
+
+def _validate_params(params: dict) -> None:
+    """
+    Validate strategy params against BacktestParams schema.
+    Only validates known fields — unknown keys are passed through (plugin extensions).
+    Raises HTTPException(422) on type/bounds violations.
+    """
+    known_fields = BacktestParams.model_fields
+    errors: list[str] = []
+    for key, val in params.items():
+        if key not in known_fields:
+            continue  # allow extension keys
+        field_info = known_fields[key]
+        # Coerce and validate type
+        try:
+            # Use pydantic to validate just this field
+            BacktestParams(**{key: val})
+        except Exception as exc:
+            errors.append(f"params.{key}: {exc}")
+    if errors:
+        raise HTTPException(422, f"Invalid params: {'; '.join(errors)}")
+
+
+_VALID_VALIDATION_LEVELS = {"strict", "standard", "algo_only"}
+
+
+def _validate_validation_cfg(validation: dict) -> None:
+    """Validate key thresholds in the validation config block."""
+    errors: list[str] = []
+    mc = validation.get("min_confidence")
+    if mc is not None:
+        try:
+            mc = float(mc)
+            if not (0.0 <= mc <= 1.0):
+                errors.append(f"validation.min_confidence must be 0.0–1.0, got {mc}")
+        except (ValueError, TypeError):
+            errors.append(f"validation.min_confidence must be a float, got {mc!r}")
+    rr = validation.get("min_rr")
+    if rr is not None:
+        try:
+            rr = float(rr)
+            if rr <= 0:
+                errors.append(f"validation.min_rr must be > 0, got {rr}")
+        except (ValueError, TypeError):
+            errors.append(f"validation.min_rr must be a float, got {rr!r}")
+    vl = validation.get("validation_level")
+    if vl is not None:
+        if str(vl).strip().lower() not in _VALID_VALIDATION_LEVELS:
+            errors.append(
+                f"validation.validation_level must be one of "
+                f"{sorted(_VALID_VALIDATION_LEVELS)}, got {vl!r}"
+            )
+    if errors:
+        raise HTTPException(422, f"Invalid validation config: {'; '.join(errors)}")
+
+
+def _parse_bool_setting(raw: str | None, default: bool) -> bool:
+    value = (raw or "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _validate_signal_mode_for_source(signal_mode: str, source: str) -> None:
+    if signal_mode not in ALL_SIGNAL_MODES:
+        raise HTTPException(400, f"Unsupported signal_mode '{signal_mode}'")
+
+    if signal_mode == DISCOVERY_SIGNAL_MODE and source not in DISCOVERY_SOURCES:
+        raise HTTPException(
+            400,
+            "ai_signal is only allowed from AI Signal Discovery",
+        )
+
+    if signal_mode in LEGACY_SIGNAL_MODES and source in DISCOVERY_SOURCES:
+        raise HTTPException(
+            400,
+            "AI Signal Discovery cards must stay in ai_signal mode",
+        )
+
+
+async def _candidate_gate_bypass(
+    repo: SettingsRepository,
+    source: str | None,
+    signal_mode: str | None,
+) -> bool:
+    # All strategies go through the promotion gate regardless of source.
+    # Removed previous bypass for ai_signal_discovery sources (H-12 audit fix).
+    mode = normalize_signal_mode(signal_mode)
+    key = PROMOTION_GATE_KEYS.get(mode)
+    if key is None:
+        return False
+    default_enabled = PROMOTION_GATE_DEFAULTS.get(mode, False)
+    enabled = _parse_bool_setting(
+        await repo.get(key, str(default_enabled).lower()),
+        default_enabled,
+    )
+    return not enabled
+
+
+def _active_strategy_payload(data: dict) -> dict:
+    return {
+        "symbol": data.get("symbol", ""),
+        "version": data.get("version", 0),
+        "name": data.get("name", ""),
+        "status": data.get("status", ""),
+        "params": data.get("params", {}),
+        "tools": data.get("tools", {}),
+        "validation": data.get("validation", {}),
+        "ai_models": data.get("ai_models", {}),
+        "signal_instruction": data.get("signal_instruction", ""),
+        "validator_instruction": data.get("validator_instruction", ""),
+        "signal_mode": normalize_signal_mode(data.get("signal_mode")),
+        "summary": data.get("summary", {}),
+        "scoring_weights": data.get("scoring_weights", {}),
+        "confidence_thresholds": data.get("confidence_thresholds", {}),
+    }
+
+
+async def _sync_active_strategy_settings(
+    session: AsyncSession,
+    data: dict,
+) -> None:
+    """
+    Keep active runtime settings aligned when a strategy file is edited.
+
+    We only update runtime bindings that already point at the same
+    symbol/version so unrelated active strategies stay untouched.
+    """
+    payload = json.dumps(_active_strategy_payload(data))
+    symbol = data.get("symbol", "")
+    version = data.get("version", 0)
+    repo = SettingsRepository(session)
+
+    async def _maybe_update(key: str) -> None:
+        raw = await repo.get(key)
+        if not raw:
+            return
+        try:
+            current = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if current.get("symbol") == symbol and int(current.get("version", -1)) == int(version):
+            await repo.set(key, payload)
+
+    await _maybe_update(f"active_strategy_{symbol}")
+
+    result = await session.execute(
+        select(RunningInstance.instance_id).where(RunningInstance.symbol == symbol)
+    )
+    for instance_id in result.scalars():
+        await _maybe_update(f"active_strategy_{instance_id}")
+
+
 def _load_all_versions() -> list[dict]:
     """Load all strategy version JSONs."""
     if not STRATEGY_VERSIONS_DIR.exists():
@@ -41,6 +258,7 @@ def _load_all_versions() -> list[dict]:
     for f in sorted(STRATEGY_VERSIONS_DIR.glob("*.json"), reverse=True):
         try:
             data = json.loads(f.read_text())
+            data["signal_mode"] = normalize_signal_mode(data.get("signal_mode"))
             data["_path"] = str(f)
             versions.append(data)
         except (json.JSONDecodeError, OSError):
@@ -55,6 +273,7 @@ def _load_version(symbol: str, version: int) -> dict | None:
         return None
     try:
         data = json.loads(path.read_text())
+        data["signal_mode"] = normalize_signal_mode(data.get("signal_mode"))
         data["_path"] = str(path)
         return data
     except (json.JSONDecodeError, OSError):
@@ -80,6 +299,7 @@ def _save_version(data: dict) -> None:
 async def list_strategies(
     symbol: str | None = Query(None),
     status: str | None = Query(None),
+    signal_mode: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict:
     """List all strategy versions, optionally filtered by symbol/status."""
@@ -88,6 +308,14 @@ async def list_strategies(
         versions = [v for v in versions if v.get("symbol") == symbol]
     if status:
         versions = [v for v in versions if v.get("status") == status]
+    signal_modes = _parse_signal_mode_filter(signal_mode)
+    if signal_mode and signal_modes is None:
+        raise HTTPException(400, "Invalid signal_mode filter")
+    if signal_modes:
+        versions = [
+            v for v in versions
+            if normalize_signal_mode(v.get("signal_mode")) in signal_modes
+        ]
     return {"strategies": versions[:limit], "total": len(versions)}
 
 
@@ -98,6 +326,65 @@ async def get_strategy(symbol: str, version: int) -> dict:
     if data is None:
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
     return data
+
+
+@router.put("/{symbol}/v{version}")
+async def update_strategy(
+    symbol: str,
+    version: int,
+    body: UpdateStrategyRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Update the editable parts of a strategy version."""
+    data = _load_version(symbol, version)
+    if data is None:
+        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+
+    if body.name is not None:
+        data["name"] = body.name.strip()
+    if body.status is not None:
+        data["status"] = body.status.strip()
+    if body.signal_mode is not None:
+        mode = _strict_signal_mode(body.signal_mode)
+        if mode is None:
+            raise HTTPException(400, f"Unsupported signal_mode '{body.signal_mode}'")
+        update_source = _resolve_update_source(body.source, data.get("source"))
+        _validate_signal_mode_for_source(mode, update_source)
+        data["signal_mode"] = mode
+    if body.source is not None:
+        data["source"] = body.source.strip()
+    if body.params is not None:
+        _validate_params(body.params)
+        data["params"] = body.params
+    if body.tools is not None:
+        # Validate all tool toggle values are booleans
+        bad_tools = {k: v for k, v in body.tools.items() if not isinstance(v, bool)}
+        if bad_tools:
+            raise HTTPException(422, f"tools values must be booleans, got: {bad_tools}")
+        data["tools"] = body.tools
+    if body.validation is not None:
+        _validate_validation_cfg(body.validation)
+        data["validation"] = body.validation
+    if body.ai_models is not None:
+        data["ai_models"] = body.ai_models
+    if body.signal_instruction is not None:
+        data["signal_instruction"] = body.signal_instruction
+    if body.validator_instruction is not None:
+        data["validator_instruction"] = body.validator_instruction
+    if body.scoring_weights is not None:
+        data["scoring_weights"] = body.scoring_weights
+    if body.confidence_thresholds is not None:
+        data["confidence_thresholds"] = body.confidence_thresholds
+
+    _save_version(data)
+    await _sync_active_strategy_settings(session, data)
+    await session.commit()
+
+    logger.info("Updated strategy %s v%d", symbol, version)
+    return {
+        "status": "ok",
+        "strategy": _load_version(symbol, version) or data,
+    }
 
 
 @router.post("/{symbol}/v{version}/evaluate")
@@ -130,11 +417,18 @@ async def evaluate_promotion(
 
     current_status = StrategyStatus(data.get("status", "candidate"))
     metrics = data.get("summary", {})
+    repo = SettingsRepository(session)
+    bypass_candidate_gate = await _candidate_gate_bypass(
+        repo,
+        data.get("source"),
+        data.get("signal_mode"),
+    )
 
     result = await pipeline.evaluate_promotion(
         current_status=current_status,
         metrics=metrics,
         cycles_completed=body.cycles_completed,
+        bypass_candidate_gate=bypass_candidate_gate,
     )
 
     return {
@@ -175,6 +469,12 @@ async def promote_strategy(
 
     current_status = StrategyStatus(data.get("status", "candidate"))
     metrics = data.get("summary", {})
+    repo = SettingsRepository(session)
+    bypass_candidate_gate = await _candidate_gate_bypass(
+        repo,
+        data.get("source"),
+        data.get("signal_mode"),
+    )
 
     result = await pipeline.promote(
         symbol=symbol,
@@ -182,6 +482,7 @@ async def promote_strategy(
         current_status=current_status,
         metrics=metrics,
         cycles_completed=body.cycles_completed,
+        bypass_candidate_gate=bypass_candidate_gate,
     )
 
     if result["promoted"]:
@@ -197,6 +498,52 @@ async def promote_strategy(
         "symbol": symbol,
         "version": version,
         **result,
+    }
+
+
+@router.post("/ai-signal")
+async def create_ai_signal_card(body: CreateAISignalCardRequest) -> dict:
+    """Create a new AI_SIGNAL strategy card with starter prompts."""
+    from alphaloop.backtester.params import BacktestParams
+
+    symbol = body.symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(400, "symbol is required")
+    source = (body.source or "ai_signal_discovery").strip().lower()
+
+    version_data = create_strategy_version(
+        symbol=symbol,
+        params=BacktestParams(),
+        metrics={
+            "total_trades": 0,
+            "win_rate": 0.0,
+            "sharpe": 0.0,
+            "max_drawdown_pct": 0.0,
+            "total_pnl": 0.0,
+        },
+        tools=[
+            "session_filter", "news_filter", "volatility_filter",
+            "ema200_filter", "bos_guard", "fvg_guard",
+            "tick_jump_guard", "liq_vacuum_guard", "vwap_guard",
+            "dxy_filter", "sentiment_filter", "risk_filter",
+            "correlation_guard",
+        ],
+        status="candidate",
+        source=source,
+        name=(body.name or "").strip(),
+        signal_mode="ai_signal",
+        signal_instruction=(body.signal_instruction or "").strip(),
+        validator_instruction=(body.validator_instruction or "").strip(),
+    )
+
+    logger.info(
+        "Created AI_SIGNAL card: %s v%d",
+        version_data["symbol"],
+        version_data["_version"],
+    )
+    return {
+        "status": "ok",
+        "strategy": version_data,
     }
 
 
@@ -222,16 +569,9 @@ async def activate_strategy(
     # Save active strategy reference in DB settings
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
-    await repo.set(f"active_strategy_{symbol}", json.dumps({
-        "symbol": symbol,
-        "version": version,
-        "status": status,
-        "params": data.get("params", {}),
-        "tools": data.get("tools", {}),
-        "validation": data.get("validation", {}),
-        "ai_models": data.get("ai_models", {}),
-        "signal_mode": data.get("signal_mode", "algo_plus_ai"),
-    }))
+    await repo.set(f"active_strategy_{symbol}", json.dumps(
+        _active_strategy_payload(data)
+    ))
     await session.commit()
 
     logger.info("Activated strategy %s v%d for live trading", symbol, version)
@@ -333,10 +673,26 @@ async def update_strategy_models(
     data = json.loads(path.read_text())
     if "ai_models" not in data:
         data["ai_models"] = {}
+    update_source = _resolve_update_source(body.get("source"), data.get("source"))
 
-    for role in ["signal", "validator", "research", "autolearn", "fallback"]:
+    for role in ["signal", "validator", "research", "param_suggest", "regime", "fallback"]:
         if role in body:
             data["ai_models"][role] = body[role]
+
+    if "signal_mode" in body:
+        mode = _strict_signal_mode(body["signal_mode"])
+        if mode is None:
+            raise HTTPException(400, f"Unsupported signal_mode '{body['signal_mode']}'")
+        _validate_signal_mode_for_source(mode, update_source)
+        data["signal_mode"] = mode
+
+    if "source" in body and body["source"] is not None:
+        data["source"] = str(body["source"]).strip()
+
+    if "signal_instruction" in body:
+        data["signal_instruction"] = body["signal_instruction"] or ""
+    if "validator_instruction" in body:
+        data["validator_instruction"] = body["validator_instruction"] or ""
 
     # Atomic write
     tmp = path.with_suffix(".tmp")
@@ -344,7 +700,13 @@ async def update_strategy_models(
     tmp.replace(path)
 
     logger.info("Updated AI models for %s v%d: %s", symbol, version, data["ai_models"])
-    return {"status": "ok", "ai_models": data["ai_models"]}
+    return {
+        "status": "ok",
+        "ai_models": data["ai_models"],
+        "signal_mode": data.get("signal_mode", "ai_signal"),
+        "signal_instruction": data.get("signal_instruction", ""),
+        "validator_instruction": data.get("validator_instruction", ""),
+    }
 
 
 @router.get("/{symbol}/v{version}/overlay")
@@ -389,11 +751,35 @@ async def set_overlay(
 async def delete_strategy(
     symbol: str,
     version: int,
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Delete a strategy version JSON file."""
     path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
     if not path.exists():
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+
+    data = _load_version(symbol, version)
+    if data and data.get("status") in ("live", "demo"):
+        raise HTTPException(
+            400,
+            f"Cannot delete strategy with status '{data['status']}'. "
+            f"Retire or demote it first.",
+        )
+
+    # Check if this version is the active strategy for any instance
+    repo = SettingsRepository(session)
+    active_raw = await repo.get(f"active_strategy_{symbol}")
+    if active_raw:
+        try:
+            active = json.loads(active_raw)
+            if int(active.get("version", -1)) == version:
+                raise HTTPException(
+                    400,
+                    f"Strategy {symbol} v{version} is the active strategy. "
+                    f"Activate a different version first.",
+                )
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     path.unlink()
     logger.info("Deleted strategy %s v%d", symbol, version)

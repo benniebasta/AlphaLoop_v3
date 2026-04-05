@@ -1,7 +1,12 @@
 /**
  * Settings — fully redesigned with categories, friendly labels, toggles & status badges.
  */
-import { apiGet, apiPost, apiPut } from '../api.js';
+import { apiGet, apiPost, apiPut, setAuthToken } from '../api.js';
+import {
+  isGloballyEnabled, getVolume, isEventEnabled,
+  setSoundsEnabled, setVolume, setEventEnabled,
+  playTradeOpened, playTradeClosedProfit, playTradeClosedLoss, playSeedLabDone, playEvolution,
+} from '../sounds.js';
 
 /* ── Schema ─────────────────────────────────────────────────────────────────
    Each tab → sections → fields.
@@ -56,9 +61,26 @@ const SCHEMA = [
         ],
       },
       {
-        title: 'News & Data', color: '#64748b',
+        title: 'Local LLM (Ollama)', color: '#22c55e',
+        testAction: { endpoint: '/api/test/ollama', label: '🔌 Test Connection', body: {} },
         fields: [
-          { key: 'NEWS_API_KEY', label: 'News API Key', type: 'password', desc: 'NewsAPI.org key for fundamental news filter.' },
+          { key: 'QWEN_LOCAL_BASE', label: 'Ollama Base URL', type: 'text', desc: 'Ollama API endpoint. Default: http://localhost:11434/v1' },
+        ],
+      },
+      {
+        title: 'News & Data', color: '#64748b',
+        testAction: { endpoint: '/api/test/news', label: '📰 Test News API', body: {} },
+        fields: [
+          { key: 'NEWS_PROVIDER', label: 'Calendar Provider', type: 'select',
+            options: [
+              { value: 'forexfactory', label: 'ForexFactory (free, no key)' },
+              { value: 'finnhub',      label: 'Finnhub (API key required)' },
+              { value: 'fmp',          label: 'FMP Financial (API key required)' },
+            ],
+            desc: 'Economic calendar source. Finnhub/FMP fall back to ForexFactory if unavailable.',
+          },
+          { key: 'FINNHUB_API_KEY', label: 'Finnhub API Key', type: 'password', desc: 'Required when provider is Finnhub. Get free key at finnhub.io.' },
+          { key: 'FMP_API_KEY',     label: 'FMP API Key',     type: 'password', desc: 'Required when provider is FMP Financial. Get key at financialmodelingprep.com.' },
         ],
       },
     ],
@@ -70,7 +92,7 @@ const SCHEMA = [
       {
         title: 'Authentication',
         fields: [
-          { key: 'WEBUI_TOKEN', label: 'WebUI Bearer Token', type: 'password', desc: 'Bearer token required to access this dashboard. Leave blank to disable auth.' },
+          { key: 'AUTH_TOKEN', label: 'WebUI Bearer Token', type: 'password', desc: 'Bearer token required for sensitive endpoints (agent deploy, settings, strategies). Leave blank to disable auth.' },
         ],
       },
     ],
@@ -97,17 +119,6 @@ const SCHEMA = [
     id: 'risk', label: 'Risk', icon: '⚖️',
     sections: [
       {
-        title: 'Position Sizing',
-        fields: [
-          { key: 'RISK_PCT',               label: 'Risk per Trade (%)',     type: 'number', desc: 'Account % risked per trade. Hard cap: 0.1–5%.' },
-          { key: 'LEVERAGE',               label: 'Leverage',               type: 'number', desc: 'Broker leverage (e.g. 100 for 1:100).' },
-          { key: 'CONTRACT_SIZE',          label: 'Contract Size',          type: 'number', desc: 'Units per lot (100 for gold, 100000 for FX).' },
-          { key: 'COMMISSION_PER_LOT',     label: 'Commission / Lot (USD)', type: 'number', desc: 'Round-trip commission in USD (typical ECN: $7).' },
-          { key: 'SL_SLIPPAGE_BUFFER',     label: 'SL Slippage Buffer',     type: 'number', desc: 'Inflate SL distance to absorb spread at stop.' },
-          { key: 'MARGIN_CAP_PCT',         label: 'Margin Cap (%)',         type: 'number', desc: 'Max margin used as % of balance. Hard cap: 5–50%.' },
-        ],
-      },
-      {
         title: 'Loss Limits',
         fields: [
           { key: 'MAX_DAILY_LOSS_PCT',     label: 'Max Daily Loss (%)',     type: 'number', desc: 'Halt trading once this % of balance is lost today.' },
@@ -128,12 +139,60 @@ const SCHEMA = [
   },
 
   {
-    id: 'signal', label: 'Signal', icon: '📊',
+    id: 'guardrails', label: 'Guardrails', icon: '🛡️',
     sections: [
       {
-        title: 'Core Thresholds',
+        title: 'Circuit Breaker',
         fields: [
-          { key: 'TRADING_MODE',        label: 'Trading Mode',     type: 'select', options: ['swing','scalping'], desc: 'Strategy style.' },
+          { key: 'CIRCUIT_PAUSE_SEC',   label: 'Pause Duration (s)',  type: 'number', desc: 'Seconds to pause after API failure spike.' },
+          { key: 'CIRCUIT_KILL_COUNT',  label: 'Kill Count',          type: 'number', desc: 'Consecutive failures before kill switch.' },
+          { key: 'PIPELINE_SIZE_FLOOR', label: 'Pipeline Size Floor', type: 'number', desc: 'Block trade if pipeline modifier is below this.' },
+        ],
+      },
+      {
+        title: 'Position Sizing Guardrails',
+        fields: [
+          { key: 'RISK_PCT',               label: 'Risk per Trade (%)',     type: 'number', desc: 'Account % risked per trade. Hard cap: 0.1–5%.' },
+          { key: 'LEVERAGE',               label: 'Leverage',               type: 'number', desc: 'Broker leverage (e.g. 100 for 1:100).' },
+          { key: 'CONTRACT_SIZE',          label: 'Contract Size',          type: 'number', desc: 'Units per lot (100 for gold, 100000 for FX).' },
+          { key: 'COMMISSION_PER_LOT',     label: 'Commission / Lot (USD)', type: 'number', desc: 'Round-trip commission in USD (typical ECN: $7).' },
+          { key: 'SL_SLIPPAGE_BUFFER',     label: 'SL Slippage Buffer',     type: 'number', desc: 'Inflate SL distance to absorb spread at stop.' },
+          { key: 'MARGIN_CAP_PCT',         label: 'Margin Cap (%)',         type: 'number', desc: 'Max margin used as % of balance. Hard cap: 5–50%.' },
+        ],
+      },
+      {
+        title: 'Evolution Guardrails',
+        fields: [
+          { key: 'METALOOP_ENABLED',                label: 'MetaLoop Enabled',          type: 'toggle', desc: 'Enable automatic strategy evolution loop.' },
+          { key: 'METALOOP_CHECK_INTERVAL',          label: 'Check Interval (trades)',   type: 'number', desc: 'Run research after every N closed trades. Default: 20' },
+          { key: 'METALOOP_ROLLBACK_WINDOW',         label: 'Rollback Window (trades)',  type: 'number', desc: 'Monitor new version for N trades before confirming. Default: 30' },
+          { key: 'METALOOP_AUTO_ACTIVATE',           label: 'Auto-Activate',             type: 'toggle', desc: 'Automatically activate optimized strategy versions.' },
+          { key: 'METALOOP_DEGRADATION_THRESHOLD',   label: 'Degradation Threshold',     type: 'number', desc: 'Sharpe ratio threshold to trigger retraining (0-1). Default: 0.7' },
+        ],
+      },
+    ],
+  },
+
+  {
+    id: 'promotion', label: 'Promotion', icon: '🚦',
+    sections: [
+      {
+        title: 'Candidate → Dry Run Gate',
+        fields: [
+          { key: 'PROMOTION_CANDIDATE_GATE_ALGO_ONLY', label: 'Algo Only Uses Gate', type: 'toggle', desc: 'Keep the standard promotion gate on for Algo Only cards. Recommended: on.' },
+          { key: 'PROMOTION_CANDIDATE_GATE_ALGO_AI', label: 'Algo + AI Uses Gate', type: 'toggle', desc: 'Keep the standard promotion gate on for mixed Algo + AI cards. Recommended: on.' },
+          { key: 'PROMOTION_CANDIDATE_GATE_AI_SIGNAL', label: 'AI Signal Discovery Uses Gate', type: 'toggle', desc: 'Turn this on only if discovery cards should also wait for the same gate before entering Dry Run.' },
+        ],
+      },
+    ],
+  },
+
+  {
+    id: 'signal', label: 'Legacy Signal & Validation', icon: '🕰️',
+    sections: [
+      {
+        title: 'Legacy Validation Defaults',
+        fields: [
           { key: 'MIN_CONFIDENCE',      label: 'Min Confidence',   type: 'number', desc: 'Minimum AI confidence score to accept a signal (0–1).' },
           { key: 'CLAUDE_MIN_RR',       label: 'Min R:R Ratio',    type: 'number', desc: 'Minimum reward-to-risk ratio.' },
           { key: 'MAX_VOLATILITY_ATR_PCT', label: 'Max Volatility (ATR %)', type: 'number', desc: 'Reject signals when ATR% exceeds this.' },
@@ -144,7 +203,7 @@ const SCHEMA = [
         ],
       },
       {
-        title: 'Validation Guards',
+        title: 'Legacy Validation Guards',
         fields: [
           { key: 'CLAUDE_CHECK_H1_TREND', label: 'H1 Trend Check', type: 'toggle', desc: 'Validate signal against H1 trend direction.' },
           { key: 'CLAUDE_CHECK_RSI',      label: 'RSI Check',      type: 'toggle', desc: 'Block trades when RSI is overbought/oversold.' },
@@ -153,25 +212,6 @@ const SCHEMA = [
           { key: 'CLAUDE_CHECK_NEWS',     label: 'News Check',     type: 'toggle', desc: 'Avoid trading around high-impact news.' },
           { key: 'CLAUDE_CHECK_SETUP',    label: 'Setup Check',    type: 'toggle', desc: 'Validate trade setup type against allowed list.' },
           { key: 'CLAUDE_AVOID_SETUPS',   label: 'Avoid Setups',   type: 'text',   desc: 'Comma-separated setup types to reject.' },
-        ],
-      },
-      {
-        title: 'Entry Parameters',
-        fields: [
-          { key: 'PARAM_SL_ATR_MULT',         label: 'SL ATR Multiplier',         type: 'number', desc: 'Stop loss distance in ATR units. Default: 1.5' },
-          { key: 'PARAM_TP1_RR',               label: 'TP1 R:R Ratio',            type: 'number', desc: 'Take profit 1 reward:risk. Default: 1.5' },
-          { key: 'PARAM_TP2_RR',               label: 'TP2 R:R Ratio',            type: 'number', desc: 'Take profit 2 reward:risk. Default: 2.5' },
-          { key: 'PARAM_ENTRY_ZONE_ATR_MULT',  label: 'Entry Zone ATR Mult',      type: 'number', desc: 'Entry zone width in ATR units. Default: 0.25' },
-          { key: 'PARAM_MIN_CONFIDENCE',       label: 'Min Confidence (param)',    type: 'number', desc: 'Strategy-level min confidence. Default: 0.55' },
-          { key: 'PARAM_MIN_SESSION_SCORE',    label: 'Min Session Score (param)', type: 'number', desc: 'Strategy-level min session quality. Default: 0.55' },
-        ],
-      },
-      {
-        title: 'Circuit Breaker',
-        fields: [
-          { key: 'CIRCUIT_PAUSE_SEC',   label: 'Pause Duration (s)',  type: 'number', desc: 'Seconds to pause after API failure spike.' },
-          { key: 'CIRCUIT_KILL_COUNT',  label: 'Kill Count',          type: 'number', desc: 'Consecutive failures before kill switch.' },
-          { key: 'PIPELINE_SIZE_FLOOR', label: 'Pipeline Size Floor', type: 'number', desc: 'Block trade if pipeline modifier is below this.' },
         ],
       },
     ],
@@ -310,6 +350,18 @@ const SCHEMA = [
   },
 
   {
+    id: 'sounds', label: 'Sounds', icon: '🔊',
+    localOnly: true,
+    sections: [],
+  },
+
+  {
+    id: 'assets', label: 'Assets', icon: '🪙',
+    localOnly: true,
+    sections: [],
+  },
+
+  {
     id: 'system', label: 'System', icon: '⚙️',
     sections: [
       {
@@ -318,16 +370,6 @@ const SCHEMA = [
           { key: 'DRY_RUN',      label: 'Dry Run Mode',  type: 'toggle', desc: 'Simulate trades without executing on the broker.' },
           { key: 'LOG_LEVEL',    label: 'Log Level',     type: 'select', options: ['DEBUG','INFO','WARNING','ERROR'], desc: 'Logging verbosity.' },
           { key: 'ENVIRONMENT',  label: 'Environment',   type: 'select', options: ['dev','staging','prod'], desc: 'Deployment environment.' },
-        ],
-      },
-      {
-        title: 'MetaLoop / AutoLearn',
-        fields: [
-          { key: 'METALOOP_ENABLED',                label: 'MetaLoop Enabled',          type: 'toggle', desc: 'Enable automatic strategy evolution loop.' },
-          { key: 'METALOOP_CHECK_INTERVAL',          label: 'Check Interval (trades)',   type: 'number', desc: 'Run research after every N closed trades. Default: 20' },
-          { key: 'METALOOP_ROLLBACK_WINDOW',         label: 'Rollback Window (trades)',  type: 'number', desc: 'Monitor new version for N trades before confirming. Default: 30' },
-          { key: 'METALOOP_AUTO_ACTIVATE',           label: 'Auto-Activate',             type: 'toggle', desc: 'Automatically activate optimized strategy versions.' },
-          { key: 'METALOOP_DEGRADATION_THRESHOLD',   label: 'Degradation Threshold',     type: 'number', desc: 'Sharpe ratio threshold to trigger retraining (0-1). Default: 0.7' },
         ],
       },
       {
@@ -392,26 +434,375 @@ export async function render(container) {
   let allSettings = {};
   let activeTab = SCHEMA[0].id;
   let _modelCatalog = []; // loaded from /api/test/models
+  let _usageData = {}; // per-provider session usage from /api/settings/usage
 
-  /* Load settings + model catalog */
+  /* Load settings + model catalog + session usage */
   try {
-    const [settingsData, modelData] = await Promise.all([
+    const [settingsData, modelData, usageResp] = await Promise.all([
       apiGet('/api/settings'),
       apiGet('/api/test/models').catch(() => ({ models: [] })),
+      apiGet('/api/settings/usage').catch(() => ({ usage: {} })),
     ]);
     allSettings = settingsData.settings || {};
     _modelCatalog = modelData.models || [];
+    _usageData = usageResp.usage || {};
   } catch (err) {
     document.getElementById('settings-panel').innerHTML =
       `<div class="settings-error">⚠️ ${err.message}</div>`;
     return;
   }
 
+  /* ── Sounds panel (localStorage-only) ───────────────────────────────── */
+  function renderSoundsPanel() {
+    const el = document.getElementById('settings-panel');
+
+    const SOUND_EVENTS = [
+      {
+        key:     'trade_open',
+        icon:    '📈',
+        label:   'Trade Opened',
+        desc:    'Plays when an agent opens a new position.',
+        preview: playTradeOpened,
+        notes:   'E5 → G#5 ascending ping',
+      },
+      {
+        key:     'trade_close_profit',
+        icon:    '🟢',
+        label:   'Trade Closed — Profit',
+        desc:    'Plays when a trade closes with a positive P&L.',
+        preview: playTradeClosedProfit,
+        notes:   'E5 → G5 → C6 ascending trio',
+      },
+      {
+        key:     'trade_close_loss',
+        icon:    '🔴',
+        label:   'Trade Closed — Loss',
+        desc:    'Plays when a trade closes with a negative P&L.',
+        preview: playTradeClosedLoss,
+        notes:   'G4 → E4 → C4 descending trio',
+      },
+      {
+        key:     'seedlab',
+        icon:    '🧪',
+        label:   'SeedLab Complete',
+        desc:    'Plays when a SeedLab backtest run finishes successfully.',
+        preview: playSeedLabDone,
+        notes:   'C5→E5→G5→C6 fanfare',
+      },
+      {
+        key:     'evolution',
+        icon:    '🏆',
+        label:   'Strategy Evolution',
+        desc:    'Plays when an agent\'s strategy is promoted to a new version.',
+        preview: playEvolution,
+        notes:   'C5→E5→G5→B5→C6 arpeggio',
+      },
+    ];
+
+    const globalOn  = isGloballyEnabled();
+    const vol       = getVolume();
+    const volPct    = Math.round(vol * 100);
+
+    el.innerHTML = `
+      <div class="settings-section">
+        <div class="settings-section-title">Master Controls</div>
+        <div class="settings-fields">
+
+          <div class="field-row" style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--text)">Sound Effects</div>
+              <div class="field-desc">Enable or mute all sound effects globally.</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="snd-global" ${globalOn ? 'checked' : ''}>
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-label">${globalOn ? 'Enabled' : 'Muted'}</span>
+            </label>
+          </div>
+
+          <div class="field-row" id="snd-volume-row" style="padding:12px 0;border-bottom:1px solid var(--border);${!globalOn ? 'opacity:.4;pointer-events:none' : ''}">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div style="font-size:13px;font-weight:600;color:var(--text)">Volume</div>
+              <span id="snd-vol-label" style="font-size:12px;font-weight:700;color:var(--primary);min-width:36px;text-align:right">${volPct}%</span>
+            </div>
+            <input type="range" id="snd-volume" min="0" max="100" value="${volPct}"
+              style="width:100%;accent-color:var(--primary);cursor:pointer">
+            <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:4px">
+              <span>Silent</span><span>50%</span><span>Full</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="settings-section" id="snd-events-section" style="${!globalOn ? 'opacity:.4;pointer-events:none' : ''}">
+        <div class="settings-section-title">Event Sounds</div>
+        <div class="settings-fields">
+          ${SOUND_EVENTS.map(ev => {
+            const on = isEventEnabled(ev.key);
+            return `
+            <div class="field-row" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+              <span style="font-size:22px;width:28px;text-align:center;flex-shrink:0">${ev.icon}</span>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:13px;font-weight:600;color:var(--text)">${ev.label}</div>
+                <div class="field-desc" style="margin-bottom:2px">${ev.desc}</div>
+                <div style="font-size:10px;color:var(--muted);font-family:monospace">${ev.notes}</div>
+              </div>
+              <button class="btn btn-sm snd-preview-btn" data-key="${ev.key}"
+                style="flex-shrink:0;font-size:11px;padding:4px 10px" title="Preview sound">
+                ▶ Preview
+              </button>
+              <label class="toggle-switch" style="flex-shrink:0">
+                <input type="checkbox" class="snd-event-toggle" data-key="${ev.key}" ${on ? 'checked' : ''}>
+                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                <span class="toggle-label">${on ? 'On' : 'Off'}</span>
+              </label>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+    `;
+
+    // ── Wire global toggle ──────────────────────────────────────────────
+    const globalCb    = el.querySelector('#snd-global');
+    const volumeRow   = el.querySelector('#snd-volume-row');
+    const eventsSection = el.querySelector('#snd-events-section');
+
+    globalCb.addEventListener('change', () => {
+      setSoundsEnabled(globalCb.checked);
+      globalCb.nextElementSibling.nextElementSibling.textContent = globalCb.checked ? 'Enabled' : 'Muted';
+      const dim = !globalCb.checked ? 'opacity:.4;pointer-events:none' : '';
+      volumeRow.style.cssText   = `padding:12px 0;border-bottom:1px solid var(--border);${dim}`;
+      eventsSection.style.cssText = dim;
+    });
+
+    // ── Wire volume slider ──────────────────────────────────────────────
+    const volSlider = el.querySelector('#snd-volume');
+    const volLabel  = el.querySelector('#snd-vol-label');
+    volSlider.addEventListener('input', () => {
+      const pct = parseInt(volSlider.value);
+      volLabel.textContent = `${pct}%`;
+      setVolume(pct / 100);
+    });
+
+    // ── Wire event toggles ──────────────────────────────────────────────
+    el.querySelectorAll('.snd-event-toggle').forEach(cb => {
+      cb.addEventListener('change', () => {
+        setEventEnabled(cb.dataset.key, cb.checked);
+        cb.nextElementSibling.nextElementSibling.textContent = cb.checked ? 'On' : 'Off';
+      });
+    });
+
+    // ── Wire preview buttons ────────────────────────────────────────────
+    const previewMap = {
+      trade_open:         playTradeOpened,
+      trade_close_profit: playTradeClosedProfit,
+      trade_close_loss:   playTradeClosedLoss,
+      seedlab:            playSeedLabDone,
+      evolution:          playEvolution,
+    };
+    el.querySelectorAll('.snd-preview-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        // Force-play regardless of toggle state so user can audition
+        const origEnabled = localStorage.getItem(`sounds_${btn.dataset.key}`);
+        const origGlobal  = localStorage.getItem('sounds_enabled');
+        localStorage.setItem(`sounds_${btn.dataset.key}`, 'true');
+        localStorage.setItem('sounds_enabled', 'true');
+        previewMap[btn.dataset.key]?.();
+        // Restore
+        if (origEnabled !== null) localStorage.setItem(`sounds_${btn.dataset.key}`, origEnabled);
+        else localStorage.removeItem(`sounds_${btn.dataset.key}`);
+        if (origGlobal !== null) localStorage.setItem('sounds_enabled', origGlobal);
+        else localStorage.removeItem('sounds_enabled');
+      });
+    });
+  }
+
+  /* ── Assets panel ───────────────────────────────────────────────────── */
+  const _TOOL_GROUPS = [
+    {
+      label: 'Core',
+      keys: ['session', 'volatility', 'ema200'],
+    },
+    {
+      label: 'Structure Guards',
+      keys: ['bos', 'fvg', 'tick_jump', 'liq_vacuum', 'vwap'],
+    },
+    {
+      label: 'Technical',
+      keys: ['macd', 'bollinger', 'adx', 'volume', 'swing'],
+    },
+  ];
+
+  const _TOOL_SHORT = {
+    session:    'Session',
+    volatility: 'Volatility',
+    ema200:     'EMA200',
+    bos:        'BOS',
+    fvg:        'FVG',
+    tick_jump:  'Tick Jump',
+    liq_vacuum: 'Liq Vacuum',
+    vwap:       'VWAP',
+    macd:       'MACD',
+    bollinger:  'Bollinger',
+    adx:        'ADX',
+    volume:     'Volume',
+    swing:      'Swing',
+  };
+
+  const _TOOL_DESC = {
+    session:    'Block trades outside active sessions (London/NY)',
+    volatility: 'Block extreme or dead ATR% conditions',
+    ema200:     'Block entries against the EMA200 direction',
+    bos:        'Require a Break of Structure before entry',
+    fvg:        'Require a Fair Value Gap for entry',
+    tick_jump:  'Reject 2-bar price spikes',
+    liq_vacuum: 'Reject thin-body candles (no follow-through)',
+    vwap:       'Block overextended entries far from VWAP',
+    macd:       'Block when MACD histogram disagrees',
+    bollinger:  'Block outside the Bollinger band zone',
+    adx:        'Block when ADX < 20 (no trend)',
+    volume:     'Block when volume is below rolling average',
+    swing:      'Require HH/HL or LH/LL pattern',
+  };
+
+  const _CLASS_COLORS = {
+    spot_metal:  '#f59e0b',
+    crypto:      '#8b5cf6',
+    forex_major: '#3b82f6',
+    forex_minor: '#06b6d4',
+    index:       '#22c55e',
+    stock:       '#64748b',
+  };
+
+  const _CLASS_ICONS = {
+    spot_metal:  '⚙',
+    crypto:      '₿',
+    forex_major: '💱',
+    forex_minor: '💱',
+    index:       '📈',
+    stock:       '🏢',
+  };
+
+  let _assetsCache = null;
+
+  function _countActive(tools) {
+    return Object.values(tools).filter(Boolean).length;
+  }
+
+  function _buildCard(asset) {
+    const color = _CLASS_COLORS[asset.asset_class] || '#64748b';
+    const icon  = _CLASS_ICONS[asset.asset_class]  || '◆';
+    const initials = asset.symbol.slice(0, 3);
+    const active = _countActive(asset.tools);
+    const total  = Object.keys(asset.tools).length;
+
+    const groupsHtml = _TOOL_GROUPS.map(g => `
+      <div>
+        <div class="asset-tool-group-label">${g.label}</div>
+        <div class="asset-tool-chips">
+          ${g.keys.map(k => {
+            const checked = asset.tools[k] ? 'checked' : '';
+            return `<label class="tool-chip-label" title="${_TOOL_DESC[k] || k}">
+              <input type="checkbox" data-tool="${k}" ${checked}>
+              ${_TOOL_SHORT[k] || k}
+            </label>`;
+          }).join('')}
+        </div>
+      </div>`).join('');
+
+    return `
+      <div class="asset-preset-card" data-symbol="${asset.symbol}">
+        <div class="asset-preset-header">
+          <div class="asset-preset-monogram" style="background:${color}20;color:${color}">
+            ${initials}
+          </div>
+          <div class="asset-preset-info">
+            <span class="asset-preset-ticker">${asset.symbol}</span>
+            <div class="asset-preset-meta">
+              <span class="asset-preset-name">${asset.display_name}</span>
+              <span class="asset-preset-class" style="background:${color}18;color:${color};border-color:${color}35">
+                ${icon} ${asset.asset_class.replace('_', ' ')}
+              </span>
+            </div>
+          </div>
+          <span class="asset-active-count" data-count="${asset.symbol}">${active}/${total} active</span>
+          <span class="asset-save-feedback" data-feedback="${asset.symbol}">✓ Saved</span>
+          <button class="asset-save-btn" data-symbol="${asset.symbol}">Save</button>
+        </div>
+        <div class="asset-preset-body">${groupsHtml}</div>
+      </div>`;
+  }
+
+  async function renderAssetsPanel() {
+    const el = document.getElementById('settings-panel');
+    const footer = document.querySelector('.settings-footer');
+    if (footer) footer.style.display = 'none';
+
+    el.innerHTML = '<div class="settings-loading">Loading asset configs…</div>';
+
+    try {
+      const data = await apiGet('/api/assets');
+      _assetsCache = data.assets || [];
+    } catch (err) {
+      el.innerHTML = `<div class="settings-error">⚠️ ${err.message}</div>`;
+      return;
+    }
+
+    el.innerHTML = `
+      <p class="assets-intro">
+        Configure which filters are active by default for each asset. Presets auto-apply in SeedLab when you switch symbols.
+        Click a chip to toggle it, then <strong>Save</strong> to persist.
+      </p>
+      <div class="assets-grid">
+        ${_assetsCache.map(_buildCard).join('')}
+      </div>`;
+
+    // Live active-count update on chip toggle
+    el.querySelectorAll('.asset-preset-card').forEach(card => {
+      const symbol = card.dataset.symbol;
+      const countEl = el.querySelector(`.asset-active-count[data-count="${symbol}"]`);
+
+      card.querySelectorAll('input[type="checkbox"][data-tool]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          const total = card.querySelectorAll('input[data-tool]').length;
+          const active = [...card.querySelectorAll('input[data-tool]')].filter(c => c.checked).length;
+          if (countEl) countEl.textContent = `${active}/${total} active`;
+        });
+      });
+
+      // Save button
+      const btn = card.querySelector('.asset-save-btn');
+      const feedbackEl = card.querySelector(`.asset-save-feedback[data-feedback="${symbol}"]`);
+      btn.addEventListener('click', async () => {
+        const tools = {};
+        card.querySelectorAll('input[data-tool]').forEach(cb => {
+          tools[cb.dataset.tool] = cb.checked;
+        });
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+        try {
+          await apiPut(`/api/assets/${symbol}/tools`, { tools });
+          feedbackEl.classList.add('shown');
+          setTimeout(() => { feedbackEl.classList.remove('shown'); }, 2200);
+          window.__assetPresetsCache = null;
+          window.showToast(`${symbol} preset saved`);
+        } catch (err) {
+          window.showToast(err.message, 'error');
+        }
+        btn.disabled = false;
+        btn.textContent = 'Save';
+      });
+    });
+  }
+
   /* ── Sidebar nav ─────────────────────────────────────────────────────── */
   function renderSidebar() {
     const el = document.getElementById('settings-sidebar');
     el.innerHTML = SCHEMA.map(tab => {
-      const hasData = tab.sections.some(s => s.fields.some(f => f.key in allSettings && allSettings[f.key]));
+      const hasData = tab.localOnly
+        ? isGloballyEnabled()
+        : tab.sections.some(s => s.fields.some(f => f.key in allSettings && allSettings[f.key]));
       return `
         <div class="settings-nav-item ${activeTab === tab.id ? 'active' : ''}" data-tab="${tab.id}">
           <span class="nav-icon">${tab.icon}</span>
@@ -432,10 +823,27 @@ export async function render(container) {
   function renderPanel() {
     const tab = SCHEMA.find(t => t.id === activeTab);
     if (!tab) return;
+
+    // Local-only tabs (e.g. Sounds) don't use the server API or the Save button
+    const footer = document.querySelector('.settings-footer');
+    if (footer) footer.style.display = tab.localOnly ? 'none' : '';
+
+    if (tab.localOnly) {
+      if (tab.id === 'sounds') renderSoundsPanel();
+      if (tab.id === 'assets') renderAssetsPanel();
+      return;
+    }
+
     const el = document.getElementById('settings-panel');
-    el.innerHTML = tab.sections.map(section => `
+    el.innerHTML = tab.sections.map(section => {
+      const provider = section.testAction?.body?.provider;
+      const usage = provider ? (_usageData[provider] || { calls: 0, errors: 0 }) : null;
+      const usageBadge = usage
+        ? `<span class="usage-badge${usage.errors > 0 ? ' usage-warn' : ''}">Session: ${usage.calls} call${usage.calls !== 1 ? 's' : ''}${usage.errors > 0 ? ` · ${usage.errors} err` : ''}</span>`
+        : '';
+      return `
       <div class="settings-section">
-        <div class="settings-section-title">${section.title}</div>
+        <div class="settings-section-title">${section.title}${usageBadge}</div>
         <div class="settings-fields">
           ${section.fields.map(f => renderField(f)).join('')}
         </div>
@@ -444,7 +852,8 @@ export async function render(container) {
             <button class="btn btn-sm settings-test-btn" data-endpoint="${section.testAction.endpoint}" data-body='${JSON.stringify(section.testAction.body || {})}' data-label="${section.testAction.label}">${section.testAction.label}</button>
             <span class="settings-test-result"></span>
           </div>` : ''}
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     // Wire test buttons
     el.querySelectorAll('.settings-test-btn').forEach(btn => {
@@ -537,8 +946,11 @@ export async function render(container) {
         </label>`;
       // Update label on change
     } else if (f.type === 'select') {
-      const opts = (f.options || []).map(o =>
-        `<option value="${o}" ${val === o ? 'selected' : ''}>${o}</option>`).join('');
+      const opts = (f.options || []).map(o => {
+        const v = typeof o === 'object' ? o.value : o;
+        const l = typeof o === 'object' ? o.label : o;
+        return `<option value="${v}" ${val === v ? 'selected' : ''}>${l}</option>`;
+      }).join('');
       inputHtml = `<select class="field-input" data-key="${f.key}">${opts}</select>`;
     } else {
       const isPass = f.type === 'password';
@@ -570,9 +982,17 @@ export async function render(container) {
 
   /* ── Save ────────────────────────────────────────────────────────────── */
   document.getElementById('save-settings').addEventListener('click', async () => {
-    // Send the full allSettings object (kept in sync via input/change listeners)
+    // Strip masked values (***...xxxx) — these are server-side redactions and must
+    // not be written back, otherwise they overwrite the real secrets in the DB.
+    const toSend = Object.fromEntries(
+      Object.entries(allSettings).filter(([, v]) => !String(v).startsWith('***'))
+    );
     try {
-      await apiPut('/api/settings', { settings: allSettings });
+      // Sync AUTH_TOKEN to localStorage BEFORE the PUT so the Bearer header is sent.
+      // Only sync if the user actually typed a new token (not a masked placeholder).
+      const tokenVal = allSettings.AUTH_TOKEN;
+      if (tokenVal && !String(tokenVal).startsWith('***')) setAuthToken(tokenVal);
+      await apiPut('/api/settings', { settings: toSend });
       const hint = document.getElementById('save-hint');
       hint.textContent = '✓ Saved';
       hint.style.color = 'var(--green)';

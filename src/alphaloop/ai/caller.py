@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 from alphaloop.ai.model_hub import (
@@ -25,6 +26,7 @@ from alphaloop.ai.providers.gemini import GeminiProvider
 from alphaloop.ai.providers.ollama import OllamaProvider
 from alphaloop.ai.providers.openai_compat import OpenAICompatProvider
 from alphaloop.ai.rate_limiter import AsyncRateLimiter
+from alphaloop.core.constants import AI_RATE_LIMIT_PER_MIN, AI_RATE_LIMIT_WINDOW_SEC
 from alphaloop.core.errors import AlphaLoopError, ConfigError, RateLimitError
 from alphaloop.core.types import AIProvider
 
@@ -44,7 +46,7 @@ class AICaller:
     api_keys : dict[str, str] | None
         Provider name -> API key. Falls back to env vars if not supplied.
     rate_limiter : AsyncRateLimiter | None
-        Custom rate limiter. A default (10 calls/min/provider) is created
+        Custom rate limiter. A default (5 calls/min/provider, from AI_RATE_LIMIT_PER_MIN) is created
         if not supplied.
     """
 
@@ -55,8 +57,17 @@ class AICaller:
     ) -> None:
         self._api_keys: dict[str, str] = api_keys or {}
         self._rate_limiter = rate_limiter or AsyncRateLimiter(
-            max_calls=10, window_seconds=60.0
+            max_calls=AI_RATE_LIMIT_PER_MIN, window_seconds=AI_RATE_LIMIT_WINDOW_SEC
         )
+
+    async def __call__(
+        self,
+        model_id: str,
+        messages: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> str:
+        """Allow AICaller instances to be used as async callables."""
+        return await self.call_model(model_id, messages, **kwargs)
 
     # ------------------------------------------------------------------
     # Public API
@@ -136,6 +147,8 @@ class AICaller:
             delay = retry_delay
 
             for attempt in range(1, attempts + 1):
+                _t_start = time.perf_counter()
+                _call_success = False
                 try:
                     provider = cfg.provider
                     await self._rate_limiter.acquire(provider)
@@ -148,7 +161,7 @@ class AICaller:
                         label, provider, mid, attempt, attempts,
                     )
 
-                    text = await self._dispatch(
+                    dispatch = self._dispatch(
                         cfg=cfg,
                         api_key=api_key,
                         messages=messages,
@@ -158,6 +171,7 @@ class AICaller:
                         timeout=timeout,
                         **kwargs,
                     )
+                    text = await asyncio.wait_for(dispatch, timeout=timeout)
                     if is_retry:
                         logger.info(
                             "[caller] %s%s/%s succeeded on attempt %d",
@@ -165,11 +179,23 @@ class AICaller:
                         )
                     else:
                         logger.info("[caller] %s/%s — response received", provider, mid)
+                    _call_success = True
                     return text
 
                 except RateLimitError:
                     # Don't retry rate limits — propagate immediately
                     raise
+                except asyncio.TimeoutError:
+                    last_error = AlphaLoopError(
+                        f"AI call timed out after {timeout:.1f}s"
+                    )
+                    logger.warning(
+                        "[caller] %s/%s attempt %d/%d timed out after %.1fs",
+                        cfg.provider, mid, attempt, attempts, timeout,
+                    )
+                    if attempt < attempts:
+                        await asyncio.sleep(delay)
+                        delay *= 2  # exponential backoff
                 except ConfigError:
                     # Config errors (missing key) won't fix on retry
                     logger.warning("[caller] Config error for %s — skipping", mid)
@@ -183,6 +209,17 @@ class AICaller:
                     if attempt < attempts:
                         await asyncio.sleep(delay)
                         delay *= 2  # exponential backoff
+                finally:
+                    # Record per-call performance metrics (never blocks the caller)
+                    try:
+                        from alphaloop.ai.performance import model_performance_tracker as _pt
+                        _pt.record_call(
+                            mid,
+                            latency_ms=(time.perf_counter() - _t_start) * 1000,
+                            success=_call_success,
+                        )
+                    except Exception:
+                        pass
 
         # All models exhausted — distinguish "not found" from "disabled"
         if not any_model_found:
@@ -241,7 +278,7 @@ class AICaller:
     # ------------------------------------------------------------------
 
     def _resolve_key(self, provider: AIProvider) -> str:
-        """Resolve API key: explicit dict -> env var -> empty (for Ollama)."""
+        """Resolve API key: explicit dict -> env var -> 'local' sentinel (Ollama optional)."""
         # Check explicit keys dict
         key = self._api_keys.get(provider, "")
         if key:
@@ -284,7 +321,7 @@ class AICaller:
 
         elif provider == AIProvider.OLLAMA:
             endpoint = cfg.endpoint or "http://localhost:11434/v1"
-            p = OllamaProvider(base_url=endpoint)
+            p = OllamaProvider(base_url=endpoint, api_key=api_key)
             return await p.call(messages, model_id=cfg.id, **kwargs)
 
         else:

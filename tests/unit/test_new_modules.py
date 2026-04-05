@@ -1,11 +1,9 @@
 """
-Unit tests for all new modules added during the institutional audit:
-- validation/rules.py (new hard rules)
+Unit tests for new modules:
 - risk/guards.py (NearDedupGuard, PortfolioCapGuard)
 - monitoring/watchdog.py
 - seedlab/evolution.py
 - backtester/asset_trainer.py
-- ai/caller.py (retry logic)
 - utils/time.py (session score for hour)
 """
 
@@ -19,117 +17,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Hard Rules — New Rules
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestTickJumpRule:
-    def test_blocks_spike(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        context = {
-            "timeframes": {"M15": {
-                "closes": [100.0, 101.0, 105.0],  # 5 point move
-                "indicators": {"atr": 1.0},         # atr=1 → move/atr = 5
-            }},
-        }
-        fails, detail = checker._check_tick_jump(context, {"tick_jump_atr_max": 0.8})
-        assert len(fails) > 0
-        assert "Tick jump" in fails[0]
-
-    def test_passes_normal(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        context = {
-            "timeframes": {"M15": {
-                "closes": [100.0, 100.1, 100.2],
-                "indicators": {"atr": 1.0},
-            }},
-        }
-        fails, _ = checker._check_tick_jump(context, {})
-        assert len(fails) == 0
-
-    def test_skippable(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        fails, detail = checker._check_tick_jump({}, {"check_tick_jump": False})
-        assert len(fails) == 0
-        assert "skipped" in detail
-
-
-class TestLiqVacuumRule:
-    def test_blocks_vacuum(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        context = {
-            "timeframes": {"M15": {
-                "indicators": {"atr": 1.0},
-                "last_bar": {
-                    "open": 100.0,
-                    "close": 100.05,    # tiny body
-                    "high": 103.0,      # huge range = 3.0, range/atr = 3.0
-                    "low": 100.0,
-                },
-            }},
-        }
-        fails, _ = checker._check_liq_vacuum(context, {})
-        assert len(fails) > 0
-        assert "Liquidity vacuum" in fails[0]
-
-
-class TestSetupTypeRule:
-    def test_blocks_chase(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        signal = MagicMock()
-        signal.setup_type = "breakout_chase"
-        signal.setup = "breakout_chase"
-        fails, _ = checker._check_setup_type(signal, {})
-        assert len(fails) > 0
-
-    def test_passes_pullback(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        signal = MagicMock()
-        signal.setup_type = "pullback"
-        signal.setup = "pullback"
-        fails, _ = checker._check_setup_type(signal, {})
-        assert len(fails) == 0
-
-
-class TestRegimeBlockRule:
-    def test_blocks_dead(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        context = {
-            "timeframes": {"H1": {"indicators": {"regime": "dead"}}},
-        }
-        fails, _ = checker._check_regime_block(context, {})
-        assert len(fails) > 0
-        assert "dead" in fails[0].lower()
-
-    def test_blocks_atr_ratio(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        context = {
-            "timeframes": {"H1": {"indicators": {
-                "atr": 0.2,
-                "atr_baseline": 1.0,
-            }}},
-        }
-        fails, _ = checker._check_regime_block(context, {})
-        assert len(fails) > 0
-
-    def test_passes_trending(self):
-        from alphaloop.validation.rules import HardRuleChecker
-        checker = HardRuleChecker()
-        context = {
-            "timeframes": {"H1": {"indicators": {"regime": "trending"}}},
-        }
-        fails, _ = checker._check_regime_block(context, {})
-        assert len(fails) == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -175,12 +62,15 @@ class TestNearDedupGuard:
 
 class TestPortfolioCapGuard:
     def test_blocks_over_cap(self):
+        """Two same-symbol same-direction trades → corr-adj risk > cap."""
         from alphaloop.risk.guards import PortfolioCapGuard
         g = PortfolioCapGuard(max_portfolio_risk_pct=3.0)
+        # Same symbol + same direction = high correlation (0.30 default)
+        # Use larger risk amounts to push over the 3% cap on $10k balance
         assert g.is_capped(
             open_trades=[
-                {"risk_amount_usd": 150},
-                {"risk_amount_usd": 200},
+                {"risk_amount_usd": 200, "symbol": "XAUUSD", "direction": "BUY"},
+                {"risk_amount_usd": 200, "symbol": "XAUUSD", "direction": "BUY"},
             ],
             balance=10000.0,
         )
@@ -189,7 +79,7 @@ class TestPortfolioCapGuard:
         from alphaloop.risk.guards import PortfolioCapGuard
         g = PortfolioCapGuard(max_portfolio_risk_pct=6.0)
         assert not g.is_capped(
-            open_trades=[{"risk_amount_usd": 100}],
+            open_trades=[{"risk_amount_usd": 100, "symbol": "XAUUSD", "direction": "BUY"}],
             balance=10000.0,
         )
 

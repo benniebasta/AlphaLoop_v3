@@ -14,7 +14,7 @@ Once the DB is available, SettingsService merges DB values on top.
 from __future__ import annotations
 
 import logging
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, SecretStr, field_validator
 from pydantic_settings import BaseSettings
 
 from alphaloop.core.constants import RISK_HARD_CAPS
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class BrokerConfig(BaseModel):
     server: str = "MetaQuotes-Demo"
     login: int = 0
-    password: str = ""
+    password: SecretStr = SecretStr("")
     symbol: str = "XAUUSDm"
     terminal_path: str = ""
     magic: int = 20240101
@@ -108,6 +108,7 @@ class SignalConfig(BaseModel):
     circuit_pause_sec: int = 300
     circuit_kill_count: int = 10
     pipeline_size_floor: float = 0.20
+    pipeline_version: str = "v4"           # "v4" = institutional 8-stage pipeline
 
 
 class SessionConfig(BaseModel):
@@ -122,15 +123,15 @@ class SessionConfig(BaseModel):
 
 class APIConfig(BaseModel):
     signal_provider: str = "gemini"
-    signal_model: str = "gemini-2.5-flash"
-    gemini_api_key: str = ""
-    openai_api_key: str = ""
-    deepseek_api_key: str = ""
-    xai_api_key: str = ""
-    claude_api_key: str = ""
+    signal_model: str = "gemini-2.5-flash-lite"
+    gemini_api_key: SecretStr = SecretStr("")
+    openai_api_key: SecretStr = SecretStr("")
+    deepseek_api_key: SecretStr = SecretStr("")
+    xai_api_key: SecretStr = SecretStr("")
+    claude_api_key: SecretStr = SecretStr("")
     claude_model: str = "claude-sonnet-4-6"
     claude_enabled: bool = True
-    qwen_api_key: str = ""
+    qwen_api_key: SecretStr = SecretStr("")
     qwen_api_base: str = "https://api.together.ai/v1"
     qwen_local_base: str = "http://localhost:11434/v1"
     qwen_signal_model: str = "Qwen/Qwen2.5-7B-Instruct-Turbo"
@@ -140,7 +141,7 @@ class APIConfig(BaseModel):
     qwen_validator_timeout: int = 25
     qwen_validator_enabled: bool = False
     polymarket_api_url: str = "https://clob.polymarket.com"
-    news_api_key: str = ""
+    news_api_key: SecretStr = SecretStr("")
 
 
 class EvolutionConfig(BaseModel):
@@ -164,7 +165,7 @@ class DBConfig(BaseModel):
 
 
 class TelegramConfig(BaseModel):
-    token: str = ""
+    token: SecretStr = SecretStr("")
     chat_id: str = ""
     enabled: bool = True
 
@@ -184,6 +185,7 @@ class AppConfig(BaseSettings):
     telegram: TelegramConfig = TelegramConfig()
     evolution: EvolutionConfig = EvolutionConfig()
 
+    auth_token: str = ""
     dry_run: bool = True
     log_level: str = "INFO"
     environment: str = "dev"

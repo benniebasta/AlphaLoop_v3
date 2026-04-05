@@ -83,58 +83,6 @@ async def test_strategies_list_empty(app_client):
 
 
 @pytest.mark.asyncio
-async def test_hard_rules_all_13():
-    """E2E: All 13 hard rules execute without error."""
-    from alphaloop.validation.rules import HardRuleChecker
-    from alphaloop.signals.schema import TradeSignal
-    from alphaloop.core.types import TrendDirection, SetupType
-
-    checker = HardRuleChecker(symbol="XAUUSD")
-
-    # Create a minimal valid signal matching Pydantic schema
-    signal = TradeSignal(
-        trend=TrendDirection.BULLISH,
-        setup=SetupType.PULLBACK,
-        entry_zone=[2000.0, 2002.0],
-        stop_loss=1990.0,
-        take_profit=[2020.0],
-        confidence=0.85,
-        reasoning="This is a valid test signal for the pullback setup on gold.",
-    )
-
-    context = {
-        "session": {"score": 0.8, "name": "london_session"},
-        "current_price": {"bid": 2001.0, "spread": 2.5},
-        "upcoming_news": [],
-        "timeframes": {
-            "H1": {
-                "indicators": {
-                    "rsi": 55.0,
-                    "ema200": 1990.0,
-                    "atr": 5.0,
-                    "regime": "trending",
-                },
-            },
-            "M15": {
-                "indicators": {"atr": 2.5},
-                "closes": [2000.0, 2001.0, 2002.0, 2001.5],
-                "last_bar": {
-                    "open": 2001.0,
-                    "close": 2001.5,
-                    "high": 2002.0,
-                    "low": 2000.5,
-                },
-            },
-        },
-    }
-
-    # Should run all 13 rules without crashing
-    failures = checker.check(signal, context)
-    # We just verify no exception — failures are OK for this test
-    assert isinstance(failures, list)
-
-
-@pytest.mark.asyncio
 async def test_risk_guards_instantiate():
     """E2E: All 7 risk guards instantiate and run basic operations."""
     from alphaloop.risk.guards import (
@@ -238,6 +186,39 @@ async def test_deployment_pipeline_evaluate():
     )
     assert result["eligible"]
     assert result["target_status"] == StrategyStatus.DRY_RUN
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ai_signal_discovery_candidate_skips_backtest_gate():
+    """E2E: AI signal discovery cards can enter dry_run immediately."""
+    from alphaloop.backtester.deployment_pipeline import DeploymentPipeline
+    from alphaloop.core.config import EvolutionConfig
+    from alphaloop.core.events import EventBus
+    from alphaloop.core.types import StrategyStatus
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+    pipeline = DeploymentPipeline(
+        session_factory=sf,
+        event_bus=EventBus(),
+        evolution_config=EvolutionConfig(),
+    )
+
+    result = await pipeline.evaluate_promotion(
+        current_status=StrategyStatus.CANDIDATE,
+        metrics={"total_trades": 0, "sharpe_ratio": 0.0, "win_rate": 0.0},
+        cycles_completed=0,
+        bypass_candidate_gate=True,
+    )
+    assert result["eligible"]
+    assert result["target_status"] == StrategyStatus.DRY_RUN
+    assert result["reasons"] == []
 
     await engine.dispose()
 

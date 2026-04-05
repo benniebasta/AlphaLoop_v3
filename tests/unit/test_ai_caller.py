@@ -60,9 +60,10 @@ class TestModelHub:
         assert cfg is not None
         assert cfg.id == DEFAULT_ROLES["signal"]
 
-    def test_resolve_role_fallback_none(self):
+    def test_resolve_role_fallback(self):
         cfg = resolve_role("fallback")
-        assert cfg is None  # Default fallback is None
+        assert cfg is not None
+        assert cfg.id == DEFAULT_ROLES["fallback"]
 
     def test_resolve_role_unknown(self):
         cfg = resolve_role("nonexistent_role")
@@ -159,6 +160,16 @@ def _mock_httpx_response(json_data: dict, status_code: int = 200) -> MagicMock:
 
 class TestAICaller:
     @pytest.mark.asyncio
+    async def test_aicaller_is_async_callable(self):
+        caller = AICaller(api_keys={"gemini": "test-key"})
+
+        with patch.object(caller, "call_model", AsyncMock(return_value="ok")) as mock_call:
+            result = await caller("gemini-2.5-flash", [{"role": "user", "content": "hi"}])
+
+        assert result == "ok"
+        mock_call.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_call_model_unknown_raises(self):
         caller = AICaller(api_keys={"anthropic": "test-key"})
         with pytest.raises(ConfigError, match="not found"):
@@ -169,11 +180,12 @@ class TestAICaller:
     @pytest.mark.asyncio
     async def test_call_model_disabled_raises(self):
         caller = AICaller(api_keys={})
-        # Ollama models are disabled by default in catalog
-        with pytest.raises(ConfigError, match="disabled"):
-            await caller.call_model(
-                "qwen2.5:7b", [{"role": "user", "content": "hi"}]
-            )
+        disabled = get_model_by_id("claude-sonnet-4-6").model_copy(update={"enabled": False})
+        with patch("alphaloop.ai.caller.get_model_by_id", return_value=disabled):
+            with pytest.raises(ConfigError, match="disabled"):
+                await caller.call_model(
+                    "claude-sonnet-4-6", [{"role": "user", "content": "hi"}]
+                )
 
     @pytest.mark.asyncio
     async def test_call_model_no_key_raises(self):
@@ -373,4 +385,21 @@ class TestAICaller:
             with pytest.raises(RateLimitError):
                 await caller.call_model(
                     "gemini-2.5-flash", [{"role": "user", "content": "2"}]
+                )
+
+    @pytest.mark.asyncio
+    async def test_call_model_hard_times_out(self):
+        caller = AICaller(api_keys={"gemini": "test-key"})
+
+        async def _hang(**kwargs):
+            await asyncio.sleep(1.0)
+            return "never"
+
+        with patch.object(caller, "_dispatch", side_effect=_hang):
+            with pytest.raises(AlphaLoopError, match="timed out"):
+                await caller.call_model(
+                    "gemini-2.5-flash",
+                    [{"role": "user", "content": "hi"}],
+                    timeout=0.01,
+                    max_retries=0,
                 )

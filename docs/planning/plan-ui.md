@@ -32,16 +32,18 @@ src/alphaloop/webui/
     └── js/
         ├── app.js           (148 lines) Router (9 routes), cache-bust version (`_V`), WebSocket auto-reconnect, showToast()
         ├── api.js           (85 lines)  setAuthToken, getAuthToken, apiFetch, apiGet/Post/Put/Patch/Delete
+        ├── sounds.js        — Web Audio API synthesizer (no audio files). Five named sounds: playTradeOpened (E5→G#5), playTradeClosedProfit (E5→G5→C6), playTradeClosedLoss (G4→E4→C4), playSeedLabDone (C5→E5→G5→C6 fanfare), playEvolution (C5→E5→G5→B5→C6 arpeggio). AudioContext created lazily on first user gesture. All preferences stored in localStorage. Exports: isGloballyEnabled(), getVolume(), isEventEnabled(key), setSoundsEnabled(), setVolume(), setEventEnabled(key, val).
         └── components/
+            ├── live.js       — **Live Trading Monitor** (`#live`). Symbol pills (XAUUSD/BTCUSD/EURUSD/GBPUSD/NAS100/US30) + custom input. Price header (symbol, $price, 24H change, day range, session badge). **Candlestick chart** (Lightweight Charts v4.2, EMA-9/21 overlay, RSI sub-pane, 1m–1w timeframe switcher). **Signal Intelligence card**: BUY/SELL/SCANNING badge; when bot sends `SignalGenerated` event — shows direction + confidence gauge (SVG arc 0–100%) locked for 5 min; when no bot signal — badge shows SCANNING and gauge shows **BUY/SELL/NEUTRAL EMA bias** (derived from EMA9/EMA21 gap direction, color-coded green/red/amber, label "EMA BIAS"). Market regime (▲ Trending Up / ▼ Trending Down / ↔ Ranging), last-signal time, recent EMA crossover pills (last 5 of trailing 50 bars). **Agent Status** row — updated live from `CycleCompleted` events. **Live Thoughts panel** — real-time pipeline narration from `PipelineStep`/`CycleStarted`/`CycleCompleted` WebSocket events; stage icons (🔄🛡🔍📡✅🏰📐⚡) + color-coded status badges; max 20 entries newest-first; "Waiting for bot events..." placeholder. 24H session timeline (Asia/London/Overlap/NY/Off with UTC marker). Info cards: Next News Event, Session Clock, Volatility Regime (CALM/NORMAL/ELEVATED/EXTREME + ATR%). Polls `GET /api/live` every 5s + WebSocket real-time push. Signal data computed server-side from yfinance OHLC via EMA-9/21/50 + RSI-14; `ema_state` always returned for bias display.
             ├── dashboard.js  — 6 stat cards (icons, colors, pulse dot, live indicator)
             ├── trades.js     — filter buttons (All/Open/Closed), data table, outcome badges, pnl coloring
-            ├── bots.js       — bot cards (live dot, uptime calc, symbol, PID, version, remove btn), auto-refresh 30s
-            ├── backtests.js  — new backtest form (**searchable symbol dropdown** with 116 yfinance assets across 13 groups, days, balance, gens, timeframe, 13 tool toggles), run cards (state icon, sharpe, WR, progress bar, live log streaming)
+            ├── bots.js       — **Deploy modal**: strategy card picker (fetches per-symbol excluding retired only; candidates shown greyed-out/disabled with "— promote to deploy" label; dry_run/demo/live selectable; empty state = "No strategies found…"), risk budget slider (25-100%, auto-suggests 50% for same-symbol), mode dropdown. **Agent cards**: card identity block (name, version, signal_mode pill, status badge, WR/Sharpe/DD/P&L metrics), same-symbol badge (`2x XAUUSD`), collapsible **Loop Status panel** (pipeline steps, signal, validation, risk — live via WebSocket), evolution flash badge (StrategyPromoted/RolledBack). **Raw Signal Log modal** (redesigned): two-section layout — Pipeline Status Grid (9 stage cards always rendered, dimmed until event arrives) + Event Stream (chronological list); auto-polls `GET /api/events` every 3s while open (`🟢 live` indicator); uses `apiGet()` for auth. **Sound triggers**: TradeOpened → playTradeOpened(), TradeClosed → profit/loss sound by pnl_usd sign, StrategyPromoted → playEvolution(). Auto-refresh 30s + WS live updates.
+            ├── backtests.js  — new backtest form (**searchable symbol dropdown** with 116 yfinance assets across 13 groups, days, balance, gens, timeframe, 13 tool toggles), run cards (state icon, sharpe, WR, progress bar, live log streaming). **Sound trigger**: state transition to `'completed'` → `playSeedLabDone()`.
             ├── tools.js      — pipeline summary bar (allowed/blocked/total, pass rate %), filter cards (6 filters w/ icons & bars), decisions table
             ├── ai_hub.js     — provider grid (6 cards: icon, name, active badge, key status), model roles (text inputs + toggles)
             ├── research.js   — two tables: reports (date, symbol, WR, sharpe, pnl) + evolution events (type badge, details)
-            ├── strategies.js — strategy version lifecycle page: filter by symbol (dynamic from catalog API) + status, lifecycle pipeline visualization (Candidate → Dry Run → Demo → Live with counts), version cards with metrics (Sharpe, WR, DD, P&L), **tool badges** (read-only pills), **dry-run overlay panel** (per-card tool checkboxes), Promote/Activate buttons
-            └── settings.js   — 9-tab sidebar (API Keys, Web UI, Broker/MT5, Risk, Signal, Session, Telegram, Tools, System — AI Models moved to AI Hub), toggle switches, show/hide passwords, status badges, field descriptions. System tab includes MetaLoop/AutoLearn, Health Monitor, Confidence Sizing & Micro-Learning sections.
+            ├── strategies.js — strategy version lifecycle page: filter by symbol (dynamic from catalog API) + status, lifecycle pipeline visualization (Candidate → Dry Run → Demo → Live with counts), version cards with metrics (Sharpe, WR, DD, P&L), **backtest context row** (📊 timeframe, 📅 days, 💰 initial capital — shown when fields present), **tool badges** (read-only pills), **dry-run overlay panel** (per-card tool checkboxes), Promote/Activate buttons
+            └── settings.js   — 10-tab sidebar (API Keys, Web UI, Broker/MT5, Risk, Signal, Session, Telegram, Tools, System, **🔊 Sounds** — AI Models moved to AI Hub), toggle switches, show/hide passwords, status badges, field descriptions. System tab includes MetaLoop/AutoLearn, Health Monitor, Confidence Sizing & Micro-Learning sections. **Sounds tab** (`localOnly: true` — skips server API, no Save button): Master Controls (global toggle + volume slider) + Event Sounds (5 rows with icon, description, sound notation, ▶ Preview, toggle). All preferences stored in localStorage instantly.
 ```
 
 ## API Endpoints (All Existing)
@@ -54,8 +56,10 @@ src/alphaloop/webui/
 | GET | `/api/trades` | `{trades: [{id, symbol, direction, setup_type, entry_price, lot_size, outcome, pnl_usd, opened_at, ...}]}` |
 | GET | `/api/trades/{id}` | Single trade dict or 404 |
 | GET | `/api/trades/stats/summary` | `{counts: {WIN: n, LOSS: n, ...}}` |
-| GET | `/api/bots` | `{bots: [{id, symbol, instance_id, pid, started_at, strategy_version}]}` |
-| POST | `/api/bots` | Body: `{symbol, instance_id, pid, strategy_version}` |
+| GET | `/api/bots` | `{bots: [{id, symbol, instance_id, pid, started_at, strategy_version, strategy: {name, version, signal_mode, status, metrics}}]}` |
+| POST | `/api/bots` | Body: `{symbol, instance_id, pid, strategy_version}` — manual register |
+| POST | `/api/bots/start` | Body: `{symbol, dry_run, strategy_version, risk_budget_pct}` — deploy subprocess with strategy binding |
+| POST | `/api/bots/{instance_id}/stop` | `{status: ok, instance_id, signal_sent}` — stop agent + delete record |
 | DELETE | `/api/bots/{instance_id}` | `{status: ok, removed: id}` |
 | GET | `/api/backtests/symbols` | `{symbols: [{symbol, name, yf_ticker, group}], groups: [...]}` — **116 yfinance assets, 13 groups** |
 | GET | `/api/backtests` | `{backtests: [{run_id, symbol, name, state, generation, max_generations, best_sharpe, best_wr, ...}]}` |
@@ -93,14 +97,21 @@ src/alphaloop/webui/
 | POST | `/api/strategies/{symbol}/v{ver}/canary/end` | `{canary_id, recommendation, metrics, reasons}` |
 | PUT | `/api/strategies/{symbol}/v{version}/models` | `{status, ai_models}` — body: `{signal, validator, research, autolearn}` — updates per-strategy model assignments |
 | DELETE | `/api/strategies/{symbol}/v{version}` | `{status, deleted}` — removes strategy version JSON file |
+| GET | `/api/live` | `{symbol, timeframe, price, change_pct, day_high, day_low, ohlc:[{time,o,h,l,c}], session, signal:{direction,confidence,rsi,ema9,ema21,source,timestamp}\|null, ema_state:{ema9,ema21,ema50,rsi,gap_pct,regime}, market_regime, recent_signals:[{direction,time,price}], volatility:{regime,atr_value,atr_pct}, bot_running, recent_trades, timestamp}` — `signal` is null when no crossover detected; `ema_state` always returned for bias display |
+| GET | `/api/live/symbols` | `{symbols: [{symbol, bot_running, price, change_pct}]}` |
+| GET | `/api/live/sessions` | `{sessions, current_time_utc, current_hour}` |
 | WS | `/ws` | Event stream: `{type, timestamp, ...fields}` |
 
-## WebSocket Events (Defined in core/events.py — 13 event types)
+## WebSocket Events (Defined in core/events.py — 18 event types)
+- `CycleStarted` — symbol, instance_id, cycle
+- `CycleCompleted` — symbol, instance_id, cycle, outcome, detail
+- `PipelineStep` — symbol, instance_id, cycle, stage, status, detail *(risk_check/filters/signal_gen/validation/guards/sizing/execution)*
 - `SignalGenerated` — symbol, direction, confidence, setup_type
 - `SignalValidated` — symbol, direction, status, risk_score
 - `SignalRejected` — symbol, direction, reason, rejected_by
 - `TradeOpened` — symbol, direction, entry_price, lot_size, trade_id
 - `TradeClosed` — symbol, outcome, pnl_usd, trade_id
+- `TradeRepositioned` — symbol, instance_id, trade_id, trigger, action, reason
 - `PipelineBlocked` — symbol, blocked_by, reason
 - `RiskLimitHit` — limit_type, details
 - `ResearchCompleted` — symbol, report_id
@@ -109,6 +120,7 @@ src/alphaloop/webui/
 - `SeedLabProgress` — run_id, phase, current, total, message
 - `CanaryStarted` — symbol, canary_id, allocation_pct, duration_hours
 - `CanaryEnded` — symbol, canary_id, recommendation
+- `MetaLoopCompleted` — symbol, action_taken, new_version
 
 ## Pages — Current Implementation
 
@@ -124,12 +136,16 @@ src/alphaloop/webui/
 - Outcome badges: WIN=green, LOSS=red, BE=amber, OPEN=blue
 - Loads up to 200 trades
 
-### Bots (`#bots`)
+### Alpha Agents (`#agents`)
 - Card grid per running instance
-- Each card: green pulse dot, symbol (large), version/uptime/PID stats, instance ID, started timestamp, red Remove button
-- Uptime calculated from started_at (Xd Xh / Xh Xm / Xm / Xs)
-- Auto-refresh every 30s, delete confirmation dialog
-- Empty state: robot emoji + CLI example command
+- **Header:** Strategy name (stripped `_v1` suffix) + version badge (V1 pill) + Active badge. Falls back to symbol if no strategy bound.
+- **Stats:** Uptime counter (starts 0:00 on page load, ticks every second via setInterval) + PID
+- **Identity block:** Signal mode pill (ALGO ONLY / ALGO+AI) + status badge + WR/Sharpe/P&L/DD metrics
+- **Raw Signal Log** button: opens per-instance modal with Pipeline Status Grid (9 stage cards, always rendered, dimmed until event arrives) + Event Stream (chronological list). Auto-polls `GET /api/events?instance_id=...` every 3s while open (`🟢 live` indicator). Uses `apiGet()` with auth. Click outside or ✕ to close, polling stops.
+- **Loop Status** section: hidden until first WS event, then collapsible with pipeline/signal/validation/risk data
+- **Deploy modal:** Symbol select + Mode (Dry/Live) + Risk Budget slider + Strategy Card picker (radio buttons with signal mode pills and metrics)
+- Auto-refresh every 30s, stop/remove confirmation
+- Empty state: robot emoji + deploy prompt
 
 ### Backtests (`#backtests`)
 - **New Backtest form:**
@@ -191,14 +207,14 @@ src/alphaloop/webui/
 - **Symbol tabs**: `All` + one tab per symbol found in data (e.g. `All | BTCUSD | XAUUSD`). Click to filter. Active tab has blue underline. Tabs auto-populate from strategy data.
 - **Status filter + lifecycle dots**: Inline status dropdown + colored dot counters (amber/blue/purple/green) with arrow flow
 - **Card grid** (`grid-template-columns: repeat(auto-fill, minmax(220px, 1fr))`):
-  - Each card: colored top border by status, header (creative name + badge), 5-metric grid (Trades, Win Rate, Sharpe, P&L, Max DD), param summary, **tool badges row** (read-only pill badges showing which tools were baked in — e.g. `[Session] [Volatility] [EMA200]`, locked with `pointer-events: none`), **expandable AI Models panel** (4 dropdowns: Signal, Validator, Research, Autolearn — each can be "Use Default" or specific model from catalog, saved via `PUT /api/strategies/{symbol}/v{version}/models`), action buttons
+  - Each card: colored top border by status, header (creative name + badge), 5-metric grid (Trades, Win Rate, Sharpe, P&L, Max DD), param summary, **tool badges row** (read-only pill badges showing which tools were baked in — e.g. `[Session] [Volatility] [EMA200]`, locked with `pointer-events: none`), **signal mode toggle** (2 pills: `Algo Only` / `Algo + AI`, saves immediately via `PUT /api/strategies/{sym}/v{ver}/models { signal_mode }`, clicking Algo Only hides AI Models row), **expandable AI Models panel** (4 dropdowns: Signal, Validator, Research, Autolearn — each can be "Use Default" or specific model from catalog, saved via `PUT /api/strategies/{symbol}/v{version}/models`), action buttons
   - Cards lift on hover (`translateY(-2px)` + shadow)
   - Actions: **Promote** (blue), **Activate** (green, for dry_run+), **Delete ✕** (red, with confirmation)
   - `DELETE /api/strategies/{symbol}/v{version}` removes the JSON file
 - Empty state with guidance: "Run a backtest to auto-create strategy versions"
 
 ### Settings (`#settings`)
-- 9-tab sidebar with icons: 🔑 API Keys, 🔒 Web UI, 📡 Broker/MT5, ⚖️ Risk, 📊 Signal, 🕐 Session, ✈️ Telegram, 🛠️ Tools, ⚙️ System (AI Models tab removed — moved to AI Hub page)
+- 10-tab sidebar with icons: 🔑 API Keys, 🔒 Web UI, 📡 Broker/MT5, ⚖️ Risk, 📊 Signal, 🕐 Session, ✈️ Telegram, 🛠️ Tools, ⚙️ System, 🔊 Sounds (AI Models tab removed — moved to AI Hub page)
 - **Connection test buttons** on 3 tabs (below section fields, with inline result display):
   - **API Keys**: Each provider (Gemini, Claude, OpenAI, DeepSeek, xAI, Qwen) has "🔑 Test Key" → `POST /api/test/ai-key {provider, model}` → pings specific provider
   - **Broker/MT5**: "🔌 Test MT5 Connection" → `POST /api/test/mt5` → shows server, balance, leverage
@@ -226,6 +242,10 @@ src/alphaloop/webui/
   - **Health Monitor:** Weight Sharpe/WinRate/Drawdown/Stagnation, Healthy Threshold, Critical Threshold
   - **Confidence Sizing & Micro-Learning:** Confidence Sizing toggle, Micro-Learning toggle, Max Nudge Per Trade, Max Total Drift
   - **Database:** Database URL
+- **Sounds tab** (`localOnly: true` — no server API call, "Save Changes" footer hidden):
+  - **Master Controls:** global Sound Effects toggle, Volume slider (0–100%)
+  - **Event Sounds:** 5 rows — Trade Opened, Trade Closed—Profit, Trade Closed—Loss, SeedLab Complete, Strategy Evolution. Each row: icon, name, description, sound notation, ▶ Preview button (force-plays regardless of toggle state), On/Off toggle
+  - All preferences persist instantly to `localStorage`; no save needed
 - 110+ settings fields total
 
 ## CSS Theme Variables

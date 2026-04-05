@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _CACHE_TTL = 60.0
 
 # Default values seeded into the DB on first startup (only if key is absent).
-# Covers Signal tab (25 keys) + Tools tab (43 keys) = 68 keys total.
+# Covers Signal tab (25 keys) + Tools tab (43 keys) + Promotion tab (3 keys) = 71 keys total.
 SETTING_DEFAULTS: dict[str, str] = {
     # ── Signal: Core Thresholds ──────────────────────────────────────────────
     "TRADING_MODE":              "swing",
@@ -54,9 +54,15 @@ SETTING_DEFAULTS: dict[str, str] = {
     "PIPELINE_SIZE_FLOOR":       "0.5",
 
     # ── Tools: Pipeline Filters ───────────────────────────────────────────────
+    "PROMOTION_CANDIDATE_GATE_ALGO_ONLY": "true",
+    "PROMOTION_CANDIDATE_GATE_ALGO_AI":   "true",
+    "PROMOTION_CANDIDATE_GATE_AI_SIGNAL": "false",
     "tool_enabled_session_filter":    "true",
     "MIN_SESSION_SCORE":              "0.55",
     "tool_enabled_news_filter":       "true",
+    "NEWS_PROVIDER":                  "forexfactory",
+    "FINNHUB_API_KEY":                "",
+    "FMP_API_KEY":                    "",
     "NEWS_PRE_MINUTES":               "30",
     "NEWS_POST_MINUTES":              "15",
     "tool_enabled_volatility_filter": "true",
@@ -164,6 +170,8 @@ SETTING_DEFAULTS: dict[str, str] = {
     "ENVIRONMENT":                 "development",
     # ── WebUI Preferences ────────────────────────────────────────────────────
     "WEBUI_THEME":                 "dark",
+    # ── WebUI Auth ───────────────────────────────────────────────────────────
+    "AUTH_TOKEN":                  "",
 }
 
 # Keep old name as alias so any external references don't break.
@@ -176,23 +184,29 @@ class SettingsService:
 
     On first access (or after TTL expiry), reads all settings from DB
     into a dict cache. Individual get() calls hit the cache.
+    Cache auto-refreshes after _CACHE_TTL seconds.
     """
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
         self._cache: dict[str, str] = {}
         self._cache_loaded = False
+        self._cache_time: float = 0.0
         self._lock = asyncio.Lock()
 
     async def _ensure_cache(self) -> None:
-        if self._cache_loaded:
+        import time
+        now = time.monotonic()
+        if self._cache_loaded and (now - self._cache_time) < _CACHE_TTL:
             return
         async with self._lock:
-            if self._cache_loaded:
+            now = time.monotonic()
+            if self._cache_loaded and (now - self._cache_time) < _CACHE_TTL:
                 return
             await self._reload_cache()
 
     async def _reload_cache(self) -> None:
+        import time
         try:
             async with self._session_factory() as session:
                 result = await session.execute(select(AppSetting))
@@ -200,6 +214,7 @@ class SettingsService:
                     row.key: row.value or "" for row in result.scalars()
                 }
                 self._cache_loaded = True
+                self._cache_time = time.monotonic()
         except Exception as e:
             logger.warning(f"[settings] Failed to load from DB: {e}")
 

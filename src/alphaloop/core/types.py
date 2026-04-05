@@ -67,8 +67,28 @@ class ValidationStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class ValidationLevel(StrEnum):
+    """
+    Controls the validation intensity applied to each trade signal.
+
+    strict     — Hard rules + AI validator + ECE adaptive threshold tightening.
+                 Most restrictive. Recommended for live capital.
+    standard   — Hard rules + AI validator.  ECE tightening disabled.
+                 Useful when you want AI review without adaptive confidence drift.
+    algo_only  — Hard rules only.  No AI validator call.
+                 Fastest; use for algo-only strategies or when AI is unavailable.
+
+    Hard rules (SL, TP, R:R, structure) ALWAYS run regardless of level.
+    """
+
+    STRICT = "strict"
+    STANDARD = "standard"
+    ALGO_ONLY = "algo_only"
+
+
 class StrategyStatus(StrEnum):
     CANDIDATE = "candidate"
+    WF_REJECTED = "wf_rejected"   # failed walk-forward gate; needs review before promotion
     DRY_RUN = "dry_run"
     DEMO = "demo"
     LIVE = "live"

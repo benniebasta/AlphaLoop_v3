@@ -330,3 +330,192 @@ def volume_ma(volume: pd.Series, period: int = 20) -> dict:
         "strong_volume": ratio >= 1.5,
         "weak_volume": ratio < 0.8,
     }
+
+
+# ── Advanced indicators (AI confidence features) ─────────────────────────────
+
+
+def alma(series: pd.Series, window: int = 9, offset: float = 0.85, sigma: float = 6.0) -> pd.Series:
+    """Arnaud Legoux Moving Average — Gaussian-weighted, low-lag MA.
+
+    Uses an offset Gaussian kernel to weight recent prices more heavily
+    while maintaining smoothness. Default params: window=9, offset=0.85, sigma=6.
+
+    Returns pd.Series same length as input (NaN where insufficient data).
+    """
+    m = offset * (window - 1)
+    s = window / sigma
+    weights = np.array([np.exp(-((i - m) ** 2) / (2 * s * s)) for i in range(window)])
+    weights = weights / weights.sum()
+
+    result = series.rolling(window=window).apply(
+        lambda x: np.dot(x, weights), raw=True,
+    )
+    return result
+
+
+def trendilo(
+    series: pd.Series,
+    period: int = 14,
+    smooth: int = 5,
+    atr_series: pd.Series | None = None,
+) -> dict:
+    """Trendilo — smoothed linear regression slope for trend detection.
+
+    Computes rolling linear regression slope over `period` bars, then
+    smooths with EMA. Normalizes slope against ATR to produce a 0-100
+    strength scale independent of price magnitude.
+
+    Returns dict with slope, smoothed_slope, direction, strength (0-100).
+    """
+    if len(series) < period + smooth:
+        return {
+            "slope": 0.0,
+            "smoothed_slope": 0.0,
+            "direction": "flat",
+            "strength": 0.0,
+        }
+
+    x = np.arange(period, dtype=float)
+    x_mean = x.mean()
+    x_var = ((x - x_mean) ** 2).sum()
+
+    def _linreg_slope(window: np.ndarray) -> float:
+        y_mean = window.mean()
+        return float(((x - x_mean) * (window - y_mean)).sum() / x_var)
+
+    raw_slope = series.rolling(window=period).apply(_linreg_slope, raw=True)
+    smoothed = raw_slope.ewm(span=smooth, adjust=False).mean()
+
+    last_slope = float(smoothed.iloc[-1]) if len(smoothed) > 0 else 0.0
+
+    # Normalize against ATR for cross-asset comparability
+    if atr_series is not None and len(atr_series) > 0:
+        last_atr = float(atr_series.iloc[-1])
+        if last_atr > 0:
+            normalized = abs(last_slope) / last_atr * 100
+        else:
+            normalized = 0.0
+    else:
+        # Fallback: normalize against recent price range
+        recent = series.iloc[-period:]
+        price_range = float(recent.max() - recent.min())
+        normalized = abs(last_slope) / price_range * 100 if price_range > 0 else 0.0
+
+    strength = min(100.0, normalized)
+
+    if last_slope > 0.0001:
+        direction = "up"
+    elif last_slope < -0.0001:
+        direction = "down"
+    else:
+        direction = "flat"
+
+    return {
+        "slope": round(last_slope, 6),
+        "smoothed_slope": round(last_slope, 6),
+        "direction": direction,
+        "strength": round(strength, 2),
+    }
+
+
+def choppiness_index(df: pd.DataFrame, period: int = 14) -> dict:
+    """Choppiness Index — measures trending vs ranging market conditions.
+
+    Formula: CI = 100 * log10(sum(ATR_1bar, period) / (HH - LL)) / log10(period)
+    Range: 0-100
+      >61.8 = choppy / consolidating
+      <38.2 = strongly trending
+
+    Returns dict with ci value, is_choppy, is_trending flags.
+    """
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+
+    # 1-bar True Range
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    # Sum of TR over period
+    tr_sum = tr.rolling(window=period).sum()
+
+    # Highest high - lowest low over period
+    hh = high.rolling(window=period).max()
+    ll = low.rolling(window=period).min()
+    hl_range = hh - ll
+
+    # CI formula
+    log_period = np.log10(period)
+    ci_series = 100 * np.log10(tr_sum / hl_range.replace(0, np.nan)) / log_period
+
+    last_ci = float(ci_series.iloc[-1]) if len(ci_series) > 0 and not pd.isna(ci_series.iloc[-1]) else 50.0
+    last_ci = max(0.0, min(100.0, last_ci))
+
+    return {
+        "ci": round(last_ci, 2),
+        "is_choppy": last_ci > 61.8,
+        "is_trending": last_ci < 38.2,
+    }
+
+
+def fast_fingers(
+    series: pd.Series,
+    period: int = 14,
+    mult: float = 2.0,
+) -> dict:
+    """Fast Fingers Study — momentum exhaustion / reversal detector.
+
+    Uses Rate of Change + standard deviation bands to identify overextended
+    moves. When ROC breaches the bands, momentum is exhausted and a
+    snap-back is likely.
+
+    Returns dict with roc, bands, exhaustion flags, and exhaustion_score (0-100).
+    """
+    if len(series) < period * 2:
+        return {
+            "roc": 0.0,
+            "roc_sma": 0.0,
+            "upper_band": 0.0,
+            "lower_band": 0.0,
+            "is_exhausted_up": False,
+            "is_exhausted_down": False,
+            "exhaustion_score": 0.0,
+        }
+
+    shifted = series.shift(period)
+    roc = ((series - shifted) / shifted.replace(0, np.nan)) * 100
+
+    roc_sma = roc.rolling(window=period).mean()
+    roc_std = roc.rolling(window=period).std()
+
+    upper = roc_sma + mult * roc_std
+    lower = roc_sma - mult * roc_std
+
+    last_roc = float(roc.iloc[-1]) if not pd.isna(roc.iloc[-1]) else 0.0
+    last_upper = float(upper.iloc[-1]) if not pd.isna(upper.iloc[-1]) else 0.0
+    last_lower = float(lower.iloc[-1]) if not pd.isna(lower.iloc[-1]) else 0.0
+    last_sma = float(roc_sma.iloc[-1]) if not pd.isna(roc_sma.iloc[-1]) else 0.0
+    last_std = float(roc_std.iloc[-1]) if not pd.isna(roc_std.iloc[-1]) else 1.0
+
+    is_exhausted_up = last_roc > last_upper
+    is_exhausted_down = last_roc < last_lower
+
+    # Exhaustion score: how far ROC is beyond the bands (0=within, 100=extreme)
+    if last_std > 0:
+        z_score = abs(last_roc - last_sma) / last_std
+        exhaustion_score = min(100.0, max(0.0, (z_score - mult) / mult * 100))
+    else:
+        exhaustion_score = 0.0
+
+    return {
+        "roc": round(last_roc, 4),
+        "roc_sma": round(last_sma, 4),
+        "upper_band": round(last_upper, 4),
+        "lower_band": round(last_lower, 4),
+        "is_exhausted_up": is_exhausted_up,
+        "is_exhausted_down": is_exhausted_down,
+        "exhaustion_score": round(exhaustion_score, 2),
+    }

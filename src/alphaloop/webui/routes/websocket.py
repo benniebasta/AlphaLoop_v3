@@ -30,7 +30,8 @@ async def broadcast(data: dict) -> None:
     for ws in _clients:
         try:
             await ws.send_text(text)
-        except Exception:
+        except Exception as e:
+            logger.debug("[ws] Failed to send to client: %s", e)
             stale.append(ws)
     for ws in stale:
         _clients.discard(ws)
@@ -49,30 +50,52 @@ async def _event_handler(event: Event) -> None:
     }
     try:
         data.update(asdict(event))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("[ws] asdict failed for event %s: %s", type(event).__name__, e)
     # Ensure timestamp is serialisable
     data["timestamp"] = str(data.get("timestamp", ""))
     await broadcast(data)
 
 
-def _check_ws_token(ws: WebSocket) -> bool:
-    """Validate WebSocket auth token from query params."""
-    token = os.environ.get("AUTH_TOKEN", "")
-    if not token:
-        return True  # No auth in dev mode
-    provided = ws.query_params.get("token", "")
-    return provided == token
+def _check_ws_token(ws: WebSocket) -> tuple[bool, str]:
+    """
+    Validate WebSocket auth token.
+
+    Token resolution order (most-to-least secure):
+      1. Sec-WebSocket-Protocol header — sent by frontend as `new WebSocket(url, [token])`.
+         Not visible in server logs or browser history unlike query params.
+      2. ?token= query param — legacy fallback for backward compatibility.
+
+    Returns (valid: bool, provided_token: str).
+    """
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return True, ""  # No auth configured — dev mode
+    # Primary: subprotocol header (secure)
+    provided = ws.headers.get("sec-websocket-protocol", "").strip()
+    if not provided:
+        # Fallback: query param (legacy, logs a deprecation warning)
+        provided = ws.query_params.get("token", "")
+        if provided:
+            logger.warning(
+                "[ws] Auth token passed via query param — migrate to "
+                "Sec-WebSocket-Protocol header (new WebSocket(url, [token]))"
+            )
+    return provided == expected, provided
 
 
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     """Accept WebSocket connections and forward EventBus events."""
-    if not _check_ws_token(ws):
+    valid, provided_token = _check_ws_token(ws)
+    if not valid:
         await ws.close(code=4001, reason="Unauthorized")
         return
 
-    await ws.accept()
+    # Echo back the subprotocol so the browser does not close the connection
+    # (RFC 6455 §4.2.2: server must match a requested subprotocol or omit).
+    subproto = provided_token if ws.headers.get("sec-websocket-protocol") else None
+    await ws.accept(subprotocol=subproto)
     _clients.add(ws)
 
     # Subscribe to all events via the container's EventBus (once only)

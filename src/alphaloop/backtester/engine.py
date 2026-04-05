@@ -116,16 +116,38 @@ class BacktestEngine:
     """
     Async backtest engine — runs rule-based backtests on OHLC data.
 
+    .. deprecated::
+        BacktestEngine uses an arbitrary ``signal_fn`` that diverges from the live
+        v4 pipeline path (TradeConstructor + compute_direction).  New code should
+        use ``run_vectorbt_backtest`` from ``backtester.vbt_engine`` which shares
+        the same SL/TP logic as the live trading loop.
+
+        BacktestEngine is retained for ParallelBacktester / AutoImprover
+        compatibility only.  It must NOT be used in the live trading path.
+
     Injected dependencies:
     - session_factory: for persisting backtest runs to DB
     - event_bus: for publishing state changes
     """
 
+    #: Marker checked by live-path guards.  Instantiation in live mode raises.
+    _LEGACY_BACKTEST_ONLY: bool = True
+
     def __init__(
         self,
         session_factory: async_sessionmaker | None = None,
         event_bus: EventBus | None = None,
+        *,
+        _allow_in_live: bool = False,
     ) -> None:
+        if not _allow_in_live:
+            import warnings
+            warnings.warn(
+                "BacktestEngine uses a signal_fn that diverges from the live v4 "
+                "pipeline. Use run_vectorbt_backtest (vbt_engine) instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._session_factory = session_factory
         self._event_bus = event_bus
 
@@ -145,6 +167,10 @@ class BacktestEngine:
         run_id: str | None = None,
         signal_fn: Any = None,
         stop_check: Any = None,
+        # Slippage & spread simulation parameters
+        spread_pips: float = 0.0,
+        slippage_pips: float = 0.0,
+        commission_per_lot: float = 0.0,
     ) -> BacktestResult:
         """
         Run a backtest on the given OHLC data.
@@ -187,6 +213,7 @@ class BacktestEngine:
         if run_id and self._session_factory:
             await self._update_db_state(run_id, BacktestState.RUNNING)
 
+        i = start_idx - 1
         try:
             for i in range(start_idx, end_idx + 1):
                 if stop_check and stop_check():
@@ -218,12 +245,24 @@ class BacktestEngine:
                     )
                     if sig is not None:
                         direction, entry, sl, tp1, tp2, setup_type, conf = sig
+
+                        # Apply spread + slippage simulation
+                        total_slip = spread_pips + slippage_pips
+                        if direction == TradeDirection.BUY:
+                            entry += total_slip  # Worse fill for buys
+                        else:
+                            entry -= total_slip  # Worse fill for sells
+
                         risk_amount = equity * risk_pct
                         sl_dist = abs(entry - sl)
                         if sl_dist > 0:
                             lots = round(risk_amount / sl_dist, 4)
                         else:
                             lots = 0.01
+
+                        # Deduct commission
+                        if commission_per_lot > 0:
+                            equity -= lots * commission_per_lot
 
                         open_trade = BacktestTrade(
                             bar_index=i,
@@ -278,6 +317,91 @@ class BacktestEngine:
             )
 
         return result
+
+    async def run_holdout_validation(
+        self,
+        symbol: str,
+        opens: np.ndarray,
+        highs: np.ndarray,
+        lows: np.ndarray,
+        closes: np.ndarray,
+        timestamps: list[datetime] | None = None,
+        balance: float = 10_000.0,
+        risk_pct: float = 0.01,
+        filters: list[str] | None = None,
+        signal_fn: Any = None,
+        holdout_bars: int = 500,
+        run_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Run a walk-forward holdout validation on the final N bars of the dataset.
+
+        The holdout slice is strictly the last ``holdout_bars`` bars — it must
+        **not** overlap with the in-sample or OOS window used for strategy
+        optimisation.  Returns a summary dict compatible with
+        ``DeploymentPipeline.evaluate_promotion(holdout_result=...)``.
+
+        Args:
+            symbol: Trading symbol.
+            opens, highs, lows, closes: Full price arrays (all available data).
+            timestamps: Optional datetime per bar.
+            balance: Starting balance for the simulation.
+            risk_pct: Risk per trade as fraction of balance.
+            filters: Active filter names.
+            signal_fn: Signal function (same signature as ``run()``).
+            holdout_bars: Number of trailing bars to reserve as holdout slice.
+            run_id: Optional identifier.
+
+        Returns:
+            dict with keys: sharpe, win_rate, total_trades, total_pnl, max_dd_pct,
+            holdout_bars — or None if the dataset is too short.
+        """
+        total_bars = len(closes)
+        if total_bars <= holdout_bars:
+            logger.warning(
+                "[holdout] Dataset too short (%d bars) for holdout_bars=%d",
+                total_bars, holdout_bars,
+            )
+            return None
+
+        holdout_start = total_bars - holdout_bars
+        holdout_end = total_bars - 1
+
+        logger.info(
+            "[holdout] Running holdout validation on bars %d–%d (%d bars)",
+            holdout_start, holdout_end, holdout_bars,
+        )
+
+        result = await self.run(
+            symbol=symbol,
+            opens=opens,
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            timestamps=timestamps,
+            balance=balance,
+            risk_pct=risk_pct,
+            filters=filters,
+            start_idx=holdout_start,
+            end_idx=holdout_end,
+            run_id=run_id or f"holdout_{symbol}",
+            signal_fn=signal_fn,
+        )
+
+        if result.error:
+            logger.warning("[holdout] Backtest error: %s", result.error)
+            return None
+
+        summary = result.summary()
+        summary["holdout_bars"] = holdout_bars
+        logger.info(
+            "[holdout] Result: trades=%d sharpe=%s win_rate=%.1f%% dd=%.1f%%",
+            summary.get("total_trades", 0),
+            summary.get("sharpe"),
+            (summary.get("win_rate", 0) or 0) * 100,
+            summary.get("max_dd_pct", 0) or 0,
+        )
+        return summary
 
     async def walk_forward(
         self,

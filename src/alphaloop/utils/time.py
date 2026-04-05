@@ -26,6 +26,13 @@ DEFAULT_SESSION_WEIGHTS = {
 }
 
 
+def utc_day_start(now: datetime | None = None) -> datetime:
+    """Return the current UTC day boundary."""
+    current = now or datetime.now(timezone.utc)
+    current = current.astimezone(timezone.utc)
+    return current.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _session_active(now_utc: datetime, tz: ZoneInfo, open_t: _time, close_t: _time) -> bool:
     local = now_utc.astimezone(tz)
     return open_t <= local.time() < close_t
@@ -50,7 +57,7 @@ def get_session_info(
     weekday = now.weekday()
 
     if weekday >= 5:
-        return {"name": "weekend", "score": 0.0, "active": False, "hour_utc": now.hour}
+        return {"name": "weekend", "score": 0.0, "active": False, "hour_utc": now.hour, "minute": now.minute, "is_weekend": True, "is_london_ny_overlap": False}
 
     in_london = _session_active(now, _TZ_LONDON, _LONDON_OPEN, _LONDON_CLOSE)
     in_ny = _session_active(now, _TZ_NY, _NY_OPEN, _NY_CLOSE)
@@ -74,6 +81,7 @@ def get_session_info(
         "active": score >= min_session_score,
         "hour_utc": now.hour,
         "minute": now.minute,
+        "is_weekend": weekday >= 5,
         "is_london_ny_overlap": name == "london_ny_overlap",
     }
 

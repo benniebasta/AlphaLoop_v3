@@ -12,9 +12,12 @@ MT5 Terminal / yfinance
         │
         v
   OHLCVFetcher (data/fetcher.py)
-  ├── MT5: asyncio.to_thread(mt5.copy_rates_from_pos)
+  ├── MT5: asyncio.to_thread(mt5.copy_rates_from_pos) — for WebUI/backtests
+  ├── Trading loop: sync mt5.copy_rates_from_pos directly (MT5 API is thread-unsafe)
   ├── yfinance: fallback when MT5 unavailable
-  └── TTL cache per timeframe (M1:60s, M5/M15:290s, H1:300s)
+  ├── TTL cache per timeframe (M1:60s, M5/M15:290s, H1:300s)
+  ├── Symbol auto-resolution: XAUUSD → XAUUSDm (Exness suffix fallback: m, M, .raw)
+  └── MT5 always connects even in dry-run mode (needed for price data)
         │
         v
   Indicators (data/indicators.py) — pure functions
@@ -183,29 +186,38 @@ SeedLab                      Backtest/Optuna              Strategy Version
                                                               │
                                                               v
   Deployment Pipeline (backtester/deployment_pipeline.py)
-  ├── candidate   — newly created
-  ├── dry_run     — gate: 30+ trades, Sharpe > 0.3
-  ├── demo        — gate: 50+ trades, Sharpe > 0.5
-  └── live        — gate: 100+ trades, Sharpe > 0.7
+  ├── retired     — auto-assigned at creation if result fails candidate→dry_run gate
+  ├── candidate   — newly created (passed quality gate)
+  ├── dry_run     — gate: 40+ trades, Sharpe ≥ 1.0, WR ≥ 42%, DD ≤ 25%
+  ├── demo        — gate: 50+ trades, Sharpe ≥ 0.5, WR ≥ 42%, DD ≤ 20%, 3 cycles
+  └── live        — gate: 100+ trades, Sharpe ≥ 0.7, WR ≥ 45%, DD ≤ 15%, 5 cycles
 ```
 
 ---
 
-## 7. WebSocket Event Flow
+## 7. Event Flow (WebSocket + HTTP Bridge)
 
 ```
 EventBus.publish(event)
         │
-        v
-  websocket.py subscriber
-  ├── Serialize event to JSON
-  ├── Broadcast to all connected WS clients
-  └── Per-client: {type, timestamp, ...event_fields}
+        ├─── [web server process] websocket.py subscriber
+        │    ├── Serialize event to JSON
+        │    ├── Broadcast to all connected WS clients
+        │    └── Record to in-memory ring buffer (event_log.py)
+        │
+        └─── [subprocess agents] main.py _bridge_event subscriber
+             ├── Serialize event + tag with instance_id
+             ├── POST to http://localhost:8090/api/events/ingest (sync, <50ms)
+             └── Fire-and-forget (failures silently ignored)
         │
         v
   Browser SPA
   ├── Dashboard: refresh stats on TradeOpened/TradeClosed
   ├── Backtests: update progress on SeedLabProgress
   ├── Strategies: flash on StrategyPromoted
+  ├── Alpha Agents: Raw Signal Log modal (GET /api/events?instance_id=...)
   └── Toast notifications for RiskLimitHit
+
+EventBus.publish() traverses __mro__ so subscribing to Event base class
+catches all subclasses (PipelineBlocked, SignalGenerated, etc.)
 ```

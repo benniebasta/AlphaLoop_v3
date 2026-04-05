@@ -6,20 +6,23 @@ Includes WebUI-driven agent launch via subprocess.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal as os_signal
 import subprocess
 import sys
 import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphaloop.trading.strategy_loader import normalize_signal_mode
 from alphaloop.db.models.instance import RunningInstance
-from alphaloop.webui.deps import get_db_session
+from alphaloop.webui.deps import get_db_session, get_container
 
 logger = logging.getLogger(__name__)
 
@@ -33,24 +36,45 @@ class BotCreate(BaseModel):
     strategy_version: str | None = None
 
 
-def _bot_to_dict(b: RunningInstance) -> dict:
-    return {
+def _bot_to_dict(b: RunningInstance, bound_strategy: dict | None = None) -> dict:
+    d = {
         "id": b.id,
         "symbol": b.symbol,
         "instance_id": b.instance_id,
         "pid": b.pid,
-        "started_at": b.started_at.isoformat() if b.started_at else None,
+        "started_at": b.started_at.isoformat() + "Z" if b.started_at else None,
         "strategy_version": b.strategy_version,
     }
+    if bound_strategy:
+        d["strategy"] = {
+            "name": bound_strategy.get("name", ""),
+            "version": bound_strategy.get("version", 0),
+            "signal_mode": normalize_signal_mode(bound_strategy.get("signal_mode")),
+            "status": bound_strategy.get("status", ""),
+            "tools": bound_strategy.get("tools", {}),
+            "overlay": bound_strategy.get("overlay", []),
+            "metrics": {
+                "win_rate": bound_strategy.get("summary", {}).get("win_rate", 0),
+                "sharpe": bound_strategy.get("summary", {}).get("sharpe", 0),
+                "max_dd_pct": bound_strategy.get("summary", {}).get("max_dd_pct", 0),
+                "total_pnl": bound_strategy.get("summary", {}).get("total_pnl", 0),
+            },
+        }
+    return d
 
 
 def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True, text=True,
-        )
-        return str(pid) in result.stdout
+        import ctypes
+        PROCESS_QUERY_INFORMATION = 0x0400
+        STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+        if not handle:
+            return False
+        exit_code = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return exit_code.value == STILL_ACTIVE
     try:
         os.kill(pid, 0)
         return True
@@ -61,8 +85,9 @@ def _pid_alive(pid: int) -> bool:
 @router.get("")
 async def list_bots(
     session: AsyncSession = Depends(get_db_session),
+    container=Depends(get_container),
 ) -> dict:
-    """Return all running bot instances, auto-purging stale entries."""
+    """Return all running bot instances with bound strategy data, auto-purging stale entries."""
     result = await session.execute(select(RunningInstance))
     bots = list(result.scalars())
     live, stale = [], []
@@ -76,7 +101,36 @@ async def list_bots(
         await session.delete(b)
     if stale:
         await session.flush()
-    return {"bots": [_bot_to_dict(b) for b in live]}
+
+    # Enrich each live bot with its bound strategy card data
+    enriched = []
+    settings_svc = None
+    try:
+        from alphaloop.config.settings_service import SettingsService
+        settings_svc = SettingsService(container.db_session_factory)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning("[bots] SettingsService init failed: %s", e)
+
+    for b in live:
+        bound = None
+        if settings_svc:
+            try:
+                raw = await settings_svc.get(f"active_strategy_{b.instance_id}")
+                if not raw:
+                    raw = await settings_svc.get(f"active_strategy_{b.symbol}")
+                if raw:
+                    bound = json.loads(raw)
+                    bound["signal_mode"] = normalize_signal_mode(bound.get("signal_mode"))
+                    # Fetch dry-run overlay tools for this strategy
+                    ver = bound.get("version", 0)
+                    overlay_raw = await settings_svc.get(f"dry_run_overlay_{b.symbol}_v{ver}")
+                    if overlay_raw:
+                        bound["overlay"] = json.loads(overlay_raw).get("extra_tools", [])
+            except Exception:
+                pass
+        enriched.append(_bot_to_dict(b, bound))
+    return {"bots": enriched}
 
 
 @router.post("")
@@ -85,14 +139,14 @@ async def register_bot(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Register a new running bot instance."""
-    # Check for collision
+    # Check for collision by instance_id (not symbol — multiple agents per symbol allowed)
     existing = await session.execute(
-        select(RunningInstance).where(RunningInstance.symbol == body.symbol)
+        select(RunningInstance).where(RunningInstance.instance_id == body.instance_id)
     )
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=409,
-            detail=f"Bot already running for {body.symbol}",
+            detail=f"Instance {body.instance_id} already registered",
         )
     bot = RunningInstance(
         symbol=body.symbol,
@@ -126,41 +180,105 @@ async def unregister_bot(
 class AgentStartRequest(BaseModel):
     symbol: str = "XAUUSD"
     dry_run: bool = True
-    strategy_version: str | None = None
+    strategy_version: int | None = None
+    risk_budget_pct: float = 1.0
 
 
 @router.post("/start")
 async def start_agent(
     body: AgentStartRequest,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
+    container=Depends(get_container),
 ) -> dict:
     """
     Launch a trading agent as a subprocess from the WebUI.
 
     Spawns: python -m alphaloop.main --symbol {symbol} [--dry-run|--live]
-    The subprocess registers itself in RunningInstance on startup.
+    Binds the selected strategy card to active_strategy_{instance_id} before launch.
+    Multiple agents can run on the same symbol with different strategy cards.
     """
-    # Check if an agent is already running for this symbol (skip stale records)
+    # Purge stale records for this symbol (dead PIDs only)
     existing = await session.execute(
         select(RunningInstance).where(RunningInstance.symbol == body.symbol)
     )
-    existing_bot = existing.scalar_one_or_none()
-    if existing_bot:
-        if _pid_alive(existing_bot.pid):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Agent already running for {body.symbol}",
-            )
-        # Stale record — purge and allow relaunch
-        await session.delete(existing_bot)
-        await session.flush()
+    for bot in existing.scalars():
+        if not _pid_alive(bot.pid):
+            logger.info("Purging stale agent record %s (PID %d)", bot.instance_id, bot.pid)
+            await session.delete(bot)
+    await session.flush()
 
     instance_id = f"{body.symbol}_{uuid.uuid4().hex[:8]}"
 
+    # Bind selected strategy card to per-instance settings key
+    if body.strategy_version is not None:
+        try:
+            from alphaloop.config.settings_service import SettingsService
+            settings_svc = SettingsService(container.db_session_factory)
+
+            # Look up the strategy JSON file
+            versions_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "strategy_versions"
+            strategy_data = None
+            for f in versions_dir.glob(f"{body.symbol}_v*.json"):
+                try:
+                    data = json.loads(f.read_text())
+                    if data.get("version") == body.strategy_version:
+                        strategy_data = data
+                        break
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+            if strategy_data:
+                await settings_svc.set(
+                    f"active_strategy_{instance_id}",
+                    json.dumps({
+                        "symbol": body.symbol,
+                        "version": strategy_data.get("version", 0),
+                        "name": strategy_data.get("name", ""),
+                        "status": strategy_data.get("status", ""),
+                        "params": strategy_data.get("params", {}),
+                        "tools": strategy_data.get("tools", {}),
+                        "validation": strategy_data.get("validation", {}),
+                        "ai_models": strategy_data.get("ai_models", {}),
+                        "signal_instruction": strategy_data.get("signal_instruction", ""),
+                        "validator_instruction": strategy_data.get("validator_instruction", ""),
+                        "signal_mode": normalize_signal_mode(strategy_data.get("signal_mode")),
+                        "summary": strategy_data.get("summary", {}),
+                    }),
+                )
+                logger.info(
+                    "Bound strategy %s v%d to instance %s",
+                    body.symbol, body.strategy_version, instance_id,
+                )
+            else:
+                logger.warning(
+                    "Strategy %s v%d not found on disk — agent will use fallback",
+                    body.symbol, body.strategy_version,
+                )
+        except Exception as e:
+            logger.error("Failed to bind strategy card: %s", e)
+
+    risk_budget = max(0.01, min(1.0, body.risk_budget_pct))
+
+    # Use pythonw.exe on Windows — it's the windowless variant and never
+    # creates a console window, unlike python.exe which is a console app.
+    if sys.platform == "win32":
+        _pythonw = Path(sys.executable).with_name("pythonw.exe")
+        _exec = str(_pythonw) if _pythonw.exists() else sys.executable
+    else:
+        _exec = sys.executable
+
+    # Detect the port this WebUI is actually running on so the agent bridge
+    # POSTs events to the correct endpoint.
+    from alphaloop.core.constants import WEBUI_DEFAULT_PORT
+    _webui_port = request.url.port or WEBUI_DEFAULT_PORT
+
     cmd = [
-        sys.executable, "-m", "alphaloop.main",
+        _exec, "-m", "alphaloop.main",
         "--symbol", body.symbol,
         "--instance-id", instance_id,
+        "--risk-budget", str(risk_budget),
+        "--webui-port", str(_webui_port),
     ]
     if body.dry_run:
         cmd.append("--dry-run")
@@ -173,17 +291,29 @@ async def start_agent(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # Detach from parent process
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         logger.info(
-            "Launched agent %s for %s (PID %d, dry_run=%s)",
-            instance_id, body.symbol, proc.pid, body.dry_run,
+            "Launched agent %s for %s (PID %d, dry_run=%s, risk_budget=%.0f%%)",
+            instance_id, body.symbol, proc.pid, body.dry_run, risk_budget * 100,
         )
+        # Pre-register so the card survives a hard refresh during agent startup.
+        # main.py will delete+re-insert this record once the agent is fully up.
+        pre_reg = RunningInstance(
+            symbol=body.symbol,
+            instance_id=instance_id,
+            pid=proc.pid,
+            strategy_version=None,
+        )
+        session.add(pre_reg)
+        await session.flush()
         return {
             "status": "ok",
             "instance_id": instance_id,
             "pid": proc.pid,
             "symbol": body.symbol,
             "dry_run": body.dry_run,
+            "risk_budget_pct": risk_budget,
         }
     except Exception as e:
         logger.error("Failed to launch agent: %s", e)
@@ -207,25 +337,68 @@ async def stop_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     pid = bot.pid
+    _method = "unknown"
     try:
         if sys.platform == "win32":
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            # Phase 7C: Try graceful shutdown first via sentinel file,
+            # then wait up to 10s, only force-kill on timeout
+            import tempfile
+            _sentinel = os.path.join(
+                tempfile.gettempdir(), f"alphaloop_stop_{pid}.sentinel"
             )
-            logger.info("taskkill /F /T /PID %d for agent %s", pid, instance_id)
+            # Write sentinel file — the bot checks for this in its loop
+            with open(_sentinel, "w") as f:
+                f.write(instance_id)
+            logger.info("Wrote stop sentinel for agent %s (PID %d)", instance_id, pid)
+
+            # Poll for process exit (up to 10 seconds)
+            _exited = False
+            for _ in range(20):
+                import time
+                time.sleep(0.5)
+                r = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}"],
+                    capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                if str(pid) not in r.stdout:
+                    _exited = True
+                    break
+
+            if _exited:
+                _method = "graceful (sentinel)"
+                logger.info("Agent %s exited gracefully via sentinel", instance_id)
+            else:
+                # Force kill as last resort
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                _method = "forced (taskkill /F)"
+                logger.warning(
+                    "Agent %s did not exit gracefully — forced kill (PID %d)",
+                    instance_id, pid,
+                )
+
+            # Clean up sentinel
+            try:
+                os.remove(_sentinel)
+            except OSError:
+                pass
         else:
             os.kill(pid, os_signal.SIGTERM)
+            _method = "SIGTERM"
             logger.info("Sent SIGTERM to agent %s (PID %d)", instance_id, pid)
     except ProcessLookupError:
+        _method = "already_dead"
         logger.warning("Agent PID %d not found — cleaning up stale record", pid)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop agent: {e}")
 
-    # Always remove the DB record — on Windows SIGTERM is TerminateProcess (hard kill)
-    # so the agent's shutdown handler never runs to self-unregister.
+    # Remove DB record (agent shutdown handler may not have run on force kill)
     await session.delete(bot)
     await session.flush()
 
-    return {"status": "ok", "instance_id": instance_id, "signal_sent": "SIGTERM"}
+    return {"status": "ok", "instance_id": instance_id, "stop_method": _method}

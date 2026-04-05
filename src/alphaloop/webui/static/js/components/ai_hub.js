@@ -28,16 +28,21 @@ export async function render(container) {
   container.innerHTML = `<div class="page-title">AI Model Hub</div><div class="hub-loading">Loading...</div>`;
 
   // Load data in parallel
-  let settings = {}, models = [], keysStatus = {};
+  let settings = {}, models = [], keysStatus = {}, perfData = { models: {}, worst_model: null, total_calls: 0 };
+  let calibData = { ece: null, n_samples: 0, well_calibrated: null };
   try {
-    const [settingsData, modelData, hubData] = await Promise.all([
+    const [settingsData, modelData, hubData, perf, calib] = await Promise.all([
       apiGet('/api/settings'),
       apiGet('/api/test/models').catch(() => ({ models: [] })),
       apiGet('/api/ai-hub').catch(() => ({ api_keys_configured: {} })),
+      apiGet('/api/ai-hub/performance').catch(() => ({ models: {}, worst_model: null, total_calls: 0 })),
+      apiGet('/api/ai-hub/calibration').catch(() => ({ ece: null, n_samples: 0, well_calibrated: null })),
     ]);
     settings = settingsData.settings || {};
     models = modelData.models || [];
     keysStatus = hubData.api_keys_configured || {};
+    perfData = perf || { models: {}, worst_model: null, total_calls: 0 };
+    calibData = calib || { ece: null, n_samples: 0, well_calibrated: null };
   } catch (err) {
     container.innerHTML = `<div class="page-title">AI Model Hub</div><div class="page-error">${err.message}</div>`;
     return;
@@ -80,6 +85,44 @@ export async function render(container) {
             </tr>`).join('')}
         </tbody>
       </table>
+    </div>
+
+    <!-- Section B2: Model Performance + ECE Calibration Badge -->
+    <div class="section-label" style="margin-top:20px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      Model Performance
+      <span style="color:var(--muted);font-size:0.75rem">${perfData.total_calls} total calls this session</span>
+      ${calibData.ece != null
+        ? `<span class="badge ${calibData.well_calibrated ? 'badge-green' : 'badge-red'}" style="font-size:0.68rem" title="Expected Calibration Error — lower is better. Threshold: 0.10">
+            ECE ${parseFloat(calibData.ece).toFixed(3)} ${calibData.well_calibrated ? '✓ calibrated' : '⚠ drift'} (n=${calibData.n_samples})
+           </span>`
+        : `<span class="badge badge-muted" style="font-size:0.68rem">ECE — no data yet</span>`
+      }
+    </div>
+    <div class="card" style="padding:0;overflow:auto">
+      ${Object.keys(perfData.models).length === 0
+        ? `<div style="padding:12px 16px;color:var(--muted);font-size:0.8rem">No calls recorded yet — data resets on server restart.</div>`
+        : `<table class="data-table" style="margin:0;font-size:0.78rem">
+            <thead><tr>
+              <th>Model</th><th>Calls</th><th>Avg Latency</th><th>P95 Latency</th><th>Error Rate</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+              ${Object.entries(perfData.models).map(([mid, m]) => {
+                const isWorst = mid === perfData.worst_model;
+                const errPct = Math.round(m.error_rate * 100);
+                const errColor = errPct === 0 ? 'var(--green)' : errPct < 10 ? 'var(--amber, #f59e0b)' : 'var(--red)';
+                const rowStyle = isWorst ? 'background:rgba(239,68,68,0.06)' : '';
+                return `<tr style="${rowStyle}">
+                  <td style="font-family:monospace;font-size:0.72rem">${mid}${isWorst ? ' <span title="Highest error rate" style="color:var(--amber,#f59e0b)">⚠</span>' : ''}</td>
+                  <td>${m.call_count}</td>
+                  <td>${m.avg_latency_ms}ms</td>
+                  <td>${m.p95_latency_ms}ms</td>
+                  <td style="color:${errColor}">${errPct}%</td>
+                  <td><span class="badge ${m.error_rate < 0.1 ? 'badge-green' : 'badge-red'}">${m.error_rate < 0.1 ? 'OK' : 'DEGRADED'}</span></td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`
+      }
     </div>
 
     <!-- Section C: Default Role Assignments -->

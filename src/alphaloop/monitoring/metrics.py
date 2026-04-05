@@ -88,3 +88,134 @@ def reset() -> None:
     """Reset all metrics."""
     _buckets.clear()
     _bucket_order.clear()
+
+
+def get_prometheus_text() -> str:
+    """
+    Export metrics in Prometheus text exposition format.
+    Can be served at /metrics endpoint for scraping.
+    """
+    lines: list[str] = []
+    latest = get_latest()
+    if not latest:
+        return "# No metrics available\n"
+
+    for key, value in latest.items():
+        if key == "timestamp":
+            continue
+        # Convert metric_name_stat to prometheus format
+        prom_name = f"alphaloop_{key}"
+        prom_name = prom_name.replace(".", "_").replace("-", "_")
+        lines.append(f"{prom_name} {value}")
+
+    return "\n".join(lines) + "\n"
+
+
+async def persist_to_db(settings_service) -> None:
+    """Persist current metrics snapshot to DB for survival across restarts."""
+    import json
+    snapshot = {
+        "latest": get_latest(),
+        "timestamp": int(time.time()),
+    }
+    try:
+        await settings_service.set("metrics_snapshot", json.dumps(snapshot))
+    except Exception:
+        pass  # Best-effort persistence
+
+
+async def restore_from_db(settings_service) -> None:
+    """Restore metrics from DB snapshot (best-effort, metrics are approximate)."""
+    import json
+    try:
+        raw = await settings_service.get("metrics_snapshot")
+        if raw:
+            snapshot = json.loads(raw)
+            # Only informational — we don't restore individual values
+            # as that would corrupt the ring buffer structure.
+            # Just log that we have historical data.
+            ts = snapshot.get("timestamp", 0)
+            if ts:
+                import logging
+                logging.getLogger(__name__).info(
+                    "[metrics] Previous snapshot from ts=%d available", ts
+                )
+    except Exception:
+        pass
+
+
+class MetricsTracker:
+    """
+    Singleton wrapper around the module-level metrics functions.
+    Provides an object-oriented interface while delegating to the
+    existing ring-buffer implementation.
+
+    Usage:
+        from alphaloop.monitoring.metrics import metrics_tracker
+        metrics_tracker.record_sync("cycle_duration_ms", 123.4)
+        text = metrics_tracker.get_prometheus_text()
+    """
+
+    def record_sync(self, metric: str, value: float) -> None:
+        """Record a metric value synchronously (thread-safe)."""
+        record_sync(metric, value)
+
+    def record_portfolio_risk(
+        self,
+        corr_adj_risk_pct: float,
+        simple_risk_pct: float,
+        n_trades: int,
+        balance: float,
+    ) -> None:
+        """
+        Record a portfolio risk snapshot.
+
+        Stores both correlation-adjusted and simple risk metrics so the
+        WebUI and Prometheus can display portfolio heat over time.
+
+        Args:
+            corr_adj_risk_pct: Correlation-adjusted portfolio risk as % of balance
+            simple_risk_pct:   Simple sum risk as % of balance
+            n_trades:          Number of open trades
+            balance:           Account balance at snapshot time
+        """
+        record_sync("portfolio_risk_corr_adj_pct", corr_adj_risk_pct)
+        record_sync("portfolio_risk_simple_pct", simple_risk_pct)
+        record_sync("portfolio_open_trades", float(n_trades))
+        import logging
+        logging.getLogger(__name__).debug(
+            "[portfolio-risk] corr_adj=%.2f%% simple=%.2f%% trades=%d balance=$%.0f",
+            corr_adj_risk_pct, simple_risk_pct, n_trades, balance,
+        )
+
+    async def record(self, metric: str, value: float) -> None:
+        """Record a metric value asynchronously."""
+        await record(metric, value)
+
+    def get_timeseries(self, hours: int = 24) -> list[dict]:
+        """Return aggregated metrics for the last N hours."""
+        return get_timeseries(hours)
+
+    def get_latest(self) -> dict:
+        """Return the latest bucket's metrics."""
+        return get_latest()
+
+    def get_prometheus_text(self) -> str:
+        """Return Prometheus text exposition format."""
+        return get_prometheus_text()
+
+    async def persist_to_db(self, settings_service) -> None:
+        """Persist current metrics snapshot to DB."""
+        await persist_to_db(settings_service)
+
+    async def restore_from_db(self, settings_service) -> None:
+        """Restore metrics from DB snapshot."""
+        await restore_from_db(settings_service)
+
+    def reset(self) -> None:
+        """Reset all metrics."""
+        reset()
+
+
+# Module-level singleton — importable as `from alphaloop.monitoring.metrics import metrics_tracker`
+metrics_tracker = MetricsTracker()

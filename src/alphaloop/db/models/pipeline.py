@@ -9,7 +9,7 @@ from alphaloop.db.models.base import Base
 
 
 class PipelineDecision(Base):
-    """Append-only audit trail of every FilterPipeline decision."""
+    """Append-only audit trail of every v4 pipeline decision."""
 
     __tablename__ = "pipeline_decisions"
 

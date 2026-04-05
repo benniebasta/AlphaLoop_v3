@@ -14,6 +14,7 @@ import numpy as np
 import optuna
 
 from alphaloop.backtester.params import BacktestParams
+from alphaloop.config.assets import AssetConfig
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 # ── Constants ────────────────────────────────────────────────────────────────
 MIN_SHARPE_IMPROVEMENT = 0.05   # must improve by at least this
 OVERFIT_GAP_THRESHOLD = 0.30    # train-val gap above this = overfitting
+MIN_TRADES = 20                 # minimum closed trades for a result to be statistically valid
 N_TRIALS_PER_GEN = 30           # Optuna trials per generation
 N_STARTUP_TRIALS = 5            # random trials before TPE kicks in
 TRAIN_RATIO = 0.80              # 80% train, 20% validation
@@ -57,6 +59,16 @@ def split_data(
     return train, val
 
 
+_ALL_SOURCES = [
+    "ema_crossover",
+    "macd_crossover",
+    "rsi_reversal",
+    "bollinger_breakout",
+    "adx_trend",
+    "bos_confirm",
+]
+
+
 def suggest_params(trial: optuna.Trial, base: BacktestParams) -> BacktestParams:
     """Suggest new parameters bounded around the base values."""
     mc = base.max_param_change_pct  # ±15% default
@@ -86,6 +98,50 @@ def suggest_params(trial: optuna.Trial, base: BacktestParams) -> BacktestParams:
     if tp1 < 1.3 or sl < 0.8 or ema_fast >= ema_slow:
         raise optuna.TrialPruned()
 
+    # --- Source-specific params ---
+    active_sources = {r.get("source") for r in (base.signal_rules or [])}
+
+    macd_fast = base.macd_fast
+    macd_slow = base.macd_slow
+    macd_signal = base.macd_signal
+    bb_period = base.bb_period
+    bb_std_dev = base.bb_std_dev
+    adx_period = base.adx_period
+    adx_min_threshold = base.adx_min_threshold
+
+    if "macd_crossover" in active_sources:
+        macd_fast = trial.suggest_int("macd_fast", 8, 16)
+        macd_slow = trial.suggest_int("macd_slow", 20, 32)
+        macd_signal = trial.suggest_int("macd_signal", 7, 11)
+    if "bollinger_breakout" in active_sources:
+        bb_period = trial.suggest_int("bb_period", 15, 25)
+        bb_std_dev = trial.suggest_float("bb_std_dev", 1.5, 2.5)
+    if "adx_trend" in active_sources:
+        adx_period = trial.suggest_int("adx_period", 10, 20)
+        adx_min_threshold = trial.suggest_float("adx_min_threshold", 15.0, 35.0)
+
+    # --- signal_auto: Optuna picks which sources to enable ---
+    signal_rules = base.signal_rules
+    signal_logic = base.signal_logic
+    if base.signal_auto:
+        flags = {src: trial.suggest_categorical(f"use_{src}", [True, False]) for src in _ALL_SOURCES}
+        active = [src for src, on in flags.items() if on]
+        if not active:
+            raise optuna.TrialPruned()
+        signal_rules = [{"source": s} for s in active]
+        signal_logic = trial.suggest_categorical("signal_logic", ["AND", "OR", "MAJORITY"])
+        # Re-suggest source params based on auto-selected sources
+        if "macd_crossover" in flags and flags["macd_crossover"]:
+            macd_fast = trial.suggest_int("macd_fast_auto", 8, 16)
+            macd_slow = trial.suggest_int("macd_slow_auto", 20, 32)
+            macd_signal = trial.suggest_int("macd_signal_auto", 7, 11)
+        if "bollinger_breakout" in flags and flags["bollinger_breakout"]:
+            bb_period = trial.suggest_int("bb_period_auto", 15, 25)
+            bb_std_dev = trial.suggest_float("bb_std_dev_auto", 1.5, 2.5)
+        if "adx_trend" in flags and flags["adx_trend"]:
+            adx_period = trial.suggest_int("adx_period_auto", 10, 20)
+            adx_min_threshold = trial.suggest_float("adx_min_threshold_auto", 15.0, 35.0)
+
     return BacktestParams(
         ema_fast=ema_fast,
         ema_slow=ema_slow,
@@ -97,6 +153,16 @@ def suggest_params(trial: optuna.Trial, base: BacktestParams) -> BacktestParams:
         risk_pct=base.risk_pct,
         rsi_period=base.rsi_period,
         max_param_change_pct=mc,
+        macd_fast=macd_fast,
+        macd_slow=macd_slow,
+        macd_signal=macd_signal,
+        bb_period=bb_period,
+        bb_std_dev=round(bb_std_dev, 2),
+        adx_period=adx_period,
+        adx_min_threshold=round(adx_min_threshold, 1),
+        signal_rules=signal_rules,
+        signal_logic=signal_logic,
+        signal_auto=base.signal_auto,
     )
 
 
@@ -162,3 +228,141 @@ def optimize(
     _log(f"Optimization done: best Sharpe={best_sharpe:.3f}")
 
     return best_params, best_sharpe, was_stopped
+
+
+# ---------------------------------------------------------------------------
+# Construction-aware optimization (Part 2: uses TradeConstructor via vbt)
+# ---------------------------------------------------------------------------
+
+def suggest_construction_params(
+    trial: optuna.Trial,
+    base: BacktestParams,
+    asset: AssetConfig | None = None,
+) -> dict:
+    """Suggest construction-compatible parameters for Optuna.
+
+    Unlike :func:`suggest_params`, this does NOT suggest ``sl_atr_mult``
+    because SL is structure-derived in the constraint-first architecture.
+    Instead it suggests bounds that constrain the structure search.
+    """
+    mc = base.max_param_change_pct
+
+    # --- Construction params (no sl_atr_mult) ---
+    tp1_rr = trial.suggest_float("tp1_rr", 1.2, 3.0)
+    tp2_rr = trial.suggest_float("tp2_rr", max(tp1_rr + 0.3, 2.0), 5.0)
+
+    sl_min = trial.suggest_float("sl_min_points", 50, 300)
+    sl_max = trial.suggest_float("sl_max_points", max(sl_min + 100, 200), 800)
+    sl_buffer = trial.suggest_float("sl_buffer_atr", 0.05, 0.30)
+
+    confidence_threshold = trial.suggest_float("confidence_threshold", 0.50, 0.90)
+    entry_zone_mult = trial.suggest_float("entry_zone_atr_mult", 0.10, 0.50)
+
+    # --- Direction params (same as legacy) ---
+    ema_fast = trial.suggest_int("ema_fast", 10, 30)
+    ema_slow = trial.suggest_int("ema_slow", max(ema_fast + 15, 40), 80)
+    rsi_ob = trial.suggest_int("rsi_ob", 65, 80)
+    rsi_os = trial.suggest_int("rsi_os", 20, 35)
+
+    if ema_fast >= ema_slow:
+        raise optuna.TrialPruned()
+
+    # Signal rules from base (not mutated — source selection is structural)
+    signal_rules = base.signal_rules
+    signal_logic = base.signal_logic
+
+    return {
+        "tp1_rr": round(tp1_rr, 3),
+        "tp2_rr": round(tp2_rr, 3),
+        "sl_min_points": round(sl_min, 1),
+        "sl_max_points": round(sl_max, 1),
+        "sl_buffer_atr": round(sl_buffer, 3),
+        "confidence_threshold": round(confidence_threshold, 3),
+        "entry_zone_atr_mult": round(entry_zone_mult, 3),
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "rsi_ob": rsi_ob,
+        "rsi_os": rsi_os,
+        "signal_rules": signal_rules,
+        "signal_logic": signal_logic,
+    }
+
+
+def optimize_construction(
+    ohlcv_df,
+    asset_config: AssetConfig,
+    base_params: BacktestParams,
+    *,
+    n_trials: int = N_TRIALS_PER_GEN,
+    stop_check: Callable[[], bool] | None = None,
+    log_fn: Callable[[str], None] | None = None,
+    balance: float = 10_000.0,
+    risk_pct: float = 0.01,
+) -> tuple[dict | None, float, bool]:
+    """Run Optuna optimization using the vectorbt + TradeConstructor path.
+
+    Returns
+    -------
+    (best_params, best_score, was_stopped)
+    """
+    from alphaloop.backtester.vbt_engine import run_vectorbt_backtest
+
+    _log = log_fn or (lambda msg: None)
+    best_score = -999.0
+    best_params_dict: dict | None = None
+    was_stopped = False
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(
+            n_startup_trials=N_STARTUP_TRIALS,
+            seed=42,
+        ),
+    )
+
+    def objective(trial: optuna.Trial) -> float:
+        nonlocal best_score, best_params_dict, was_stopped
+
+        if stop_check and stop_check():
+            was_stopped = True
+            study.stop()
+            return best_score
+
+        try:
+            params = suggest_construction_params(trial, base_params, asset_config)
+        except optuna.TrialPruned:
+            raise
+
+        result = run_vectorbt_backtest(
+            ohlcv_df, params, asset_config,
+            balance=balance, risk_pct=risk_pct,
+        )
+
+        if result.error:
+            _log(f"  Trial {trial.number}: error — {result.error}")
+            return -999.0
+
+        if result.trade_count < MIN_TRADES:
+            raise optuna.TrialPruned()
+
+        # Composite score: Sharpe - drawdown penalty
+        sharpe = result.sharpe or 0.0
+        dd_penalty = max(0, abs(result.max_drawdown_pct) - 5) * 0.1
+        score = sharpe - dd_penalty
+
+        if score > best_score:
+            best_score = score
+            best_params_dict = params
+            _log(
+                f"  Trial {trial.number}: new best score={score:.3f} "
+                f"(Sharpe={sharpe:.3f} DD={result.max_drawdown_pct:.1f}% "
+                f"trades={result.trade_count} exec_rate={result.execution_rate:.1%})"
+            )
+
+        return score
+
+    _log(f"Running {n_trials} construction-aware Optuna trials...")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    _log(f"Optimization done: best score={best_score:.3f}")
+
+    return best_params_dict, best_score, was_stopped

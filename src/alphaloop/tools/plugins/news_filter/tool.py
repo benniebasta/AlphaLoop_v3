@@ -6,9 +6,12 @@ Pipeline order: SECOND — skip expensive filters if news blackout active.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
-from alphaloop.tools.base import BaseTool, ToolResult
+from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
+
+logger = logging.getLogger(__name__)
 
 
 class NewsFilter(BaseTool):
@@ -23,9 +26,39 @@ class NewsFilter(BaseTool):
     name = "news_filter"
     description = "Blocks trading during high-impact news events"
 
+    # When True (default), block trading if the news provider is unreachable.
+    # Set to False to allow trading through data outages.
+    block_on_data_unavailable: bool = True
+    _alerted_unavailable: bool = False  # suppress repeated alerts
+
     async def run(self, context) -> ToolResult:
         news_events = context.news
+
+        # Sentinel returned by news.py when all providers fail
+        if news_events and news_events[0].get("name") == "NEWS_DATA_UNAVAILABLE":
+            if not self._alerted_unavailable:
+                logger.critical(
+                    "[news_filter] NEWS_DATA_UNAVAILABLE — all trades are blocked. "
+                    "Ensure FINNHUB_API_KEY or NEWS_API_KEY is configured in Settings. "
+                    "Set block_on_data_unavailable=False to allow trading through outages."
+                )
+                self._alerted_unavailable = True
+            if self.block_on_data_unavailable:
+                return ToolResult(
+                    passed=False,
+                    reason="News data unavailable — blocked as precaution",
+                    severity="block",
+                    size_modifier=0.0,
+                    data={"sentinel": True},
+                )
+            return ToolResult(
+                passed=True,
+                reason="News data unavailable — passing (configured)",
+                data={"sentinel": True},
+            )
+
         if not news_events:
+            self._alerted_unavailable = False  # reset so future outages re-alert
             return ToolResult(
                 passed=True,
                 reason="No upcoming news events in window",
@@ -80,6 +113,48 @@ class NewsFilter(BaseTool):
             passed=True,
             reason=f"No HIGH/CRITICAL events within +/-{pre_window}m window",
             data={"events_checked": len(news_events)},
+        )
+
+
+    async def extract_features(self, context) -> FeatureResult:
+        news_events = context.news
+        if not news_events:
+            return FeatureResult(
+                group="volatility",
+                features={"news_safety": 100.0},
+                meta={"events_checked": 0},
+            )
+
+        now = datetime.now(timezone.utc)
+        min_distance = float("inf")  # minutes to nearest HIGH/CRITICAL event
+
+        for event in news_events:
+            impact = (event.get("impact") or "").upper()
+            if impact not in ("HIGH", "CRITICAL"):
+                continue
+            event_time = _parse_event_time(event.get("time", ""), now)
+            if event_time is None:
+                min_distance = 0  # unparseable = assume imminent
+                break
+            diff = abs((event_time - now).total_seconds() / 60.0)
+            min_distance = min(min_distance, diff)
+
+        if min_distance == float("inf"):
+            # No HIGH/CRITICAL events found
+            return FeatureResult(
+                group="volatility",
+                features={"news_safety": 100.0},
+                meta={"events_checked": len(news_events), "nearest_high_min": None},
+            )
+
+        # news_safety: 100 = far from news, 0 = event imminent
+        # Linear decay from 100 (60+ min away) to 0 (at event)
+        safety = min(100.0, max(0.0, min_distance / 60 * 100))
+
+        return FeatureResult(
+            group="volatility",
+            features={"news_safety": round(safety, 1)},
+            meta={"events_checked": len(news_events), "nearest_high_min": round(min_distance, 1)},
         )
 
 

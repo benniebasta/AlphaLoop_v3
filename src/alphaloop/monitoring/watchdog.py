@@ -59,6 +59,7 @@ class TradingWatchdog:
         self,
         health_check: HealthCheck | None = None,
         event_bus: Any | None = None,
+        session_factory=None,
         heartbeat_path: str | Path = "heartbeat.json",
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         stale_threshold: float = DEFAULT_STALE_THRESHOLD,
@@ -66,6 +67,7 @@ class TradingWatchdog:
     ) -> None:
         self._health = health_check or HealthCheck()
         self._event_bus = event_bus
+        self._session_factory = session_factory
         self._heartbeat_path = Path(heartbeat_path)
         self._check_interval = check_interval
         self._stale_threshold = stale_threshold
@@ -200,6 +202,11 @@ class TradingWatchdog:
         self._last_alert_time = now
 
         logger.critical("[watchdog] %s: %s — %s", severity.upper(), message, details)
+        await self._record_incident(
+            severity,
+            message,
+            details,
+        )
 
         if self._event_bus:
             try:
@@ -210,6 +217,28 @@ class TradingWatchdog:
                 ))
             except Exception as exc:
                 logger.error("Watchdog alert publish failed: %s", exc)
+
+    async def _record_incident(
+        self,
+        severity: str,
+        message: str,
+        details: dict[str, Any],
+    ) -> None:
+        if not self._session_factory:
+            return
+        try:
+            from alphaloop.supervision.service import SupervisionService
+
+            supervision = SupervisionService(self._session_factory)
+            await supervision.record_incident(
+                incident_type="watchdog_triggered",
+                details=message,
+                severity="critical" if severity == "critical" else "warning",
+                source="watchdog",
+                payload=details,
+            )
+        except Exception as exc:
+            logger.warning("Watchdog incident persist failed: %s", exc)
 
     def get_status(self) -> dict[str, Any]:
         """Return current watchdog status."""

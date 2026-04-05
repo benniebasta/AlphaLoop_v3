@@ -81,7 +81,9 @@ Container
 
 ## Async Event Bus Topology
 
-**File:** `src/alphaloop/core/events.py` (194 lines)
+**File:** `src/alphaloop/core/events.py`
+
+**Key behavior:** `publish()` traverses `__mro__` — subscribing to `Event` base class catches all subclasses. This enables wildcard subscribers like the HTTP bridge and WebSocket handler.
 
 **Publishers:**
 | Component | Events Published |
@@ -97,14 +99,17 @@ Container
 | `ResearchAnalyzer` | `ResearchCompleted` |
 
 **Subscribers:**
-| Subscriber | Listens To |
-|------------|-----------|
-| `websocket.py` | All events → broadcast to browser |
-| `Telegram dispatcher` | `TradeOpened`, `TradeClosed`, `RiskLimitHit` |
-| `MetaLoop` | `TradeClosed` |
-| `MicroLearner` | `TradeClosed` |
-| `HealthMonitor` | `TradeClosed` |
-| `Metrics ring buffer` | All events |
+| Subscriber | Listens To | Process |
+|------------|-----------|---------|
+| `websocket.py` | All events (via `Event` base) → broadcast to browser | Web server |
+| `main.py _bridge_event` | 10 event types → HTTP POST to `/api/events/ingest` | Subprocess agents |
+| `Telegram dispatcher` | `TradeOpened`, `TradeClosed`, `RiskLimitHit` | Web server |
+| `MetaLoop` | `TradeClosed` | Subprocess |
+| `MicroLearner` | `TradeClosed` | Subprocess |
+| `HealthMonitor` | `TradeClosed` | Subprocess |
+| `Metrics ring buffer` | All events | Web server |
+
+**Cross-process bridge:** Subprocess agents cannot share the web server's EventBus. Instead, `main.py` subscribes a bridge handler that POSTs each event as JSON to `POST /api/events/ingest` on the web server (sync, <50ms, fire-and-forget). The web server stores events in an in-memory ring buffer (max 200), queryable by `instance_id` or `symbol`.
 
 ---
 
