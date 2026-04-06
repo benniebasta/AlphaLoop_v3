@@ -12,7 +12,13 @@ class TestSuggestConstructionParams:
         """All construction params should be present."""
         study = optuna.create_study()
         trial = study.ask()
-        base = BacktestParams()
+        base = BacktestParams(
+            signal_mode="ai_signal",
+            setup_family="momentum_expansion",
+            strategy_spec={"setup_family": "momentum_expansion"},
+            tools={"session_filter": True},
+            source="meta_loop",
+        )
         params = suggest_construction_params(trial, base)
 
         assert "tp1_rr" in params
@@ -25,6 +31,56 @@ class TestSuggestConstructionParams:
         assert "ema_fast" in params
         assert "ema_slow" in params
         assert "signal_rules" in params
+        assert params["signal_mode"] == "ai_signal"
+        assert params["setup_family"] == "momentum_expansion"
+        assert params["strategy_spec"]["setup_family"] == "momentum_expansion"
+        assert params["tools"] == {"session_filter": True}
+        assert params["source"] == "meta_loop"
+
+    def test_prefers_strategy_spec_metadata_over_stale_flat_fields(self):
+        """Construction params should preserve spec-first strategy metadata."""
+        study = optuna.create_study()
+        trial = study.ask()
+        base = BacktestParams(
+            signal_mode="algo_only",
+            setup_family="pullback_continuation",
+            strategy_spec={
+                "setup_family": "discretionary_ai",
+                "signal_mode": "ai_signal",
+                "metadata": {"source": "ui_ai_signal_card"},
+            },
+            tools={"session_filter": True},
+            source="legacy_flat_source",
+        )
+        params = suggest_construction_params(trial, base)
+
+        assert params["signal_mode"] == "ai_signal"
+        assert params["setup_family"] == "discretionary_ai"
+        assert params["source"] == "ui_ai_signal_card"
+        assert params["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
+    def test_prefers_strategy_spec_entry_model_rules_and_logic(self):
+        study = optuna.create_study()
+        trial = study.ask()
+        base = BacktestParams(
+            signal_mode="algo_ai",
+            setup_family="momentum_expansion",
+            strategy_spec={
+                "setup_family": "momentum_expansion",
+                "signal_mode": "algo_ai",
+                "entry_model": {
+                    "signal_rule_sources": ["macd_crossover"],
+                    "signal_logic": "OR",
+                },
+            },
+            signal_rules=[{"source": "ema_crossover"}],
+            signal_logic="AND",
+        )
+
+        params = suggest_construction_params(trial, base)
+
+        assert params["signal_rules"] == [{"source": "macd_crossover"}]
+        assert params["signal_logic"] == "OR"
 
     def test_no_sl_atr_mult(self):
         """sl_atr_mult should NOT be suggested (SL is structure-derived)."""

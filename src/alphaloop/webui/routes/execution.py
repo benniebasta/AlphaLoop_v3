@@ -4,16 +4,30 @@ Execution APIs backed by durable execution and reconciliation records.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import json
+import os
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphaloop.db.models.operational_event import OperationalEvent
+from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.db.models.order import OrderRecord
 from alphaloop.db.models.trade import TradeLog
 from alphaloop.webui.deps import get_db_session
 
 router = APIRouter(prefix="/api/execution", tags=["execution"])
+
+
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for execution write actions when AUTH_TOKEN is configured."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _serialize_order(order: OrderRecord) -> dict:
@@ -151,6 +165,8 @@ async def get_tca(
 @router.post("/attribution/backfill")
 async def backfill_attribution(
     limit: int = 500,
+    request: Request = None,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """
@@ -159,6 +175,7 @@ async def backfill_attribution(
 
     Useful after upgrading to v3.1 — backfills historical data.
     """
+    _require_operator_auth(authorization)
     try:
         from alphaloop.research.attribution import TradeAttributor
         from alphaloop.db.repositories.trade_repo import TradeRepository
@@ -197,6 +214,15 @@ async def backfill_attribution(
             else:
                 skipped += 1
 
+        await session.commit()
+        session.add(OperatorAuditLog(
+            operator="webui",
+            action="execution_attribution_backfill",
+            target="trade_logs",
+            old_value=None,
+            new_value=json.dumps({"updated": updated, "skipped": skipped, "limit": limit}),
+            source_ip=request.client.host if request and request.client else "unknown",
+        ))
         await session.commit()
         return {"status": "ok", "updated": updated, "skipped_insufficient_data": skipped}
 

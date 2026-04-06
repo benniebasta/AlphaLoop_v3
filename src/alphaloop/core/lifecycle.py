@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # Each entry: (table, column, SQL type)
 _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("trade_logs", "order_ticket", "INTEGER"),
+    ("trade_logs", "client_order_id", "TEXT"),
 ]
 
 

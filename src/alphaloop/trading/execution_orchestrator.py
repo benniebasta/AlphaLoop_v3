@@ -27,6 +27,7 @@ from alphaloop.core.types import ValidationStatus, SetupType, TrendDirection
 from alphaloop.execution.service import ExecutionService
 from alphaloop.risk.guard_persistence import save_guard_state
 from alphaloop.signals.schema import TradeSignal, ValidatedSignal
+from alphaloop.trading.strategy_loader import build_runtime_strategy_context
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,7 @@ class ExecutionOrchestrator:
         execution_sizing = dict(sizing)
         if "risk_amount_usd" not in execution_sizing and "risk_usd" in execution_sizing:
             execution_sizing["risk_amount_usd"] = execution_sizing.get("risk_usd")
+        runtime_strategy = self._active_strategy_runtime()
 
         return await self._execution_service.execute_market_order(
             symbol=self.symbol,
@@ -290,9 +292,7 @@ class ExecutionOrchestrator:
             take_profit_2=take_profit_2,
             comment=comment,
             strategy_id=self._active_strategy_id(),
-            strategy_version=str(
-                getattr(self._active_strategy, "version", "") or ""
-            ),
+            strategy_version=str(runtime_strategy.get("version", "") or ""),
             signal_payload=self._safe_json_payload(signal),
             validation_payload=self._safe_json_payload(validated),
             market_context_snapshot=self._safe_json_payload(
@@ -381,9 +381,16 @@ class ExecutionOrchestrator:
                 return balance
         return 0.0
 
+    def _active_strategy_runtime(self) -> dict[str, Any]:
+        if self._active_strategy is None:
+            return {}
+        return build_runtime_strategy_context(self._active_strategy)
+
     def _active_strategy_id(self) -> str:
-        if self._active_strategy is not None:
-            return f"{self.symbol}.v{self._active_strategy.version}"
+        runtime = self._active_strategy_runtime()
+        version = int(runtime.get("version", 0) or 0)
+        if version > 0:
+            return f"{self.symbol}.v{version}"
         return self.symbol
 
     @staticmethod

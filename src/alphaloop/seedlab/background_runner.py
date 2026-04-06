@@ -27,6 +27,23 @@ _logs: dict[str, list[str]] = defaultdict(list)
 _MAX_LOG_LINES = 500
 
 
+def _seedlab_backtest_params(filters: list[str]) -> "BacktestParams":
+    """Build per-seed backtest params so setup identity follows the candidate's filters."""
+    from alphaloop.backtester.runner import _base_backtest_params
+    from alphaloop.backtester.params import BacktestParams
+
+    params = _base_backtest_params(
+        signal_mode="algo_ai",
+        signal_rules=None,
+        signal_logic="AND",
+        signal_auto=False,
+        tools=filters,
+        source="seedlab",
+    )
+    assert isinstance(params, BacktestParams)
+    return params
+
+
 def _log(run_id: str, msg: str) -> None:
     """Append a timestamped line to the run's log buffer."""
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -125,10 +142,7 @@ async def _run_seedlab(
         # Create a simple backtest function for the pipeline
         from alphaloop.backtester.engine import BacktestEngine
         from alphaloop.backtester.runner import make_signal_fn
-        from alphaloop.backtester.params import BacktestParams
-
         engine = BacktestEngine(session_factory=session_factory)
-        base_params = BacktestParams()
 
         async def backtest_fn(
             filters: list[str],
@@ -146,12 +160,13 @@ async def _run_seedlab(
             seg_lows = bt_lows[s:e]
             seg_closes = bt_closes[s:e]
             seg_ts = bt_timestamps[s:e]
-            sig_fn = make_signal_fn(base_params, filters)
+            params = _seedlab_backtest_params(filters)
+            sig_fn = make_signal_fn(params, filters)
             return await engine.run(
                 symbol=symbol,
                 opens=seg_opens, highs=seg_highs, lows=seg_lows,
                 closes=seg_closes, timestamps=seg_ts,
-                balance=balance, risk_pct=base_params.risk_pct,
+                balance=balance, risk_pct=params.risk_pct,
                 filters=filters, signal_fn=sig_fn,
                 stop_check=lambda: _stop_flags.get(run_id, False),
             )

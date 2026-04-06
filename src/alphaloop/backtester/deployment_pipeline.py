@@ -21,6 +21,16 @@ from alphaloop.db.repositories.research_repo import ResearchRepository
 logger = logging.getLogger(__name__)
 
 
+def _metric(metrics: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Return the first non-null metric value across known key aliases."""
+    for key in keys:
+        if key in metrics:
+            value = metrics.get(key)
+            if value is not None:
+                return value
+    return default
+
+
 class StageGate(object):
     """Defines the validation requirements for a stage transition."""
 
@@ -165,7 +175,7 @@ class DeploymentPipeline:
             )
 
         if gate.min_sharpe is not None:
-            sharpe = metrics.get("sharpe_ratio") or metrics.get("sharpe")
+            sharpe = _metric(metrics, "sharpe_ratio", "sharpe")
             if sharpe is None or sharpe < gate.min_sharpe:
                 reasons.append(
                     f"Sharpe {sharpe} < required {gate.min_sharpe}"
@@ -179,7 +189,7 @@ class DeploymentPipeline:
                 )
 
         if gate.max_drawdown_pct is not None:
-            dd = metrics.get("max_drawdown_pct", 0)
+            dd = _metric(metrics, "max_drawdown_pct", "max_dd_pct", default=0)
             if dd < gate.max_drawdown_pct:  # dd is negative
                 reasons.append(
                     f"Drawdown {dd:.1f}% exceeds limit {gate.max_drawdown_pct:.1f}%"
@@ -198,7 +208,7 @@ class DeploymentPipeline:
                     "Run backtester with holdout set and pass result."
                 )
             else:
-                holdout_sharpe = holdout_result.get("sharpe") or holdout_result.get("sharpe_ratio")
+                holdout_sharpe = _metric(holdout_result, "sharpe", "sharpe_ratio")
                 holdout_min = 0.3  # minimum Sharpe on holdout slice
                 if holdout_sharpe is None:
                     reasons.append("Holdout result missing 'sharpe' field")
@@ -399,7 +409,7 @@ class DeploymentPipeline:
             dict with "recommendation", "metrics_comparison", "reasons".
         """
         # Simple evaluation: if canary Sharpe > 0 and win_rate > 35%, recommend promote
-        sharpe = metrics.get("sharpe_ratio") or metrics.get("sharpe", 0)
+        sharpe = _metric(metrics, "sharpe_ratio", "sharpe", default=0)
         wr = metrics.get("win_rate", 0)
         trades = metrics.get("total_trades", 0)
 

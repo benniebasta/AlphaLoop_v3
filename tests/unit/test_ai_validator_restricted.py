@@ -161,3 +161,107 @@ class TestPreservesConstructionProvenance:
         assert result is not None
         assert result.sl_source == "swing_low"
         assert result.construction_candidates == 3
+
+
+class TestFailClosedMode:
+    @pytest.mark.asyncio
+    async def test_no_caller_rejects_when_fail_closed(self):
+        """Strict mode must reject when no caller is configured."""
+        validator = BoundedAIValidator(fail_open=False)
+
+        result = await validator.validate(
+            _make_signal(),
+            _make_regime(),
+            _make_quality(),
+            _make_conviction(),
+            {},
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_response_rejects_when_fail_closed(self):
+        """Strict mode must reject empty validator responses."""
+        caller = _make_caller("")
+        validator = BoundedAIValidator(
+            ai_caller=caller,
+            validator_model="test",
+            fail_open=False,
+        )
+
+        result = await validator.validate(
+            _make_signal(),
+            _make_regime(),
+            _make_quality(),
+            _make_conviction(),
+            {},
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_parse_failure_rejects_when_fail_closed(self):
+        """Strict mode must reject malformed validator responses."""
+        caller = _make_caller("not-json-at-all")
+        validator = BoundedAIValidator(
+            ai_caller=caller,
+            validator_model="test",
+            fail_open=False,
+        )
+
+        result = await validator.validate(
+            _make_signal(),
+            _make_regime(),
+            _make_quality(),
+            _make_conviction(),
+            {},
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_call_failure_rejects_when_fail_closed(self):
+        """Strict mode must reject on validator call exceptions."""
+        caller = MagicMock()
+        caller.call = AsyncMock(side_effect=RuntimeError("provider timeout"))
+        validator = BoundedAIValidator(
+            ai_caller=caller,
+            validator_model="test",
+            fail_open=False,
+        )
+
+        result = await validator.validate(
+            _make_signal(),
+            _make_regime(),
+            _make_quality(),
+            _make_conviction(),
+            {},
+        )
+
+        assert result is None
+
+
+class TestDefaultPrompting:
+    @pytest.mark.asyncio
+    async def test_default_prompts_are_non_empty_and_include_validator_instruction(self):
+        caller = _make_caller('{"status": "approved"}')
+        validator = BoundedAIValidator(
+            ai_caller=caller,
+            validator_model="test",
+            validator_instruction="Reject weak momentum setups.",
+            fail_open=False,
+        )
+
+        result = await validator.validate(
+            _make_signal(),
+            _make_regime(),
+            _make_quality(),
+            _make_conviction(),
+            {"session": {"name": "london_open"}},
+        )
+
+        assert result is not None
+        call = caller.call.await_args
+        assert "Reject weak momentum setups." in call.kwargs["system_prompt"]
+        assert "Direction: BUY" in call.kwargs["user_prompt"]
+        assert "Session: london_open" in call.kwargs["user_prompt"]

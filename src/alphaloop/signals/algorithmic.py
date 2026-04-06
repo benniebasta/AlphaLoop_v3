@@ -17,6 +17,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from alphaloop.core.setup_types import (
+    normalize_pipeline_setup_type,
+    normalize_schema_setup_type,
+)
 from alphaloop.core.types import TrendDirection, SetupType
 from alphaloop.pipeline.types import DirectionHypothesis
 from alphaloop.signals.conditions import (
@@ -24,8 +28,28 @@ from alphaloop.signals.conditions import (
     check_bollinger, check_adx_trend, check_bos, combine,
 )
 from alphaloop.signals.schema import TradeSignal
+from alphaloop.trading.strategy_loader import (
+    resolve_strategy_signal_logic,
+    resolve_strategy_signal_rules,
+)
 
 logger = logging.getLogger(__name__)
+
+def _normalize_setup_tag(raw: str | None) -> str:
+    return normalize_schema_setup_type(raw)
+
+
+def _normalize_hypothesis_setup_tag(raw: str | None) -> str:
+    return normalize_pipeline_setup_type(_normalize_setup_tag(raw))
+
+
+def _configured_signal_rules(params: dict) -> list[dict]:
+    """Resolve signal rules through the shared strategy contract."""
+    return resolve_strategy_signal_rules(params, default_to_ema=True)
+
+
+def _configured_signal_logic(params: dict) -> str:
+    return resolve_strategy_signal_logic(params)
 
 
 # ---------------------------------------------------------------------------
@@ -132,9 +156,17 @@ class AlgorithmicSignalEngine:
     Tools are NOT applied here — they run via the strategy pipeline (Phase 2).
     """
 
-    def __init__(self, symbol: str, params: dict, prev_ema_state: dict | None = None):
+    def __init__(
+        self,
+        symbol: str,
+        params: dict,
+        prev_ema_state: dict | None = None,
+        *,
+        setup_tag: str = "pullback",
+    ):
         self.symbol = symbol
         self.params = params
+        self.setup_tag = _normalize_setup_tag(setup_tag)
         # Per-source previous-bar state
         self._prev_fast: float | None = None
         self._prev_slow: float | None = None
@@ -171,8 +203,8 @@ class AlgorithmicSignalEngine:
             self.last_neutral_reason = f"Price/ATR missing (price={price} atr={atr}) — check MT5"
             return None
 
-        signal_rules = self.params.get("signal_rules", [{"source": "ema_crossover"}])
-        signal_logic = self.params.get("signal_logic", "AND")
+        signal_rules = _configured_signal_rules(self.params)
+        signal_logic = _configured_signal_logic(self.params)
         rsi_ob = self.params.get("rsi_ob", 70.0)
         rsi_os = self.params.get("rsi_os", 30.0)
 
@@ -352,7 +384,7 @@ class AlgorithmicSignalEngine:
 
         signal = TradeSignal(
             trend=direction,
-            setup=SetupType.PULLBACK,
+            setup=SetupType(self.setup_tag) if self.setup_tag in {member.value for member in SetupType} else SetupType.PULLBACK,
             entry_zone=[round(entry_low, 5), round(entry_high, 5)],
             stop_loss=round(sl, 5),
             take_profit=[round(tp1, 5), round(tp2, 5)],
@@ -398,8 +430,8 @@ class AlgorithmicSignalEngine:
             self.last_neutral_reason = f"Price/ATR missing (price={price} atr={atr}) — check MT5"
             return None
 
-        signal_rules = self.params.get("signal_rules", [{"source": "ema_crossover"}])
-        signal_logic = self.params.get("signal_logic", "AND")
+        signal_rules = _configured_signal_rules(self.params)
+        signal_logic = _configured_signal_logic(self.params)
         rsi_ob = self.params.get("rsi_ob", 70.0)
         rsi_os = self.params.get("rsi_os", 30.0)
 
@@ -522,7 +554,7 @@ class AlgorithmicSignalEngine:
         return DirectionHypothesis(
             direction=direction_str,
             confidence=computed_confidence,
-            setup_tag="pullback",
+            setup_tag=_normalize_hypothesis_setup_tag(self.setup_tag),
             reasoning=(
                 f"{source_names} ({signal_logic}) signal. "
                 f"agreement={n_winning}/{n_active}."

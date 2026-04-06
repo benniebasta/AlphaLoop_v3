@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from alphaloop.core.events import EventBus, TradeOpened
@@ -432,3 +433,40 @@ def test_active_strategy_id_no_strategy():
     orch = _make_orchestrator()
     orch._active_strategy = None
     assert orch._active_strategy_id() == "XAUUSD"
+
+
+def test_active_strategy_id_prefers_spec_first_runtime_context():
+    orch = _make_orchestrator()
+    orch._active_strategy = SimpleNamespace(
+        version="legacy",
+        strategy_spec=SimpleNamespace(spec_version="v1"),
+    )
+    assert orch._active_strategy_id() == "XAUUSD"
+
+
+@pytest.mark.asyncio
+async def test_submit_prefers_spec_first_runtime_version_for_execution_metadata():
+    captured = {}
+
+    async def _mock_execute(**kwargs):
+        captured.update(kwargs)
+        return _make_exec_report(status="FILLED")
+
+    exec_svc = MagicMock()
+    exec_svc.execute_market_order = _mock_execute
+
+    orch = _make_orchestrator(execution_service=exec_svc)
+    orch._active_strategy = SimpleNamespace(
+        version="legacy",
+        signal_mode="algo_only",
+        strategy_spec=SimpleNamespace(
+            spec_version="v1",
+            signal_mode="ai_signal",
+            metadata={"version": 9},
+        ),
+    )
+
+    await orch.execute(_make_result(), {})
+
+    assert captured["strategy_id"] == "XAUUSD"
+    assert captured["strategy_version"] == ""

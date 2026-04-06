@@ -24,6 +24,7 @@ import numpy as np
 from alphaloop.backtester.engine import BacktestEngine, BacktestResult
 from alphaloop.backtester.params import BacktestParams
 from alphaloop.backtester.runner import make_signal_fn
+from alphaloop.core.setup_types import normalize_pipeline_setup_type
 from alphaloop.core.types import TradeDirection
 from alphaloop.pipeline.types import CandidateSignal, CycleOutcome
 from alphaloop.pipeline.orchestrator import PipelineOrchestrator
@@ -33,8 +34,53 @@ from alphaloop.pipeline.invalidation import StructuralInvalidator
 from alphaloop.pipeline.conviction import ConvictionScorer
 from alphaloop.pipeline.execution_guard import ExecutionGuardRunner
 from alphaloop.pipeline.risk_gate import RiskGateRunner
+from alphaloop.trading.strategy_loader import (
+    build_strategy_resolution_input,
+    resolve_strategy_setup_family,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _comparison_backtest_params(
+    params: BacktestParams | None,
+    filters: list[str],
+) -> BacktestParams:
+    """Build a spec-consistent baseline when comparison runs without an explicit strategy."""
+    if params is not None:
+        return params
+
+    from alphaloop.backtester.runner import _base_backtest_params
+
+    return _base_backtest_params(
+        signal_mode="algo_ai",
+        signal_rules=None,
+        signal_logic="AND",
+        signal_auto=False,
+        tools=filters,
+        source="comparison",
+    )
+
+
+def _resolve_comparison_setup_type(params: BacktestParams, setup_label: str | None) -> str:
+    """Resolve comparison setup type from the typed strategy contract first."""
+    raw_label = str(setup_label or "").strip().lower()
+    source_map = {
+        "ema_crossover": "pullback",
+        "macd_crossover": "continuation",
+        "rsi_reversal": "reversal",
+        "bollinger_breakout": "range_bounce",
+        "adx_trend": "continuation",
+        "bos_confirm": "breakout",
+    }
+    if raw_label in source_map:
+        return normalize_pipeline_setup_type(source_map[raw_label])
+
+    strategy_like = build_strategy_resolution_input(params, tools=params.tools)
+    family = resolve_strategy_setup_family(strategy_like)
+    if family:
+        return normalize_pipeline_setup_type(family)
+    return normalize_pipeline_setup_type(raw_label)
 
 
 # ---------------------------------------------------------------------------
@@ -274,23 +320,12 @@ def make_v4_signal_fn(
 
         direction, entry, sl, tp1, tp2, setup_type, conf = v3_sig
 
-        # Map v3 signal source names to v4 setup types
-        _SETUP_MAP = {
-            "ema_crossover": "pullback",
-            "macd_crossover": "continuation",
-            "rsi_reversal": "reversal",
-            "bollinger_breakout": "range_bounce",
-            "adx_trend": "continuation",
-            "bos_confirm": "breakout",
-        }
-
         # Build a signal generator that returns the v3 signal as a CandidateSignal
         async def gen_signal(context, regime):
             rr = abs(tp1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
-            mapped_setup = _SETUP_MAP.get(setup_type, "pullback")
             return CandidateSignal(
                 direction="BUY" if direction == TradeDirection.BUY else "SELL",
-                setup_type=mapped_setup,
+                setup_type=_resolve_comparison_setup_type(params, setup_type),
                 entry_zone=(entry - 0.5, entry + 0.5),
                 stop_loss=sl,
                 take_profit=[tp1] + ([tp2] if tp2 else []),
@@ -379,13 +414,12 @@ async def run_comparison(
     """
     from alphaloop.backtester.runner import _fetch_data
 
-    if params is None:
-        params = BacktestParams()
-
     if filters is None:
         filters = [
             "session_filter", "volatility_filter", "ema200_filter",
         ]
+
+    params = _comparison_backtest_params(params, filters)
 
     logger.info(
         "[Comparison] Starting v3 vs v4 comparison: %s %dd %s",

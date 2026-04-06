@@ -7,6 +7,7 @@ All timestamps are UTC. Scores are 0-100. Scalars are 0.0-1.25.
 
 from __future__ import annotations
 
+from typing import Any
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -249,3 +250,69 @@ class SizingDecision:
     equity_curve_scalar: float = 1.0
     final_risk_pct: float = 0.0
     margin_required: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Candidate Journey
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CandidateJourneyStage:
+    """One durable stage entry in the candidate decision trail."""
+
+    stage: str
+    status: str
+    detail: str = ""
+    blocked_by: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=_utcnow)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "status": self.status,
+            "detail": self.detail,
+            "blocked_by": self.blocked_by,
+            "payload": self.payload,
+            "timestamp": self.timestamp.isoformat(),
+        }
+
+
+@dataclass
+class CandidateJourney:
+    """Stage-by-stage decision trail for one pipeline candidate."""
+
+    stages: list[CandidateJourneyStage] = field(default_factory=list)
+    final_outcome: str | None = None
+    rejection_reason: str | None = None
+
+    def add_stage(
+        self,
+        stage: str,
+        status: str,
+        *,
+        detail: str = "",
+        blocked_by: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.stages.append(
+            CandidateJourneyStage(
+                stage=stage,
+                status=status,
+                detail=detail,
+                blocked_by=blocked_by,
+                payload=payload or {},
+            )
+        )
+
+    def finalize(self, *, outcome: str, rejection_reason: str | None = None) -> None:
+        self.final_outcome = outcome
+        self.rejection_reason = rejection_reason
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stages": [stage.to_dict() for stage in self.stages],
+            "final_outcome": self.final_outcome,
+            "rejection_reason": self.rejection_reason,
+        }

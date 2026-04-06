@@ -6,17 +6,29 @@ UI hits /api/backtests instead. Kept for potential future use.
 
 from __future__ import annotations
 
+import os
 import time
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.db.repositories.settings_repo import SettingsRepository
 from alphaloop.seedlab import background_runner
 from alphaloop.webui.deps import get_db_session, _get_session_factory
 
 router = APIRouter(prefix="/api/seedlab", tags=["seedlab"])
+
+
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for SeedLab write actions when AUTH_TOKEN is configured."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 class SeedLabRun(BaseModel):
@@ -55,9 +67,12 @@ async def get_seedlab_runs(
 @router.post("")
 async def create_seedlab_run(
     body: SeedLabRun,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Queue and start a new strategy discovery run."""
+    _require_operator_auth(authorization)
     import json
     from datetime import datetime, timezone
 
@@ -95,6 +110,20 @@ async def create_seedlab_run(
         max_combinatorial_seeds=body.max_combinatorial_seeds,
     )
 
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="seedlab_create",
+        target=run_id,
+        old_value=None,
+        new_value=json.dumps({
+            "symbol": body.symbol,
+            "days": body.days,
+            "balance": body.balance,
+        }, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
+    await session.commit()
+
     return {"status": "ok", "run_id": run_id, "run": run_entry}
 
 
@@ -116,18 +145,37 @@ async def get_seedlab_logs(
 
 
 @router.patch("/{run_id}/stop")
-async def stop_seedlab_run(run_id: str) -> dict:
+async def stop_seedlab_run(
+    run_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Request a running SeedLab run to stop."""
+    _require_operator_auth(authorization)
     stopped = background_runner.request_stop(run_id)
+    if stopped:
+        session.add(OperatorAuditLog(
+            operator="webui",
+            action="seedlab_stop",
+            target=run_id,
+            old_value="running",
+            new_value="stop_requested",
+            source_ip=request.client.host if request and request.client else "unknown",
+        ))
+        await session.commit()
     return {"status": "ok" if stopped else "not_running", "run_id": run_id}
 
 
 @router.delete("/{run_id}")
 async def delete_seedlab_run(
     run_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Delete a SeedLab run (stop if running)."""
+    _require_operator_auth(authorization)
     background_runner.delete_run_data(run_id)
 
     # Remove from settings store
@@ -140,6 +188,14 @@ async def delete_seedlab_run(
         runs = []
     runs = [r for r in runs if r.get("run_id") != run_id]
     await repo.set("seedlab_runs", json.dumps(runs))
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="seedlab_delete",
+        target=run_id,
+        old_value="stored",
+        new_value="deleted",
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
     await session.commit()
 
     return {"status": "ok", "run_id": run_id}

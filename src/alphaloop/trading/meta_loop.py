@@ -17,9 +17,195 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from alphaloop.config.settings_service import SettingsService
+from alphaloop.core.constants import STRATEGY_VERSIONS_DIR
 from alphaloop.core.events import EventBus
+from alphaloop.trading.strategy_loader import (
+    build_algorithmic_params,
+    build_active_strategy_payload,
+    normalize_strategy_summary,
+    resolve_strategy_ai_models,
+    resolve_signal_instruction,
+    resolve_strategy_setup_family,
+    resolve_strategy_signal_mode,
+    resolve_strategy_spec_version,
+    resolve_strategy_source,
+    resolve_validator_instruction,
+    serialize_strategy_spec,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_tool_overrides(value) -> dict[str, bool] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(k): bool(v) for k, v in value.items() if bool(v)}
+    if isinstance(value, (list, tuple, set)):
+        return {str(name): True for name in value}
+    return None
+
+
+def _apply_strategy_overrides(payload: dict, overrides: dict | None) -> dict:
+    if not isinstance(overrides, dict):
+        return payload
+
+    explicit_strategy_spec = overrides.get("strategy_spec")
+    if explicit_strategy_spec is not None:
+        strategy_spec = dict(
+            serialize_strategy_spec({**payload, "strategy_spec": explicit_strategy_spec})
+        )
+    else:
+        strategy_spec = dict(payload.get("strategy_spec") or {})
+    prompt_bundle = dict(strategy_spec.get("prompt_bundle") or {})
+
+    if "params" in overrides and isinstance(overrides.get("params"), dict):
+        payload["params"] = dict(overrides["params"])
+    if "tools" in overrides:
+        normalized_tools = _normalize_tool_overrides(overrides.get("tools"))
+        if normalized_tools is not None:
+            payload["tools"] = normalized_tools
+    if "signal_mode" in overrides and overrides.get("signal_mode") is not None:
+        payload["signal_mode"] = str(overrides["signal_mode"])
+    if "source" in overrides and overrides.get("source") is not None:
+        payload["source"] = str(overrides["source"])
+    if "ai_models" in overrides and isinstance(overrides.get("ai_models"), dict):
+        payload["ai_models"] = {
+            str(name): str(model)
+            for name, model in overrides["ai_models"].items()
+            if model
+        }
+        strategy_spec["ai_models"] = dict(payload["ai_models"])
+    if "signal_instruction" in overrides and overrides.get("signal_instruction") is not None:
+        payload["signal_instruction"] = str(overrides["signal_instruction"])
+        prompt_bundle["signal_instruction"] = payload["signal_instruction"]
+    if "validator_instruction" in overrides and overrides.get("validator_instruction") is not None:
+        payload["validator_instruction"] = str(overrides["validator_instruction"])
+        prompt_bundle["validator_instruction"] = payload["validator_instruction"]
+    if "scoring_weights" in overrides and isinstance(overrides.get("scoring_weights"), dict):
+        payload["scoring_weights"] = dict(overrides["scoring_weights"])
+    if "confidence_thresholds" in overrides and isinstance(overrides.get("confidence_thresholds"), dict):
+        payload["confidence_thresholds"] = dict(overrides["confidence_thresholds"])
+    if prompt_bundle or strategy_spec or explicit_strategy_spec is not None:
+        strategy_spec["prompt_bundle"] = prompt_bundle
+        payload["strategy_spec"] = strategy_spec
+    return payload
+
+
+def _should_recompute_family(overrides: dict | None) -> bool:
+    if not isinstance(overrides, dict):
+        return False
+    if overrides.get("tools") is not None:
+        return True
+    if overrides.get("signal_mode") is not None:
+        return True
+    if overrides.get("strategy_spec") is not None:
+        return True
+    params = overrides.get("params")
+    if isinstance(params, dict) and "signal_rules" in params:
+        return True
+    return False
+
+
+def _sync_payload_strategy_spec(
+    payload: dict,
+    *,
+    symbol: str,
+    version: int,
+    source: str | None = None,
+    recompute_family: bool = False,
+) -> dict:
+    effective_source = str(source or payload.get("source") or "").strip()
+    if effective_source:
+        payload["source"] = effective_source
+    payload["signal_mode"] = resolve_strategy_signal_mode(payload)
+    if recompute_family:
+        blanked_spec = dict(payload.get("strategy_spec") or {})
+        blanked_spec["setup_family"] = ""
+        family_payload = dict(payload)
+        family_payload["strategy_spec"] = blanked_spec
+        payload["setup_family"] = resolve_strategy_setup_family(family_payload)
+    else:
+        payload["setup_family"] = (
+            str(payload.get("setup_family") or "").strip().lower()
+            or resolve_strategy_setup_family(payload)
+        )
+
+    strategy_spec = dict(payload.get("strategy_spec") or {})
+    strategy_spec["spec_version"] = resolve_strategy_spec_version(payload) or "v1"
+    strategy_spec["signal_mode"] = payload["signal_mode"]
+    strategy_spec["setup_family"] = payload["setup_family"]
+    strategy_spec["ai_models"] = resolve_strategy_ai_models(payload)
+    prompt_bundle = dict(strategy_spec.get("prompt_bundle") or {})
+    prompt_bundle["signal_instruction"] = resolve_signal_instruction(payload)
+    prompt_bundle["validator_instruction"] = resolve_validator_instruction(payload)
+    strategy_spec["prompt_bundle"] = prompt_bundle
+    metadata = dict(strategy_spec.get("metadata") or {})
+    metadata["source"] = effective_source or resolve_strategy_source(payload)
+    metadata["symbol"] = symbol
+    metadata["version"] = version
+    strategy_spec["metadata"] = metadata
+    payload["strategy_spec"] = serialize_strategy_spec({**payload, "strategy_spec": strategy_spec})
+    payload["params"] = build_algorithmic_params(payload)
+    payload["ai_models"] = resolve_strategy_ai_models(payload)
+    payload["signal_mode"] = resolve_strategy_signal_mode(payload)
+    if recompute_family:
+        blanked_spec = dict(payload.get("strategy_spec") or {})
+        blanked_spec["setup_family"] = ""
+        family_payload = dict(payload)
+        family_payload["strategy_spec"] = blanked_spec
+        payload["setup_family"] = resolve_strategy_setup_family(family_payload)
+    else:
+        payload["setup_family"] = resolve_strategy_setup_family(payload)
+    payload["source"] = effective_source or resolve_strategy_source(payload)
+    return payload
+
+
+def _strategy_version_payload(
+    symbol: str,
+    version: int,
+    status: str,
+    source: str,
+    active,
+    params: dict,
+    overrides: dict | None = None,
+) -> dict:
+    payload = build_active_strategy_payload(active)
+    payload.update({
+        "symbol": symbol,
+        "version": version,
+        "spec_version": resolve_strategy_spec_version(payload) or "v1",
+        "status": status,
+        "source": source,
+        "params": params,
+    })
+    payload = _apply_strategy_overrides(payload, overrides)
+    return _sync_payload_strategy_spec(
+        payload,
+        symbol=symbol,
+        version=version,
+        source=source,
+        recompute_family=_should_recompute_family(overrides),
+    )
+
+
+def _walk_forward_candidate_payload(symbol: str, active, improved_params: dict) -> dict:
+    """Build the temporary strategy payload used by walk-forward evaluation."""
+    payload = build_active_strategy_payload(active)
+    payload.update({
+        "symbol": symbol,
+        "version": int(payload.get("version", 0) or 0) + 1,
+        "params": improved_params.get("params", payload.get("params", {})),
+        "tools": payload.get("tools", {}),
+        "signal_mode": payload.get("signal_mode"),
+    })
+    payload = _apply_strategy_overrides(payload, improved_params)
+    return _sync_payload_strategy_spec(
+        payload,
+        symbol=symbol,
+        version=payload["version"],
+        recompute_family=_should_recompute_family(improved_params),
+    )
 
 
 @dataclass
@@ -201,11 +387,12 @@ class MetaLoop:
             )
 
             if report:
+                metrics = normalize_strategy_summary({"summary": report.get("metrics", {})})
                 logger.info(
                     "[meta-loop] Research report for %s: trades=%d, sharpe=%s",
                     self._symbol,
                     report.get("metrics", {}).get("total_trades", 0),
-                    report.get("metrics", {}).get("sharpe_ratio"),
+                    metrics.get("sharpe"),
                 )
                 # Refresh baseline R-multiples from current live data
                 r_mults = report.get("r_multiples", [])
@@ -328,13 +515,11 @@ class MetaLoop:
             runner = BacktestRunner(session_factory=self._session_factory)
 
             # Build a temporary strategy dict with the improved params
-            candidate_params = {
-                "symbol": self._symbol,
-                "version": getattr(active, "version", 0) + 1,
-                "params": improved_params.get("params", getattr(active, "params", {})),
-                "tools": getattr(active, "tools", {}),
-                "signal_mode": getattr(active, "signal_mode", "ai_signal"),
-            }
+            candidate_params = _walk_forward_candidate_payload(
+                self._symbol,
+                active,
+                improved_params,
+            )
 
             # Run OOS backtest in thread pool (CPU-bound)
             result = await asyncio.to_thread(
@@ -350,7 +535,11 @@ class MetaLoop:
                 return True
 
             oos_sharpe = result.get("oos_sharpe", 0.0)
-            oos_maxdd = result.get("oos_max_drawdown", 1.0)
+            oos_maxdd = result.get("oos_max_dd_pct")
+            if oos_maxdd is None:
+                oos_maxdd = result.get("oos_max_drawdown")
+            if oos_maxdd is None:
+                oos_maxdd = 1.0
 
             logger.info(
                 "[meta-loop] %s walk-forward: OOS sharpe=%.3f maxdd=%.1f%%",
@@ -367,6 +556,7 @@ class MetaLoop:
             # Log OOS metrics to improved_params for version JSON persistence
             improved_params["oos_metrics"] = {
                 "sharpe": round(oos_sharpe, 4),
+                "max_dd_pct": round(oos_maxdd, 4),
                 "max_drawdown": round(oos_maxdd, 4),
             }
             return True
@@ -426,34 +616,36 @@ class MetaLoop:
         Returns the new version number, or None on failure.
         """
         import json
-        from pathlib import Path
+        import os
+        import time
+
+        from alphaloop.backtester.asset_trainer import _reserve_strategy_version_path
 
         try:
-            new_version = getattr(active, "version", 0) + 1
-            versions_dir = Path(__file__).resolve().parent.parent.parent.parent / "strategy_versions"
-            versions_dir.mkdir(exist_ok=True)
+            new_version, out_path, lock_path = _reserve_strategy_version_path(self._symbol)
 
-            version_data = {
-                "symbol": self._symbol,
-                "version": new_version,
-                "status": "candidate",  # not yet active
-                "source": "autolearn",
-                "params": improved_params.get("params", getattr(active, "params", {})),
-                "tools": getattr(active, "tools", {}),
-                "validation": getattr(active, "validation", {}),
-                "ai_models": getattr(active, "ai_models", {}),
-                "signal_instruction": getattr(active, "signal_instruction", ""),
-                "validator_instruction": getattr(active, "validator_instruction", ""),
-                "signal_mode": getattr(active, "signal_mode", "ai_signal"),
-                "autolearn_meta": {
-                    "rationale": improved_params.get("rationale", ""),
-                    "oos_metrics": improved_params.get("oos_metrics", {}),
-                    "regime_at_creation": self._current_regime,
-                },
+            version_data = _strategy_version_payload(
+                self._symbol,
+                new_version,
+                "candidate",
+                "autolearn",
+                active,
+                improved_params.get("params", getattr(active, "params", {})),
+                overrides=improved_params,
+            )
+            version_data["autolearn_meta"] = {
+                "rationale": improved_params.get("rationale", ""),
+                "oos_metrics": improved_params.get("oos_metrics", {}),
+                "regime_at_creation": self._current_regime,
             }
 
-            out_path = versions_dir / f"{self._symbol}_v{new_version}.json"
-            out_path.write_text(json.dumps(version_data, indent=2))
+            tmp_path = out_path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
+            try:
+                tmp_path.write_text(json.dumps(version_data, indent=2))
+                os.replace(tmp_path, out_path)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+                lock_path.unlink(missing_ok=True)
 
             from alphaloop.core.events import StrategyVersionCreated
             await self._event_bus.publish(StrategyVersionCreated(
@@ -487,19 +679,15 @@ class MetaLoop:
             else:
                 baseline_sharpe = 0.0
 
-            version_data = {
-                "symbol": self._symbol,
-                "version": new_version,
-                "status": "active",
-                "source": "autolearn",
-                "params": improved_params.get("params", getattr(active, "params", {})),
-                "tools": getattr(active, "tools", {}),
-                "validation": getattr(active, "validation", {}),
-                "ai_models": getattr(active, "ai_models", {}),
-                "signal_instruction": getattr(active, "signal_instruction", ""),
-                "validator_instruction": getattr(active, "validator_instruction", ""),
-                "signal_mode": getattr(active, "signal_mode", "ai_signal"),
-            }
+            version_data = _strategy_version_payload(
+                self._symbol,
+                new_version,
+                "active",
+                "autolearn",
+                active,
+                improved_params.get("params", getattr(active, "params", {})),
+                overrides=improved_params,
+            )
             strategy_json = json.dumps(version_data)
 
             if self._instance_id:
@@ -560,32 +748,19 @@ class MetaLoop:
         from alphaloop.trading.strategy_loader import load_active_strategy
         # The previous version JSON still exists on disk — just re-activate it
         import json
-        from pathlib import Path
-        versions_dir = Path(__file__).resolve().parent.parent.parent.parent / "strategy_versions"
-        prev_path = None
-        for f in versions_dir.glob(f"{self._symbol}_v*.json"):
+        prev_data = None
+        for f in STRATEGY_VERSIONS_DIR.glob(f"{self._symbol}_v*.json"):
             try:
                 data = json.loads(f.read_text())
                 if data.get("version") == prev_ver:
-                    prev_path = f
+                    prev_data = data
                     break
             except (json.JSONDecodeError, OSError):
                 continue
 
-        if prev_path:
-            data = json.loads(prev_path.read_text())
-            strategy_json = json.dumps({
-                "symbol": self._symbol,
-                "version": prev_ver,
-                "status": data.get("status", ""),
-                "params": data.get("params", {}),
-                "tools": data.get("tools", {}),
-                "validation": data.get("validation", {}),
-                "ai_models": data.get("ai_models", {}),
-                "signal_instruction": data.get("signal_instruction", ""),
-                "validator_instruction": data.get("validator_instruction", ""),
-                "signal_mode": data.get("signal_mode", "ai_signal"),
-            })
+        if prev_data:
+            rollback_payload = build_active_strategy_payload(prev_data)
+            strategy_json = json.dumps(rollback_payload)
             # Write to per-instance key (primary) + symbol key (legacy fallback)
             if self._instance_id:
                 await self._settings_service.set(

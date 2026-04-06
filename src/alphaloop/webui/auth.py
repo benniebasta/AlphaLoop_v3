@@ -14,7 +14,7 @@ from starlette.responses import Response
 logger = logging.getLogger(__name__)
 
 # Paths that bypass auth completely (health probes, static assets, auth login)
-_PUBLIC_PREFIXES = ("/health", "/static", "/favicon", "/api/auth")
+_PUBLIC_PREFIXES = ("/health", "/static", "/favicon", "/api/auth", "/api/events/ingest")
 
 
 # ── Login endpoint ───────────────────────────────────────────────────────────

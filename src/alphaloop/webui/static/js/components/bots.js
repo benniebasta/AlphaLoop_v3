@@ -413,6 +413,16 @@ export async function render(container) {
           </div>
         </div>
 
+        <!-- Cycle Interval -->
+        <div class="form-group" style="margin-bottom:12px">
+          <label style="font-size:11px;color:var(--muted)">Cycle Interval</label>
+          <select id="deploy-poll-interval" class="field-input" style="font-size:12px">
+            <option value="60">60 s — active monitoring</option>
+            <option value="120">120 s — balanced</option>
+            <option value="300">300 s — conservative</option>
+          </select>
+        </div>
+
         <!-- Strategy Picker -->
         <div class="form-group" style="margin-bottom:12px">
           <label>Strategy Card</label>
@@ -1024,11 +1034,12 @@ export async function render(container) {
     const symbol = symbolSelect.value;
     const dryRun = document.getElementById('deploy-mode').value === 'dry';
     const riskBudget = parseInt(riskSlider.value, 10) / 100;
+    const pollInterval = parseFloat(document.getElementById('deploy-poll-interval').value) || 60;
     const pickedRadio = document.querySelector('input[name="pick-strategy"]:checked');
     const stratVer = pickedRadio ? parseInt(pickedRadio.value, 10) : null;
 
     try {
-      const payload = { symbol, dry_run: dryRun, risk_budget_pct: riskBudget };
+      const payload = { symbol, dry_run: dryRun, risk_budget_pct: riskBudget, poll_interval_sec: pollInterval };
       if (stratVer !== null) payload.strategy_version = stratVer;
       await apiPost('/api/bots/start', payload);
       const modeLabel = dryRun ? 'Dry Run' : 'Live';

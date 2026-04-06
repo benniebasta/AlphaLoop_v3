@@ -1,5 +1,10 @@
 """Tests for order state machine."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
 from alphaloop.execution.order_state import OrderState, OrderTracker, OrderRegistry
 
 
@@ -96,3 +101,31 @@ def test_registry_ticket_lookup():
     found = registry.get_by_ticket(99999)
     assert found is t1
     assert registry.get_by_ticket(11111) is None
+
+
+@pytest.mark.asyncio
+async def test_registry_reload_from_db_marks_non_terminal_orders_for_recovery():
+    repo = SimpleNamespace(
+        get_non_terminal=AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    order_id="ord-9",
+                    symbol="XAUUSD",
+                    direction="BUY",
+                    lots=0.10,
+                    broker_ticket=77777,
+                    fill_price=None,
+                    fill_volume=None,
+                )
+            ]
+        )
+    )
+    registry = OrderRegistry(order_repo=repo)
+
+    loaded = await registry.reload_from_db()
+
+    assert loaded == 1
+    tracker = registry.get("ord-9")
+    assert tracker is not None
+    assert tracker.state == OrderState.RECOVERY_PENDING
+    assert registry.get_by_ticket(77777) is tracker

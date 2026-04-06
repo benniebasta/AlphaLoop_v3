@@ -48,4 +48,5 @@ async def test_risk_monitor_status():
     status = rm.status
     assert status["seeded"] is True
     assert status["kill_switch"] is False
+    assert status["no_new_risk"] is False
     assert status["open_trades"] == 0

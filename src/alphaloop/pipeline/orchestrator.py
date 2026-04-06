@@ -21,6 +21,7 @@ from typing import Any
 
 from alphaloop.pipeline.types import (
     CandidateSignal,
+    CandidateJourney,
     ConvictionScore,
     CycleOutcome,
     DirectionHypothesis,
@@ -62,6 +63,7 @@ class PipelineResult:
     elapsed_ms: float = 0.0
     rejection_reason: str | None = None
     construction_source: str | None = None
+    journey: CandidateJourney = field(default_factory=CandidateJourney)
 
 
 class PipelineOrchestrator:
@@ -140,6 +142,18 @@ class PipelineOrchestrator:
             # ============================================================
             gate = await self.market_gate.check(context)
             result.market_gate = gate
+            self._record_stage(
+                result,
+                "market_gate",
+                "passed" if gate.tradeable else "blocked",
+                detail=gate.block_reason or ("tradeable" if gate.tradeable else ""),
+                blocked_by=gate.blocked_by,
+                payload={
+                    "data_quality": gate.data_quality,
+                    "spread_ratio": gate.spread_ratio,
+                    "bars_available": gate.bars_available,
+                },
+            )
 
             if not gate.tradeable:
                 result.outcome = CycleOutcome.REJECTED
@@ -151,6 +165,19 @@ class PipelineOrchestrator:
             # ============================================================
             regime = await self.regime_classifier.classify(context)
             result.regime = regime
+            self._record_stage(
+                result,
+                "regime",
+                "classified",
+                detail=regime.regime,
+                payload={
+                    "macro_regime": regime.macro_regime,
+                    "volatility_band": regime.volatility_band,
+                    "allowed_setups": list(regime.allowed_setups),
+                    "session_quality": regime.session_quality,
+                    "size_multiplier": regime.size_multiplier,
+                },
+            )
 
             # ============================================================
             # Stage 3: Direction Hypothesis / Signal Generator
@@ -184,6 +211,12 @@ class PipelineOrchestrator:
 
             raw_output = await signal_generator(context, regime)
             if raw_output is None:
+                self._record_stage(
+                    result,
+                    "signal",
+                    "no_signal",
+                    detail="signal generator returned None",
+                )
                 result.outcome = CycleOutcome.NO_SIGNAL
                 return self._finalise(result, t0)
 
@@ -198,6 +231,17 @@ class PipelineOrchestrator:
 
             if isinstance(raw_output, DirectionHypothesis) and self.trade_constructor:
                 result.hypothesis = raw_output
+                self._record_stage(
+                    result,
+                    "signal",
+                    "hypothesis_generated",
+                    detail=raw_output.setup_tag,
+                    payload={
+                        "direction": raw_output.direction,
+                        "confidence": raw_output.confidence,
+                        "source_names": raw_output.source_names,
+                    },
+                )
 
                 # Extract bid/ask from context.price (SimpleNamespace or dict)
                 price_data = getattr(context, "price", None)
@@ -225,6 +269,16 @@ class PipelineOrchestrator:
                 )
 
                 if construction.signal is None:
+                    self._record_stage(
+                        result,
+                        "construction",
+                        "rejected",
+                        detail=construction.rejection_reason or "no trade constructed",
+                        blocked_by="construction",
+                        payload={
+                            "candidates_considered": construction.candidates_considered,
+                        },
+                    )
                     result.outcome = CycleOutcome.NO_CONSTRUCTION
                     result.rejection_reason = (
                         f"no trade constructed: {construction.rejection_reason}"
@@ -239,6 +293,18 @@ class PipelineOrchestrator:
 
                 signal = construction.signal
                 result.construction_source = construction.sl_source
+                self._record_stage(
+                    result,
+                    "construction",
+                    "constructed",
+                    detail=construction.sl_source,
+                    payload={
+                        "direction": signal.direction,
+                        "setup_type": signal.setup_type,
+                        "rr_ratio": signal.rr_ratio,
+                        "candidates_considered": construction.candidates_considered,
+                    },
+                )
 
                 # --- Construction validation plugins (swing_structure, fvg_guard, bos_guard) ---
                 # Run here (not inside construct()) because plugins need full context.
@@ -263,6 +329,13 @@ class PipelineOrchestrator:
 
             elif isinstance(raw_output, DirectionHypothesis):
                 # DirectionHypothesis but no TradeConstructor — cannot proceed
+                self._record_stage(
+                    result,
+                    "construction",
+                    "rejected",
+                    detail="no TradeConstructor configured",
+                    blocked_by="construction",
+                )
                 result.outcome = CycleOutcome.NO_SIGNAL
                 result.rejection_reason = "no TradeConstructor configured"
                 return self._finalise(result, t0)
@@ -270,11 +343,33 @@ class PipelineOrchestrator:
             else:
                 # Backward compat: raw_output is already a CandidateSignal
                 signal = raw_output
+                self._record_stage(
+                    result,
+                    "signal",
+                    "signal_generated",
+                    detail=signal.setup_type,
+                    payload={
+                        "direction": signal.direction,
+                        "rr_ratio": signal.rr_ratio,
+                        "raw_confidence": signal.raw_confidence,
+                    },
+                )
 
             result.signal = signal
 
             # Check setup vs regime allowed list
             if regime.allowed_setups and signal.setup_type not in regime.allowed_setups:
+                self._record_stage(
+                    result,
+                    "setup_policy",
+                    "held",
+                    detail=(
+                        f"Setup '{signal.setup_type}' not allowed in "
+                        f"'{regime.regime}' regime"
+                    ),
+                    blocked_by="regime_setup_policy",
+                    payload={"allowed_setups": list(regime.allowed_setups)},
+                )
                 result.outcome = CycleOutcome.HELD
                 result.rejection_reason = (
                     f"Setup '{signal.setup_type}' not allowed in "
@@ -296,6 +391,22 @@ class PipelineOrchestrator:
                 signal, regime, context, enabled_tools=self.enabled_tools,
             )
             result.invalidation = inv
+            self._record_stage(
+                result,
+                "invalidation",
+                {
+                    "PASS": "passed",
+                    "SOFT_INVALIDATE": "soft_invalidated",
+                    "HARD_INVALIDATE": "hard_invalidated",
+                }.get(inv.severity, inv.severity.lower()),
+                detail=", ".join(f.reason for f in inv.failures) if inv.failures else inv.severity,
+                blocked_by="invalidation" if inv.severity == "HARD_INVALIDATE" else None,
+                payload={
+                    "severity": inv.severity,
+                    "conviction_penalty": inv.conviction_penalty,
+                    "checks_run": list(inv.checks_run),
+                },
+            )
 
             if inv.severity == "HARD_INVALIDATE":
                 result.outcome = CycleOutcome.REJECTED
@@ -315,6 +426,17 @@ class PipelineOrchestrator:
                     weights=regime.weight_overrides or None,
                 )
             result.quality = quality
+            self._record_stage(
+                result,
+                "quality",
+                "scored",
+                detail=f"overall={quality.overall_score:.1f}",
+                payload={
+                    "overall_score": quality.overall_score,
+                    "group_scores": dict(quality.group_scores),
+                    "low_score_count": quality.low_score_count,
+                },
+            )
 
             # ============================================================
             # Stage 5: Conviction Scorer
@@ -332,6 +454,18 @@ class PipelineOrchestrator:
                 ai_weight=ai_weight,
             )
             result.conviction = conviction
+            self._record_stage(
+                result,
+                "conviction",
+                "trade" if conviction.decision == "TRADE" else "held",
+                detail=conviction.hold_reason or conviction.reasoning,
+                blocked_by="conviction" if conviction.decision == "HOLD" else None,
+                payload={
+                    "score": conviction.score,
+                    "size_scalar": conviction.size_scalar,
+                    "quality_floor_triggered": conviction.quality_floor_triggered,
+                },
+            )
 
             if conviction.decision == "HOLD":
                 result.outcome = CycleOutcome.HELD
@@ -347,17 +481,53 @@ class PipelineOrchestrator:
                     signal, regime, quality, conviction, context
                 )
                 if validated is None:
+                    self._record_stage(
+                        result,
+                        "ai_validator",
+                        "rejected",
+                        detail="AI validator rejected",
+                        blocked_by="ai_validator",
+                    )
                     result.outcome = CycleOutcome.REJECTED
                     result.rejection_reason = "AI validator rejected"
                     return self._finalise(result, t0)
                 # AI may have adjusted the signal — update reference
                 result.signal = validated
+                self._record_stage(
+                    result,
+                    "ai_validator",
+                    "approved",
+                    detail="validated",
+                    payload={
+                        "direction": validated.direction,
+                        "raw_confidence": validated.raw_confidence,
+                    },
+                )
+            else:
+                self._record_stage(
+                    result,
+                    "ai_validator",
+                    "skipped",
+                    detail="AI validation not active for this cycle",
+                )
 
             # ============================================================
             # Stage 7: Risk Gate
             # ============================================================
             risk = await self.risk_gate.check(signal, context, symbol=symbol)
             result.risk_gate = risk
+            self._record_stage(
+                result,
+                "risk_gate",
+                "passed" if risk.allowed else "blocked",
+                detail=risk.block_reason or "",
+                blocked_by="risk_gate" if not risk.allowed else None,
+                payload={
+                    "size_modifier": risk.size_modifier,
+                    "equity_curve_scalar": risk.equity_curve_scalar,
+                    "risk_utilization": risk.risk_utilization,
+                },
+            )
 
             if not risk.allowed:
                 result.outcome = CycleOutcome.REJECTED
@@ -372,6 +542,17 @@ class PipelineOrchestrator:
                 enabled_tools=self.enabled_tools,
             )
             result.execution_guard = exec_result
+            self._record_stage(
+                result,
+                "execution_guard",
+                exec_result.action.lower(),
+                detail=exec_result.block_reason or exec_result.delay_reason or "",
+                blocked_by=exec_result.blocked_by,
+                payload={
+                    "delay_candles": exec_result.delay_candles,
+                    "warnings": list(exec_result.warnings),
+                },
+            )
 
             if exec_result.action == "BLOCK":
                 result.outcome = CycleOutcome.REJECTED
@@ -396,6 +577,13 @@ class PipelineOrchestrator:
             )
 
             if freshness <= 0:
+                self._record_stage(
+                    result,
+                    "freshness",
+                    "held",
+                    detail="Signal too stale (freshness=0)",
+                    blocked_by="freshness",
+                )
                 result.outcome = CycleOutcome.HELD
                 result.rejection_reason = "Signal too stale (freshness=0)"
                 return self._finalise(result, t0)
@@ -408,12 +596,32 @@ class PipelineOrchestrator:
                 equity_curve_scalar=risk.equity_curve_scalar,
             )
             result.sizing = sizing
+            self._record_stage(
+                result,
+                "sizing",
+                "computed",
+                detail=f"freshness={freshness:.4f}",
+                payload={
+                    "conviction_scalar": sizing.conviction_scalar,
+                    "regime_scalar": sizing.regime_scalar,
+                    "freshness_scalar": sizing.freshness_scalar,
+                    "risk_gate_scalar": sizing.risk_gate_scalar,
+                    "equity_curve_scalar": sizing.equity_curve_scalar,
+                },
+            )
 
             # ============================================================
             # Shadow mode gate — signal fully constructed but NOT executed.
             # All stages ran so the waterfall log captures the full breakdown.
             # ============================================================
             if self.shadow_mode:
+                self._record_stage(
+                    result,
+                    "shadow_mode",
+                    "held",
+                    detail="signal generated but not executed",
+                    blocked_by="shadow_mode",
+                )
                 result.outcome = CycleOutcome.HELD
                 result.rejection_reason = "shadow_mode: signal generated but not executed"
                 logger.info(
@@ -430,6 +638,13 @@ class PipelineOrchestrator:
 
         except Exception as exc:
             logger.error("[Pipeline] Unhandled error: %s", exc, exc_info=True)
+            self._record_stage(
+                result,
+                "pipeline",
+                "error",
+                detail=str(exc),
+                blocked_by="pipeline_error",
+            )
             result.outcome = CycleOutcome.REJECTED
             result.rejection_reason = f"Pipeline error: {exc}"
             return self._finalise(result, t0)
@@ -499,6 +714,10 @@ class PipelineOrchestrator:
     @staticmethod
     def _finalise(result: PipelineResult, t0: float) -> PipelineResult:
         result.elapsed_ms = round((time.monotonic() - t0) * 1000, 1)
+        result.journey.finalize(
+            outcome=result.outcome.value,
+            rejection_reason=result.rejection_reason,
+        )
         logger.info(
             "[Pipeline] %s in %.1fms%s",
             result.outcome.value,
@@ -506,6 +725,24 @@ class PipelineOrchestrator:
             f" — {result.rejection_reason}" if result.rejection_reason else "",
         )
         return result
+
+    @staticmethod
+    def _record_stage(
+        result: PipelineResult,
+        stage: str,
+        status: str,
+        *,
+        detail: str = "",
+        blocked_by: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        result.journey.add_stage(
+            stage,
+            status,
+            detail=detail,
+            blocked_by=blocked_by,
+            payload=payload,
+        )
 
     @staticmethod
     def _get_current_price(context) -> float:

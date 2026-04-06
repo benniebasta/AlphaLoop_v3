@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -45,6 +47,11 @@ class BacktestParams(BaseModel):
     signal_rules: list[dict] = Field(default_factory=lambda: [{"source": "ema_crossover"}])
     signal_logic: str = "AND"   # "AND" | "OR" | "MAJORITY"
     signal_auto: bool = False    # let Optuna auto-pick sources + logic
+    signal_mode: str = "algo_ai"
+    setup_family: str = ""
+    strategy_spec: dict[str, Any] = Field(default_factory=dict)
+    tools: dict[str, bool] = Field(default_factory=dict)
+    source: str = ""
 
     # Bounds for optimizer (not tuned directly, used by suggest())
     max_param_change_pct: float = 0.15  # max ±15% per generation

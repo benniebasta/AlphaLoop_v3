@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from alphaloop.core.setup_types import normalize_pipeline_setup_type
 from alphaloop.execution.schemas import OrderResult
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,29 @@ class ExecutionService:
                 is_dry_run=is_dry_run,
                 client_order_id=approval.client_order_id,
             )
+            if pending_trade_id is None and not is_dry_run:
+                error_message = "Pre-broker trade journal unavailable"
+                await self._update_order_status(
+                    approval.order_id,
+                    "FAILED",
+                    error_message=error_message,
+                )
+                await self._record_block_incident(
+                    error_message,
+                    incident_type="journal_unavailable",
+                    symbol=symbol,
+                    instance_id=instance_id,
+                    payload={"order_id": approval.order_id},
+                )
+                return ExecutionReport(
+                    order_id=approval.order_id,
+                    client_order_id=approval.client_order_id,
+                    status="FAILED",
+                    requested_price=report.requested_price,
+                    error_message=error_message,
+                    created_at=report.created_at,
+                    updated_at=datetime.now(timezone.utc),
+                )
 
             broker_comment = self._with_client_id(comment, approval.client_order_id)
             try:
@@ -353,7 +377,7 @@ class ExecutionService:
                     client_order_id=client_order_id,
                     symbol=symbol,
                     direction=getattr(signal, "direction", ""),
-                    setup_type=getattr(signal, "setup_type", None) or getattr(signal, "setup", None),
+                    setup_type=self._setup_type(signal),
                     entry_price=self._requested_price(signal),
                     entry_zone_low=self._entry_zone(signal)[0],
                     entry_zone_high=self._entry_zone(signal)[1],
@@ -459,7 +483,7 @@ class ExecutionService:
                 client_order_id=client_order_id,
                 symbol=symbol,
                 direction=getattr(signal, "direction", ""),
-                setup_type=getattr(signal, "setup_type", None) or getattr(signal, "setup", None),
+                setup_type=self._setup_type(signal),
                 entry_price=order_result.fill_price or self._requested_price(signal),
                 entry_zone_low=self._entry_zone(signal)[0],
                 entry_zone_high=self._entry_zone(signal)[1],
@@ -530,6 +554,14 @@ class ExecutionService:
             return float(zone[0]), float(zone[1])
         except (TypeError, ValueError, IndexError):
             return None, None
+
+    @staticmethod
+    def _setup_type(signal) -> str:
+        return normalize_pipeline_setup_type(
+            getattr(signal, "setup_type", None)
+            or getattr(signal, "setup_tag", None)
+            or getattr(signal, "setup", None)
+        )
 
     @classmethod
     def _requested_price(cls, signal) -> float | None:

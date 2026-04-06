@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from alphaloop.core.normalization import DistanceInfo, normalize_distance, check_bounds
+from alphaloop.core.setup_types import normalize_pipeline_setup_type
 from alphaloop.pipeline.types import CandidateSignal, DirectionHypothesis
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ class TradeConstructor:
 
         signal = CandidateSignal(
             direction=direction,
-            setup_type=hypothesis.setup_tag,
+            setup_type=normalize_pipeline_setup_type(hypothesis.setup_tag),
             entry_zone=entry_zone,
             stop_loss=round(sl_price, 5),
             take_profit=[round(tp, 5) for tp in tp_list],

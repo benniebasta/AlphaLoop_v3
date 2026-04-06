@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphaloop.config.assets import ASSETS, AssetConfig
+from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.db.repositories.settings_repo import SettingsRepository
 from alphaloop.webui.deps import get_db_session
 
@@ -78,18 +80,41 @@ class ToolsUpdate(BaseModel):
     tools: dict[str, bool]
 
 
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for asset tool writes when AUTH_TOKEN is configured."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @router.put("/{symbol}/tools")
 async def update_asset_tools(
     symbol: str,
     body: ToolsUpdate,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Save the filter/tool preset for a symbol."""
+    _require_operator_auth(authorization)
     symbol = symbol.upper()
     if symbol not in ASSETS:
         raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not in asset library")
     repo = SettingsRepository(session)
+    old_value = await repo.get(f"ASSET_TOOLS_{symbol}", "")
     # Only persist recognised tool keys
     clean = {k: bool(v) for k, v in body.tools.items() if k in _ALL_TOOLS}
     await repo.set_many({f"ASSET_TOOLS_{symbol}": json.dumps(clean)})
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="asset_tools_update",
+        target=symbol,
+        old_value=old_value or None,
+        new_value=json.dumps(clean, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
+    await session.commit()
     return {"status": "ok", "symbol": symbol, "tools": clean}

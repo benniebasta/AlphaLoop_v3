@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+import os
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphaloop.core.constants import RISK_HARD_CAPS
 from alphaloop.db.repositories.settings_repo import SettingsRepository
 from alphaloop.webui.deps import get_db_session
 
@@ -23,6 +26,22 @@ _SECRET_PATTERNS = _re.compile(
     r"(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)", _re.IGNORECASE
 )
 
+_RISK_SETTING_TO_CAP_KEY = {
+    "RISK_PCT": "risk_per_trade_pct",
+    "MAX_DAILY_LOSS_PCT": "max_daily_loss_pct",
+    "MARGIN_CAP_PCT": "margin_cap_pct",
+    "MAX_PORTFOLIO_HEAT_PCT": "max_portfolio_heat_pct",
+    "RISK_SCORE_THRESHOLD": "risk_score_threshold",
+    "MAX_SESSION_LOSS_PCT": "max_session_loss_pct",
+    "CONSECUTIVE_LOSS_LIMIT": "consecutive_loss_limit",
+}
+
+_INT_SETTINGS = {
+    "MAX_CONCURRENT_TRADES": (1, 20),
+    "LEVERAGE": (1, 2000),
+    "CONTRACT_SIZE": (1, 10_000_000),
+}
+
 
 def _mask_secrets(settings: dict[str, str]) -> dict[str, str]:
     """Mask values of keys matching secret patterns."""
@@ -33,6 +52,51 @@ def _mask_secrets(settings: dict[str, str]) -> dict[str, str]:
         else:
             masked[k] = v
     return masked
+
+
+def _validate_settings_update(settings: dict[str, str]) -> None:
+    """Reject unsafe or malformed live risk writes before they hit the DB."""
+    for key, raw_value in settings.items():
+        if key in _RISK_SETTING_TO_CAP_KEY:
+            cap_key = _RISK_SETTING_TO_CAP_KEY[key]
+            lo, hi, _default = RISK_HARD_CAPS[cap_key]
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{key} must be numeric",
+                ) from exc
+            if value < lo or value > hi:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{key} must be between {lo} and {hi}",
+                )
+
+        if key in _INT_SETTINGS:
+            lo, hi = _INT_SETTINGS[key]
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{key} must be an integer",
+                ) from exc
+            if value < lo or value > hi:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{key} must be between {lo} and {hi}",
+                )
+
+
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for settings writes when AUTH_TOKEN is configured."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @router.get("")
@@ -49,13 +113,16 @@ async def get_settings(
 async def update_settings(
     body: SettingsUpdate,
     request: Request = None,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Update multiple settings at once."""
+    _require_operator_auth(authorization)
     repo = SettingsRepository(session)
 
     # Phase 7L: Get old values for audit trail
     old_settings = await repo.get_all()
+    _validate_settings_update(body.settings)
 
     await repo.set_many(body.settings)
 

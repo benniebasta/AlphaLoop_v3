@@ -33,6 +33,15 @@ import pandas as pd
 
 from alphaloop.backtester.params import BacktestParams
 from alphaloop.config.assets import AssetConfig
+from alphaloop.trading.strategy_loader import (
+    build_algorithmic_params,
+    build_strategy_resolution_input,
+    normalize_strategy_tools,
+    resolve_strategy_setup_family,
+    resolve_strategy_signal_mode,
+    resolve_strategy_source,
+    serialize_strategy_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +50,21 @@ IS_RATIO = 0.70                  # 70% in-sample, 30% out-of-sample
 OOS_SHARPE_RATIO = 0.70          # OOS Sharpe must be ≥ 70% of IS Sharpe
 MIN_OOS_TRADES = 10              # gate fails if OOS produces fewer trades
 N_TRIALS_DEFAULT = 40            # Optuna trials for IS optimization
+
+
+def _with_strategy_metadata(params: dict[str, Any], base_params: BacktestParams) -> dict[str, Any]:
+    """Preserve non-tuned strategy metadata across walk-forward evaluation."""
+    merged = dict(params)
+    strategy_like = build_strategy_resolution_input(base_params, tools=base_params.tools)
+    resolved_params = build_algorithmic_params(strategy_like)
+    merged.setdefault("signal_mode", resolve_strategy_signal_mode(strategy_like))
+    merged.setdefault("setup_family", resolve_strategy_setup_family(strategy_like))
+    merged.setdefault("strategy_spec", serialize_strategy_spec(strategy_like))
+    merged.setdefault("tools", normalize_strategy_tools(base_params.tools))
+    merged.setdefault("source", resolve_strategy_source(strategy_like))
+    merged.setdefault("signal_rules", list(resolved_params.get("signal_rules") or []))
+    merged.setdefault("signal_logic", resolved_params.get("signal_logic") or "AND")
+    return merged
 
 
 # ── Result types ─────────────────────────────────────────────────────────────
@@ -220,6 +244,8 @@ class WalkForwardEngine:
             result.error = "IS optimisation produced no valid params"
             result.gate_reason = result.error
             return result
+
+        best_params_dict = _with_strategy_metadata(best_params_dict, base_params)
 
         if was_stopped:
             _log(f"{symbol} IS optimisation stopped early by stop_check")

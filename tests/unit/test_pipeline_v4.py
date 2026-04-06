@@ -9,36 +9,28 @@ execution_guard (delay mode), and ai_validator (bounded authority).
 from __future__ import annotations
 
 import asyncio
-import pytest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from alphaloop.pipeline.ai_validator import BoundedAIValidator
+from alphaloop.pipeline.conviction import ConvictionScorer
+from alphaloop.pipeline.execution_guard import ExecutionGuardRunner
+from alphaloop.pipeline.freshness import compute_freshness
+from alphaloop.pipeline.invalidation import StructuralInvalidator
+from alphaloop.pipeline.market_gate import MarketGate
+from alphaloop.pipeline.regime import RegimeClassifier
 from alphaloop.pipeline.types import (
     CandidateSignal,
     ConvictionScore,
-    CycleOutcome,
-    ExecutionGuardResult,
-    InvalidationFailure,
     InvalidationResult,
-    MarketGateResult,
     PortfolioContext,
     QualityResult,
     RegimeSnapshot,
-    RiskGateResult,
-    SizingDecision,
 )
-from alphaloop.pipeline.market_gate import MarketGate
-from alphaloop.pipeline.regime import RegimeClassifier
-from alphaloop.pipeline.invalidation import StructuralInvalidator
-from alphaloop.pipeline.freshness import compute_freshness
-from alphaloop.pipeline.conviction import ConvictionScorer
-from alphaloop.pipeline.execution_guard import ExecutionGuardRunner
-from alphaloop.pipeline.ai_validator import BoundedAIValidator
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 def _make_signal(**overrides):
     defaults = dict(
@@ -72,8 +64,11 @@ def _make_quality(**overrides):
     defaults = dict(
         tool_scores={"ema200": 80, "bos": 70, "macd": 60},
         group_scores={
-            "trend": 75, "momentum": 65, "structure": 70,
-            "volume": 55, "volatility": 60,
+            "trend": 75,
+            "momentum": 65,
+            "structure": 70,
+            "volume": 55,
+            "volatility": 60,
         },
         overall_score=67.0,
         contradictions=[],
@@ -90,13 +85,24 @@ def _make_context(**overrides):
         "M15": {
             "ema200": 3090.0,
             "atr": 10.0,
-            "bos": {"bullish_bos": True, "bullish_break_atr": 0.5,
-                     "bearish_bos": False, "bearish_break_atr": 0},
+            "bos": {
+                "bullish_bos": True,
+                "bullish_break_atr": 0.5,
+                "bearish_bos": False,
+                "bearish_break_atr": 0,
+            },
             "swing_structure": "bullish",
-            "fvg": {"bullish": [{"size_atr": 0.3, "bottom": 3095, "top": 3098}], "bearish": []},
+            "fvg": {
+                "bullish": [{"size_atr": 0.3, "bottom": 3095, "top": 3098}],
+                "bearish": [],
+            },
             "vwap": 3095.0,
             "bb_pct_b": 0.4,
-            "fast_fingers": {"is_exhausted_up": False, "is_exhausted_down": True, "exhaustion_score": 60},
+            "fast_fingers": {
+                "is_exhausted_up": False,
+                "is_exhausted_down": True,
+                "exhaustion_score": 60,
+            },
             "choppiness": 35.0,
             "adx": 30.0,
             "tick_jump_atr": 0.3,
@@ -105,12 +111,20 @@ def _make_context(**overrides):
         "H1": {"atr_pct": 0.003},
     }
     ctx.session = MagicMock(is_weekend=False, score=0.85)
-    ctx.price = MagicMock(bid=3100.5, ask=3101.0, spread=1.5, time=datetime.now(timezone.utc))
+    ctx.price = MagicMock(
+        bid=3100.5,
+        ask=3101.0,
+        spread=1.5,
+        time=datetime.now(timezone.utc),
+    )
     ctx.news = []
     ctx.dxy = None
     ctx.sentiment = None
     ctx.open_trades = []
-    ctx.risk_monitor = MagicMock(_kill_switch_active=False)
+    ctx.risk_monitor = SimpleNamespace(
+        kill_switch_active=False,
+        _kill_switch_active=False,
+    )
     ctx.df = MagicMock(__len__=lambda self: 500)
     ctx.pip_size = 0.01
     ctx.trade_direction = ""
@@ -121,18 +135,11 @@ def _make_context(**overrides):
     return ctx
 
 
-# ---------------------------------------------------------------------------
-# MarketGate
-# ---------------------------------------------------------------------------
-
 class TestMarketGate:
-    # NOTE: weekend and dead_market checks are now owned by session_filter /
-    # volatility_filter plugins respectively.  Plugin-blocking behaviour is
-    # verified in tests/unit/test_tool_wiring.py::TestMarketGateTools.
-
     def test_kill_switch_blocks(self):
         gate = MarketGate()
         ctx = _make_context()
+        ctx.risk_monitor.kill_switch_active = True
         ctx.risk_monitor._kill_switch_active = True
         result = asyncio.run(gate.check(ctx))
         assert not result.tradeable
@@ -155,16 +162,12 @@ class TestMarketGate:
     def test_feed_desync_blocks(self):
         gate = MarketGate()
         ctx = _make_context()
-        ctx.price.bid = 3102.0  # bid > ask
+        ctx.price.bid = 3102.0
         ctx.price.ask = 3100.0
         result = asyncio.run(gate.check(ctx))
         assert not result.tradeable
         assert result.blocked_by == "feed_desync"
 
-
-# ---------------------------------------------------------------------------
-# RegimeClassifier
-# ---------------------------------------------------------------------------
 
 class TestRegimeClassifier:
     def test_trending(self):
@@ -198,10 +201,6 @@ class TestRegimeClassifier:
         assert result.size_multiplier == 0.6
 
 
-# ---------------------------------------------------------------------------
-# StructuralInvalidation
-# ---------------------------------------------------------------------------
-
 class TestInvalidation:
     def _inv(self, **cfg_overrides):
         cfg = {"sl_min_points": 100, "sl_max_points": 3000}
@@ -218,7 +217,7 @@ class TestInvalidation:
 
     def test_sl_wrong_side_hard(self):
         inv = self._inv()
-        sig = _make_signal(stop_loss=3110.0)  # SL above entry for BUY
+        sig = _make_signal(stop_loss=3110.0)
         regime = _make_regime()
         ctx = _make_context()
         result = asyncio.run(inv.validate(sig, regime, ctx))
@@ -255,14 +254,14 @@ class TestInvalidation:
         sig = _make_signal(setup_type="breakout")
         regime = _make_regime()
         ctx = _make_context()
-        ctx.indicators["M15"]["bos"]["bullish_break_atr"] = 0.1  # below 0.2
+        ctx.indicators["M15"]["bos"]["bullish_break_atr"] = 0.1
         result = asyncio.run(inv.validate(sig, regime, ctx))
         assert result.severity == "SOFT_INVALIDATE"
 
     def test_wrong_regime_setup_hard(self):
         inv = self._inv()
         sig = _make_signal(setup_type="range_bounce")
-        regime = _make_regime()  # trending — no range_bounce
+        regime = _make_regime()
         ctx = _make_context()
         result = asyncio.run(inv.validate(sig, regime, ctx))
         assert result.severity == "HARD_INVALIDATE"
@@ -276,10 +275,6 @@ class TestInvalidation:
         result = asyncio.run(inv.validate(sig, regime, ctx))
         assert result.severity == "HARD_INVALIDATE"
 
-
-# ---------------------------------------------------------------------------
-# Freshness
-# ---------------------------------------------------------------------------
 
 class TestFreshness:
     def test_fresh_signal(self):
@@ -307,10 +302,6 @@ class TestFreshness:
         f = compute_freshness(sig, current_price=3101.0, atr=10.0, candles_elapsed=6)
         assert f == 0.0
 
-
-# ---------------------------------------------------------------------------
-# ConvictionScorer
-# ---------------------------------------------------------------------------
 
 class TestConviction:
     def test_normal_trade(self):
@@ -353,7 +344,6 @@ class TestConviction:
         q_no_conflict = _make_quality()
         r = _make_regime()
         inv = InvalidationResult(severity="PASS")
-
         c1 = scorer.score(q_conflict, r, inv)
         c2 = scorer.score(q_no_conflict, r, inv)
         assert c1.conflict_penalty > 0
@@ -379,17 +369,17 @@ class TestConviction:
         scorer = ConvictionScorer()
         q = _make_quality(
             group_scores={"trend": 95, "momentum": 95, "structure": 95, "volume": 95, "volatility": 95},
-            overall_score=95.0, max_score=95.0,
+            overall_score=95.0,
+            max_score=95.0,
         )
-        r = _make_regime(regime="ranging", confidence_ceiling=80.0,
-                         allowed_setups=["range_bounce", "reversal", "pullback"])
+        r = _make_regime(
+            regime="ranging",
+            confidence_ceiling=80.0,
+            allowed_setups=["range_bounce", "reversal", "pullback"],
+        )
         result = scorer.score(q, r, InvalidationResult(severity="PASS"))
         assert result.score <= 80.0
 
-
-# ---------------------------------------------------------------------------
-# ExecutionGuard
-# ---------------------------------------------------------------------------
 
 class TestExecutionGuard:
     def test_clean_execution(self):
@@ -403,7 +393,7 @@ class TestExecutionGuard:
         guard = ExecutionGuardRunner()
         sig = _make_signal()
         ctx = _make_context()
-        ctx.indicators["M15"]["tick_jump_atr"] = 1.2  # > 0.8 threshold
+        ctx.indicators["M15"]["tick_jump_atr"] = 1.2
         result = asyncio.run(guard.check(sig, ctx, symbol="XAUUSD"))
         assert result.action == "DELAY"
         assert result.delay_candles >= 1
@@ -412,31 +402,28 @@ class TestExecutionGuard:
         guard = ExecutionGuardRunner()
         sig = _make_signal()
         guard.queue_delay("XAUUSD", sig, "test delay")
-
         ds = guard.get_delayed("XAUUSD")
         assert ds is not None
         assert ds.signal.direction == "BUY"
-
-        # Tick — should still be valid
         ds = guard.tick_delay("XAUUSD")
         assert ds is not None
-
-        # Clear
         guard.clear_delay("XAUUSD")
         assert guard.get_delayed("XAUUSD") is None
 
-
-# ---------------------------------------------------------------------------
-# AIValidator
-# ---------------------------------------------------------------------------
 
 class TestAIValidator:
     def test_auto_approve_no_caller(self):
         validator = BoundedAIValidator()
         sig = _make_signal()
-        result = asyncio.run(validator.validate(
-            sig, _make_regime(), _make_quality(), ConvictionScore(), _make_context()
-        ))
+        result = asyncio.run(
+            validator.validate(
+                sig,
+                _make_regime(),
+                _make_quality(),
+                ConvictionScore(),
+                _make_context(),
+            )
+        )
         assert result is not None
         assert result.direction == "BUY"
 
@@ -447,35 +434,26 @@ class TestAIValidator:
             sl_min_points=100,
             sl_max_points=3000,
         )
-        # Simulate AI response that moves SL to wrong side
-        parsed = {"status": "approved", "adjusted_sl": 3105.0}  # above entry for BUY
+        parsed = {"status": "approved", "adjusted_sl": 3105.0}
         sig = _make_signal()
         result = validator._apply_adjustments(sig, parsed, _make_context())
         assert result is None or result.stop_loss < sig.entry_zone[0]
 
     def test_rejects_rr_below_min(self):
         validator = BoundedAIValidator(min_rr=1.5, sl_min_points=100, sl_max_points=3000)
-        # AI moves TP too close
-        parsed = {"status": "approved", "adjusted_tp": [3103.0]}  # tiny TP
+        parsed = {"status": "approved", "adjusted_tp": [3103.0]}
         sig = _make_signal()
         result = validator._apply_adjustments(sig, parsed, _make_context())
-        # Should reject because R:R would be < 1.5
         assert result is None or result.take_profit[0] > 3103.0
 
     def test_confidence_cap(self):
-        validator = BoundedAIValidator(
-            sl_min_points=100, sl_max_points=3000, min_rr=1.0,
-        )
+        validator = BoundedAIValidator(sl_min_points=100, sl_max_points=3000, min_rr=1.0)
         parsed = {"status": "approved", "confidence": 0.99}
         sig = _make_signal(raw_confidence=0.70)
         result = validator._apply_adjustments(sig, parsed, _make_context())
         assert result is not None
-        assert result.raw_confidence <= 0.75  # 0.70 + 0.05 max boost
+        assert result.raw_confidence <= 0.75
 
-
-# ---------------------------------------------------------------------------
-# Run
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

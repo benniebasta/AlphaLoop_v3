@@ -48,9 +48,38 @@ from alphaloop.risk.cross_instance import CrossInstanceRiskAggregator
 from alphaloop.risk.guard_persistence import load_guard_state, save_guard_state
 from alphaloop.execution.control_plane import InstitutionalControlPlane
 from alphaloop.execution.service import ExecutionService
+from alphaloop.trading.strategy_loader import (
+    build_runtime_strategy_context,
+    resolve_algorithmic_setup_tag,
+)
 
 logger = logging.getLogger(__name__)
 
+
+def _strategy_runtime_context(active_strategy) -> dict[str, Any]:
+    if active_strategy is None:
+        return {}
+    return build_runtime_strategy_context(active_strategy)
+
+
+def _strategy_setup_tag(active_strategy) -> str:
+    runtime = _strategy_runtime_context(active_strategy)
+    return resolve_algorithmic_setup_tag(runtime)
+
+
+def _strategy_signal_mode(active_strategy) -> str:
+    return str(_strategy_runtime_context(active_strategy).get("signal_mode") or "")
+
+
+def _strategy_validator_instruction(active_strategy) -> str:
+    return str(_strategy_runtime_context(active_strategy).get("validator_instruction") or "")
+
+
+def _strategy_runtime_signature(active_strategy) -> str:
+    if active_strategy is None:
+        return ""
+    payload = _strategy_runtime_context(active_strategy)
+    return json.dumps(payload, sort_keys=True, default=str)
 
 
 class TradingLoop:
@@ -112,17 +141,13 @@ class TradingLoop:
         self._cycle_count = 0
 
         # ── Phase 0C: Remediation banner ─────────────────────────────────────
-        if self.dry_run:
-            logger.warning(
-                "[v4-remediation] Execution path under active repair. "
-                "Dry-run only until --allow-v4-live is validated."
-            )
         # ─────────────────────────────────────────────────────────────────────
 
         # Strategy-driven state (loaded from DB each cycle)
         self._active_strategy = None       # ActiveStrategyConfig | None
         self._feature_pipeline = None      # FeaturePipeline | None (algo_ai)
         self._algo_engine = None           # AlgorithmicSignalEngine | None
+        self._strategy_runtime_sig = ""
 
         # Stateful guards (persist across cycles)
         self._signal_hash = SignalHashFilter(window=3)
@@ -247,9 +272,17 @@ class TradingLoop:
                 return balance
         return 0.0
 
+    def _active_strategy_runtime(self) -> dict[str, Any]:
+        return _strategy_runtime_context(self._active_strategy)
+
+    def _active_strategy_params(self) -> dict[str, Any]:
+        return dict(self._active_strategy_runtime().get("params") or {})
+
     def _active_strategy_id(self) -> str:
-        if self._active_strategy is not None:
-            return f"{self.symbol}.v{self._active_strategy.version}"
+        runtime = self._active_strategy_runtime()
+        version = int(runtime.get("version", 0) or 0)
+        if version > 0:
+            return f"{self.symbol}.v{version}"
         return self.symbol
 
     @staticmethod
@@ -299,6 +332,7 @@ class TradingLoop:
         execution_sizing = dict(sizing)
         if "risk_amount_usd" not in execution_sizing and "risk_usd" in execution_sizing:
             execution_sizing["risk_amount_usd"] = execution_sizing.get("risk_usd")
+        runtime_strategy = self._active_strategy_runtime()
         return await self._execution_service.execute_market_order(
             symbol=self.symbol,
             instance_id=self.instance_id,
@@ -310,7 +344,7 @@ class TradingLoop:
             take_profit_2=take_profit_2,
             comment=comment,
             strategy_id=self._active_strategy_id(),
-            strategy_version=str(getattr(self._active_strategy, "version", "") or ""),
+            strategy_version=str(runtime_strategy.get("version", "") or ""),
             signal_payload=self._safe_json_payload(signal),
             validation_payload=self._safe_json_payload(validated),
             market_context_snapshot=self._safe_json_payload(
@@ -334,28 +368,37 @@ class TradingLoop:
             self._active_strategy = None
             self._feature_pipeline = None
             self._algo_engine = None
+            self._strategy_runtime_sig = ""
+            self.signal_model_id = ""
+            self._signal_dispatcher.update_algo_engine(None)
+            self._signal_dispatcher.update_signal_model("")
+            self._execution_orch.update_state(
+                active_strategy=None,
+                canary_allocation=self._canary_allocation,
+            )
             return
 
-        # Only rebuild if version or tool/param config changed
-        if (
-            self._active_strategy
-            and self._active_strategy.version == config.version
-            and self._active_strategy.tools == config.tools
-            and self._active_strategy.params == config.params
-        ):
+        next_runtime_sig = _strategy_runtime_signature(config)
+
+        # Only rebuild if the effective runtime strategy contract changed.
+        if self._active_strategy and self._strategy_runtime_sig == next_runtime_sig:
             return
 
         self._active_strategy = config
+        self._strategy_runtime_sig = next_runtime_sig
 
         # Build feature pipeline for algo_ai mode
-        if config.signal_mode == "algo_ai":
+        runtime_config = _strategy_runtime_context(config)
+        runtime_signal_mode = str(runtime_config.get("signal_mode") or "")
+
+        if runtime_signal_mode == "algo_ai":
             self._feature_pipeline = build_feature_pipeline(config, self.tool_registry)
         else:
             self._feature_pipeline = None
 
         # Update signal model from strategy's AI models
-        if config.ai_models.get("signal"):
-            self.signal_model_id = config.ai_models["signal"]
+        runtime_ai_models = dict(runtime_config.get("ai_models") or {})
+        self.signal_model_id = str(runtime_ai_models.get("signal") or "")
 
         # Create algorithmic engine with strategy params
         from alphaloop.signals.algorithmic import AlgorithmicSignalEngine
@@ -366,7 +409,10 @@ class TradingLoop:
                 "slow": self._algo_engine._prev_slow,
             }
         self._algo_engine = AlgorithmicSignalEngine(
-            self.symbol, config.params, prev_ema_state=prev_state,
+            self.symbol,
+            dict(runtime_config.get("params") or {}),
+            prev_ema_state=prev_state,
+            setup_tag=_strategy_setup_tag(config),
         )
 
         # Notify extracted services of updated strategy state
@@ -378,9 +424,12 @@ class TradingLoop:
         )
 
         logger.info(
-            "[loop] Loaded strategy %s v%d (mode=%s, tools=%d)",
-            config.symbol, config.version, config.signal_mode,
-            sum(1 for v in config.tools.values() if v),
+            "[loop] Loaded strategy %s v%d (mode=%s, setup_family=%s, tools=%d)",
+            runtime_config.get("symbol", config.symbol),
+            int(runtime_config.get("version", config.version) or 0),
+            runtime_signal_mode,
+            runtime_config.get("setup_family", ""),
+            sum(1 for v in dict(runtime_config.get("tools") or {}).values() if v),
         )
 
     async def _cycle(self) -> None:
@@ -491,10 +540,7 @@ class TradingLoop:
         context = await self._build_context()
 
         # Determine signal mode early
-        signal_mode = (
-            self._active_strategy.signal_mode
-            if self._active_strategy else "ai_signal"
-        )
+        signal_mode = _strategy_signal_mode(self._active_strategy)
 
         # ── v4 institutional pipeline (all modes) ──
         await self._cycle_v4(context, signal_mode, t0)
@@ -533,10 +579,12 @@ class TradingLoop:
         from alphaloop.tools.registry import STAGE_TOOL_MAP
         if not self.tool_registry or not self._active_strategy:
             return []
+        runtime_strategy = self._active_strategy_runtime()
+        active_tools = dict(runtime_strategy.get("tools") or {})
         names = STAGE_TOOL_MAP.get(stage, [])
         result = []
         for name in names:
-            if self._active_strategy.tools.get(name, True):
+            if active_tools.get(name, True):
                 tool = self.tool_registry.get_tool(name)
                 if tool is not None:
                     result.append(tool)
@@ -555,9 +603,8 @@ class TradingLoop:
         from alphaloop.pipeline.defaults import load_pipeline_config
 
         # Load pipeline config (defaults + strategy overrides)
-        strat_validation = {}
-        if self._active_strategy:
-            strat_validation = getattr(self._active_strategy, "validation", {}) or {}
+        runtime_strategy = self._active_strategy_runtime()
+        strat_validation = dict(runtime_strategy.get("validation") or {})
         cfg = load_pipeline_config(strat_validation)
 
         # Override SL bounds and pip_size with per-asset values
@@ -569,9 +616,7 @@ class TradingLoop:
 
         # Build TradeConstructor with explicit asset config + strategy params
         from alphaloop.pipeline.construction import TradeConstructor
-        strat_params = (
-            self._active_strategy.params if self._active_strategy else {}
-        )
+        strat_params = self._active_strategy_params()
         _tc = TradeConstructor(
             pip_size=_asset_cfg.pip_size,
             sl_min_pts=_asset_cfg.sl_min_points,
@@ -588,9 +633,7 @@ class TradingLoop:
 
         # Per-stage tool injection — each stage gets only its assigned plugins,
         # filtered by the strategy card toggle (active_strategy.tools dict).
-        _active_tools = (
-            self._active_strategy.tools if self._active_strategy else {}
-        )
+        _active_tools = dict(runtime_strategy.get("tools") or {})
 
         # S-03: Inject tools into the cached RegimeClassifier (tools may change
         # on strategy reload but the EWM smoothed state is preserved).
@@ -611,10 +654,7 @@ class TradingLoop:
                 tools=self._get_stage_tools("quality"),
             ),
             conviction_scorer=ConvictionScorer(
-                strategy_params=(
-                    self._active_strategy.__dict__
-                    if self._active_strategy else None
-                ),
+                strategy_params=runtime_strategy or None,
                 max_penalty=cfg["conviction"]["max_total_conviction_penalty"],
             ),
             risk_gate=RiskGateRunner(
@@ -666,6 +706,7 @@ class TradingLoop:
         size_modifier: float | None = None
         if result.risk_gate:
             size_modifier = result.risk_gate.size_modifier
+        journey_payload = result.journey.to_dict() if getattr(result, "journey", None) else None
 
         # Determine which stage blocked the trade
         blocked_by: str | None = None
@@ -697,6 +738,10 @@ class TradingLoop:
                 blocked_by=blocked_by,
                 block_reason=block_reason,
                 size_modifier=size_modifier,
+                tool_results={
+                    "journey": journey_payload,
+                    "construction_source": result.construction_source,
+                } if journey_payload or result.construction_source else None,
                 instance_id=self.instance_id,
             )
             session.add(dec)
@@ -715,87 +760,6 @@ class TradingLoop:
                 session.add(rej)
 
             await session.commit()
-
-    async def _run_v4_shadow(self, context, signal_mode: str, t0: float) -> None:
-        """Run v4 pipeline in shadow mode — log outcome but don't execute."""
-        try:
-            orchestrator = self._build_v4_orchestrator()
-            orchestrator.shadow_mode = True
-
-            # Build signal generator — returns DirectionHypothesis
-            async def generate_signal(ctx, regime):
-                if signal_mode == "ai_signal" and self.signal_engine:
-                    return await self.signal_engine.generate_hypothesis(
-                        ctx,
-                        ai_caller=self.ai_caller,
-                        model_id=self.signal_model_id,
-                    )
-                if self._algo_engine:
-                    return await self._algo_engine.generate_hypothesis(ctx)
-                return None
-
-            result = await orchestrator.run(
-                context,
-                generate_signal,
-                symbol=self.symbol,
-                mode=signal_mode,
-            )
-
-            logger.info(
-                "[SHADOW-v4] %s | %s in %.1fms%s",
-                self.symbol,
-                result.outcome.value,
-                result.elapsed_ms,
-                f" — {result.rejection_reason}" if result.rejection_reason else "",
-            )
-
-            # Log conviction waterfall if available
-            if result.conviction:
-                logger.info(
-                    "[SHADOW-v4] conviction=%.1f decision=%s scalar=%.2f",
-                    result.conviction.score,
-                    result.conviction.decision,
-                    result.conviction.size_scalar,
-                )
-
-            # Record waterfall for WebUI
-            try:
-                from alphaloop.webui.routes.event_log import record_waterfall
-                record_waterfall(result)
-            except Exception:
-                pass
-
-        except Exception as exc:
-            logger.warning("[SHADOW-v4] Error in shadow pipeline: %s", exc)
-
-    def _raw_to_candidate(self, raw, regime) -> "CandidateSignal | None":
-        """Convert a raw signal (TradeSignal or similar) into a CandidateSignal."""
-        if raw is None:
-            return None
-        from alphaloop.pipeline.types import CandidateSignal
-
-        # Handle different signal object shapes
-        direction = ""
-        if hasattr(raw, "direction"):
-            direction = raw.direction
-        elif hasattr(raw, "trend"):
-            direction = str(raw.trend).replace("BULLISH", "BUY").replace("BEARISH", "SELL")
-
-        if not direction:
-            return None
-
-        return CandidateSignal(
-            direction=direction.upper(),
-            setup_type=str(getattr(raw, "setup", "pullback") or "pullback"),
-            entry_zone=tuple(getattr(raw, "entry_zone", (0, 0))),
-            stop_loss=float(getattr(raw, "stop_loss", 0) or 0),
-            take_profit=list(getattr(raw, "take_profit", []) or []),
-            raw_confidence=float(getattr(raw, "confidence", 0.5) or 0.5),
-            rr_ratio=float(getattr(raw, "rr_ratio_tp1", 0) or 0),
-            signal_sources=list(getattr(raw, "signal_sources", []) or []),
-            reasoning=str(getattr(raw, "reasoning", "") or ""),
-            regime_at_generation=regime.regime,
-        )
 
     async def _cycle_v4(self, context, signal_mode: str, t0: float) -> None:
         """
@@ -826,12 +790,13 @@ class TradingLoop:
         # Invariant 6: no AI-originated trade bypasses deterministic validation
         if signal_mode in ("algo_ai", "ai_signal") and self.ai_caller:
             from alphaloop.pipeline.ai_validator import BoundedAIValidator
-            validator_model = ""
-            if self._active_strategy and self._active_strategy.ai_models:
-                validator_model = self._active_strategy.ai_models.get("validator", "")
+            runtime_strategy = self._active_strategy_runtime()
+            validator_model = dict(runtime_strategy.get("ai_models") or {}).get("validator", "")
             orchestrator.ai_validator = BoundedAIValidator(
                 ai_caller=self.ai_caller,
                 validator_model=validator_model,
+                validator_instruction=_strategy_validator_instruction(self._active_strategy),
+                fail_open=False,
             )
 
         # Build signal generator closure — delegates to SignalDispatcher
@@ -1038,79 +1003,6 @@ class TradingLoop:
             "blocked" if outcome.status == "BLOCKED" else "order_failed",
             outcome.error_message or "broker rejected",
         )
-
-    async def _ai_review_scoring(
-        self,
-        signal,
-        context: dict,
-        decision,
-        feature_results: list,
-    ) -> dict | None:
-        """
-        Call AI to review the scoring engine's decision.
-
-        Returns parsed dict with verdict/adjusted_confidence/veto_reasons,
-        or None if the call fails (fail-open: trade proceeds without AI review).
-        """
-        import json as _json
-
-        from alphaloop.config.assets import get_asset_config
-        from alphaloop.validation.prompts import (
-            build_scoring_review_system_prompt,
-            build_scoring_review_prompt,
-        )
-
-        try:
-            asset = get_asset_config(self.symbol)
-        except Exception:
-            asset = None
-
-        system_prompt = build_scoring_review_system_prompt(asset) if asset else ""
-        user_prompt = build_scoring_review_prompt(
-            signal, context, decision, feature_results, asset,
-        )
-
-        try:
-            t0 = time.time()
-            raw = await self.ai_caller(
-                self.signal_model_id,
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=400,
-            )
-            latency = (time.time() - t0) * 1000
-            logger.info("[ai-review] Response in %.0fms: %s", latency, raw[:200])
-
-            from alphaloop.monitoring.metrics import record as _record_metric
-            await _record_metric("ai_review_latency_ms", latency)
-        except Exception as e:
-            logger.warning("[ai-review] AI call failed — fail-open: %s", e)
-            return None
-
-        if not raw:
-            return None
-
-        # Parse JSON from response (handle markdown code fences)
-        text = raw.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-        try:
-            result = _json.loads(text)
-        except _json.JSONDecodeError:
-            logger.warning("[ai-review] Failed to parse JSON: %s", text[:200])
-            return None
-
-        # Validate verdict field
-        verdict = result.get("verdict", "").upper()
-        if verdict not in ("APPROVE", "ADJUST", "VETO"):
-            logger.warning("[ai-review] Invalid verdict: %s", verdict)
-            return None
-
-        result["verdict"] = verdict
-        return result
 
     async def _reposition_open_trades(self, context: dict) -> None:
         """Evaluate all open trades for repositioning triggers."""
@@ -1419,7 +1311,7 @@ class TradingLoop:
 
             # Read EMA/RSI periods from active strategy params (Optuna-tuned)
             # Falls back to defaults if no strategy loaded yet
-            _p = self._active_strategy.params if self._active_strategy else {}
+            _p = self._active_strategy_params()
             _ema_fast_p  = int(_p.get("ema_fast",   21))
             _ema_slow_p  = int(_p.get("ema_slow",   55))
             _rsi_period  = int(_p.get("rsi_period", 14))

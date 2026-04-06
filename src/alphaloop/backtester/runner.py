@@ -23,6 +23,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from alphaloop.backtester.vbt_engine import run_vectorbt_backtest
 from alphaloop.core.types import TradeDirection
 from alphaloop.db.repositories.backtest_repo import BacktestRepository
+from alphaloop.trading.strategy_loader import (
+    build_algorithmic_params,
+    build_strategy_resolution_input,
+    normalize_strategy_signal_logic,
+    normalize_strategy_signal_rules,
+    normalize_strategy_tools,
+    serialize_strategy_spec,
+    resolve_strategy_setup_family,
+    resolve_strategy_signal_mode,
+    resolve_strategy_source,
+)
 
 # Checkpoint directory
 _CHECKPOINT_DIR = Path("checkpoints")
@@ -78,6 +89,51 @@ def delete_run_data(run_id: str) -> None:
         cp.unlink(missing_ok=True)
 
 
+def _base_backtest_params(
+    *,
+    signal_mode: str,
+    signal_rules: list[dict] | None,
+    signal_logic: str,
+    signal_auto: bool,
+    tools: list[str] | None,
+    setup_family: str = "",
+    strategy_spec: dict[str, Any] | None = None,
+    source: str = "backtest_runner",
+) -> "BacktestParams":
+    """Build baseline backtest params with spec-consistent strategy identity."""
+    tool_flags = {str(name): True for name in (tools or [])}
+    strategy_payload = build_strategy_resolution_input(
+        {
+            "signal_mode": signal_mode,
+            "setup_family": setup_family,
+            "strategy_spec": dict(strategy_spec or {}),
+            "source": source,
+            "tools": tool_flags,
+        },
+        signal_rules=signal_rules,
+        signal_logic=signal_logic,
+    )
+    rules = normalize_strategy_signal_rules(
+        strategy_payload["params"].get("signal_rules"),
+        default_to_ema=(strategy_payload["params"].get("signal_rules") is None),
+    )
+    logic = normalize_strategy_signal_logic(strategy_payload["params"].get("signal_logic"))
+    strategy_payload["params"]["signal_rules"] = rules
+    strategy_payload["params"]["signal_logic"] = logic
+    from alphaloop.backtester.params import BacktestParams
+
+    return BacktestParams(
+        signal_rules=rules,
+        signal_logic=logic,
+        signal_auto=signal_auto,
+        signal_mode=resolve_strategy_signal_mode(strategy_payload),
+        setup_family=resolve_strategy_setup_family(strategy_payload),
+        strategy_spec=serialize_strategy_spec(strategy_payload),
+        tools=tool_flags,
+        source=resolve_strategy_source(strategy_payload),
+    )
+
+
 # ── Checkpoint save/load ──────────────────────────────────────────────────────
 
 def _data_hash(closes: np.ndarray) -> str:
@@ -95,6 +151,23 @@ def _save_checkpoint(
     """Save checkpoint JSON after each generation. Returns the file path."""
     _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     cp_path = _CHECKPOINT_DIR / f"{run_id}.json"
+    normalized_signal_rules = normalize_strategy_signal_rules(
+        best_params.signal_rules,
+        default_to_ema=(best_params.signal_rules is None),
+    )
+    normalized_signal_logic = normalize_strategy_signal_logic(best_params.signal_logic)
+    strategy_payload = build_strategy_resolution_input(
+        {
+            "signal_mode": best_params.signal_mode,
+            "setup_family": best_params.setup_family,
+            "strategy_spec": dict(best_params.strategy_spec or {}),
+            "source": resolve_strategy_source(best_params),
+            "tools": normalize_strategy_tools(best_params.tools),
+        },
+        signal_rules=normalized_signal_rules,
+        signal_logic=normalized_signal_logic,
+    )
+    resolved_params = build_algorithmic_params(strategy_payload)
     payload = {
         "run_id": run_id,
         "generation": generation,
@@ -111,7 +184,15 @@ def _save_checkpoint(
             "rsi_os": best_params.rsi_os,
             "rsi_period": best_params.rsi_period,
             "risk_pct": best_params.risk_pct,
+            "signal_rules": list(resolved_params.get("signal_rules") or []),
+            "signal_logic": resolved_params.get("signal_logic") or "AND",
+            "signal_auto": best_params.signal_auto,
             "max_param_change_pct": best_params.max_param_change_pct,
+            "signal_mode": resolve_strategy_signal_mode(strategy_payload),
+            "setup_family": resolve_strategy_setup_family(strategy_payload),
+            "strategy_spec": serialize_strategy_spec(strategy_payload),
+            "tools": normalize_strategy_tools(best_params.tools),
+            "source": resolve_strategy_source(best_params),
         },
     }
     tmp = cp_path.with_suffix(".tmp")
@@ -143,6 +224,23 @@ def _load_checkpoint(
             _log(run_id, "Data hash mismatch (yfinance window shift) — loading checkpoint params anyway", "WARN")
         from alphaloop.backtester.params import BacktestParams
         p = payload["best_params"]
+        normalized_signal_rules = normalize_strategy_signal_rules(
+            p.get("signal_rules"),
+            default_to_ema=("signal_rules" not in p or p.get("signal_rules") is None),
+        )
+        normalized_signal_logic = normalize_strategy_signal_logic(p.get("signal_logic"))
+        strategy_payload = build_strategy_resolution_input(
+            {
+                "signal_mode": p.get("signal_mode"),
+                "setup_family": p.get("setup_family"),
+                "strategy_spec": p.get("strategy_spec", {}) or {},
+                "source": resolve_strategy_source(p),
+                "tools": normalize_strategy_tools(p.get("tools", {}) or {}),
+            },
+            signal_rules=normalized_signal_rules,
+            signal_logic=normalized_signal_logic,
+        )
+        resolved_params = build_algorithmic_params(strategy_payload)
         params = BacktestParams(
             ema_fast=p["ema_fast"],
             ema_slow=p["ema_slow"],
@@ -153,7 +251,15 @@ def _load_checkpoint(
             rsi_os=p["rsi_os"],
             rsi_period=p.get("rsi_period", 14),
             risk_pct=p.get("risk_pct", 0.01),
+            signal_rules=list(resolved_params.get("signal_rules") or []),
+            signal_logic=resolved_params.get("signal_logic") or "AND",
+            signal_auto=p.get("signal_auto", False),
             max_param_change_pct=p.get("max_param_change_pct", 0.15),
+            signal_mode=resolve_strategy_signal_mode(strategy_payload),
+            setup_family=resolve_strategy_setup_family(strategy_payload),
+            strategy_spec=serialize_strategy_spec(strategy_payload),
+            tools=normalize_strategy_tools(p.get("tools", {}) or {}),
+            source=resolve_strategy_source(p),
         )
         gen = payload.get("generation", 0)
         sharpe = payload.get("best_sharpe", -999.0)
@@ -238,12 +344,18 @@ def _has_fvg(highs: np.ndarray, lows: np.ndarray, direction: str, lookback: int 
 
 def _ema_from_array(arr: np.ndarray, period: int) -> np.ndarray:
     """EMA computed from a raw numpy array (for MACD signal line)."""
-    out = np.empty_like(arr, dtype=float)
+    out = np.full(len(arr), np.nan, dtype=float)
     if len(arr) == 0:
         return out
+    finite_idx = np.where(np.isfinite(arr))[0]
+    if len(finite_idx) == 0:
+        return out
+    start = int(finite_idx[0])
     mult = 2.0 / (period + 1)
-    out[0] = arr[0]
-    for j in range(1, len(arr)):
+    out[start] = arr[start]
+    for j in range(start + 1, len(arr)):
+        if not np.isfinite(arr[j]):
+            continue
         out[j] = arr[j] * mult + out[j - 1] * (1 - mult)
     return out
 
@@ -388,6 +500,11 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
     full price array and cached by array id — O(n) total instead of O(n²).
     """
     _cache: dict = {}
+    strategy_payload = build_strategy_resolution_input(params, tools=params.tools)
+    resolved_algo_params = build_algorithmic_params(strategy_payload)
+    signal_rules = list(resolved_algo_params.get("signal_rules") or [{"source": "ema_crossover"}])
+    signal_logic = resolved_algo_params.get("signal_logic") or "AND"
+    signal_sources = {r.get("source") for r in signal_rules}
 
     async def signal_fn(
         i: int,
@@ -414,21 +531,20 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
                 c['ema200'] = _ema(closes, 200)
             if "macd_filter" in filters or any(
                 r.get("source") == "macd_crossover"
-                for r in (params.signal_rules or [])
+                for r in signal_rules
             ):
                 mf = _ema(closes, params.macd_fast)
                 ms = _ema(closes, params.macd_slow)
                 ml = mf - ms
                 c['macd_line'] = ml
                 c['macd_sig']  = _ema_from_array(ml, params.macd_signal)
-            sources = {r.get("source") for r in (params.signal_rules or [{"source": "ema_crossover"}])}
-            if "bollinger_breakout" in sources:
+            if "bollinger_breakout" in signal_sources:
                 c['bb_pct_b'] = _bollinger_pct_b(closes, params.bb_period, params.bb_std_dev)
-            if "adx_trend" in sources:
+            if "adx_trend" in signal_sources:
                 c['adx_arr'], c['plus_di_arr'], c['minus_di_arr'] = _adx_arrays(
                     highs, lows, closes, params.adx_period
                 )
-            if "bos_confirm" in sources:
+            if "bos_confirm" in signal_sources:
                 c['swing_h_arr'], c['swing_l_arr'] = _rolling_swing_hi_lo(highs, lows, lookback=20)
             _cache[cid] = c
         c = _cache[cid]
@@ -481,9 +597,6 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
             check_ema_crossover, check_macd_crossover, check_rsi_reversal,
             check_bollinger, check_adx_trend, check_bos, combine,
         )
-        signal_rules = params.signal_rules or [{"source": "ema_crossover"}]
-        signal_logic = params.signal_logic or "AND"
-
         rule_results: list[tuple[bool, bool]] = []
         for rule in signal_rules:
             src = rule.get("source", "ema_crossover")
@@ -645,17 +758,66 @@ def _run_vbt(
 ):
     """Run vectorbt backtest from numpy arrays using TradeConstructor (construction-parity)."""
     import pandas as pd
+    raw_params = params.model_dump() if hasattr(params, "model_dump") else vars(params)
+    strategy_payload = build_strategy_resolution_input(
+        {
+            "signal_mode": getattr(params, "signal_mode", raw_params.get("signal_mode")),
+            "setup_family": getattr(params, "setup_family", raw_params.get("setup_family")),
+            "strategy_spec": dict(getattr(params, "strategy_spec", raw_params.get("strategy_spec", {})) or {}),
+            "source": resolve_strategy_source(params),
+            "tools": normalize_strategy_tools(getattr(params, "tools", raw_params.get("tools", {}))),
+        },
+        signal_rules=getattr(params, "signal_rules", raw_params.get("signal_rules")),
+        signal_logic=getattr(params, "signal_logic", raw_params.get("signal_logic")),
+    )
+    resolved_algo_params = build_algorithmic_params(strategy_payload)
+    canonical_params = dict(raw_params)
+    canonical_params.update({
+        "signal_mode": resolve_strategy_signal_mode(strategy_payload),
+        "setup_family": resolve_strategy_setup_family(strategy_payload),
+        "source": resolve_strategy_source(strategy_payload),
+        "tools": normalize_strategy_tools(getattr(params, "tools", raw_params.get("tools", {}))),
+        "strategy_spec": serialize_strategy_spec(strategy_payload),
+        "signal_rules": list(resolved_algo_params.get("signal_rules") or []),
+        "signal_logic": resolved_algo_params.get("signal_logic") or "AND",
+    })
     df = pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": closes,
                         "volume": np.ones(len(closes), dtype=float)})
     if timestamps:
         df["time"] = pd.Series(timestamps)
     return run_vectorbt_backtest(
         df,
-        params.model_dump() if hasattr(params, "model_dump") else vars(params),
+        canonical_params,
         symbol=symbol,
         balance=balance,
         risk_pct=params.risk_pct,
     )
+
+
+def _strategy_version_write_kwargs(
+    *,
+    params: "BacktestParams",
+    metrics: dict[str, Any],
+    tools: list[str] | dict[str, bool] | None,
+    source: str,
+    name: str,
+    timeframe: str,
+    days: int,
+    initial_capital: float,
+) -> dict[str, Any]:
+    """Build spec-first kwargs for create_strategy_version from final best params."""
+    normalized_tools = normalize_strategy_tools(getattr(params, "tools", tools) or tools or {})
+    return {
+        "params": params,
+        "metrics": metrics,
+        "tools": [tool for tool, enabled in normalized_tools.items() if enabled],
+        "source": resolve_strategy_source(params) or str(source or ""),
+        "name": name,
+        "timeframe": timeframe,
+        "days": days,
+        "initial_capital": initial_capital,
+        "signal_mode": resolve_strategy_signal_mode(params),
+    }
 
 
 # ── Main runner ──────────────────────────────────────────────────────────────
@@ -674,6 +836,9 @@ async def start_backtest(
     signal_rules: list[dict] | None = None,
     signal_logic: str = "AND",
     signal_auto: bool = False,
+    setup_family: str = "",
+    strategy_spec: dict[str, Any] | None = None,
+    source: str = "backtest_runner",
 ) -> None:
     """Spawn a background task to run the backtest."""
     if run_id in _tasks and not _tasks[run_id].done():
@@ -689,7 +854,8 @@ async def start_backtest(
     task = asyncio.create_task(
         _run_backtest(run_id, symbol, days, balance, max_generations,
                       session_factory, timeframe, tools or [], name=name, signal_mode=signal_mode,
-                      signal_rules=signal_rules, signal_logic=signal_logic, signal_auto=signal_auto)
+                      signal_rules=signal_rules, signal_logic=signal_logic, signal_auto=signal_auto,
+                      setup_family=setup_family, strategy_spec=strategy_spec, source=source)
     )
     _tasks[run_id] = task
 
@@ -708,6 +874,9 @@ async def _run_backtest(
     signal_rules: list[dict] | None = None,
     signal_logic: str = "AND",
     signal_auto: bool = False,
+    setup_family: str = "",
+    strategy_spec: dict[str, Any] | None = None,
+    source: str = "backtest_runner",
 ) -> None:
     """Background coroutine that runs one backtest."""
     tools = tools or []
@@ -754,10 +923,15 @@ async def _run_backtest(
             optimize, split_data, MIN_SHARPE_IMPROVEMENT, OVERFIT_GAP_THRESHOLD, MIN_TRADES,
         )
 
-        base_params = BacktestParams(
-            signal_rules=signal_rules or [{"source": "ema_crossover"}],
+        base_params = _base_backtest_params(
+            signal_mode=signal_mode,
+            signal_rules=signal_rules,
             signal_logic=signal_logic,
             signal_auto=signal_auto,
+            tools=tools,
+            setup_family=setup_family,
+            strategy_spec=strategy_spec,
+            source=source,
         )
         best_params = base_params
         best_sharpe = -999.0
@@ -1003,18 +1177,20 @@ async def _run_backtest(
                 if fails:
                     _log(run_id, f"⚠ Strategy below promotion threshold — auto-retiring ({', '.join(fails)})", "WARN")
 
-                version_data = create_strategy_version(
-                    symbol=symbol,
+                version_kwargs = _strategy_version_write_kwargs(
                     params=best_params,
                     metrics=metrics,
                     tools=tools,
-                    status=initial_status,
                     source="backtest_runner",
                     name=name or run_id,
                     timeframe=timeframe,
                     days=days,
                     initial_capital=balance,
-                    signal_mode=signal_mode,
+                )
+                version_data = create_strategy_version(
+                    symbol=symbol,
+                    status=initial_status,
+                    **version_kwargs,
                 )
                 _log(run_id, f"Strategy version created: {symbol} v{version_data['_version']} [{initial_status}]")
             except Exception as ve:

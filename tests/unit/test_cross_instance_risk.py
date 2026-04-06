@@ -62,3 +62,13 @@ async def test_aggregate_status(mock_trade_repo):
     assert status["available"]
     assert status["total_open_positions"] == 0
     assert status["total_daily_pnl"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_uses_closed_trade_day_window(mock_trade_repo):
+    agg = CrossInstanceRiskAggregator(trade_repo=mock_trade_repo)
+    await agg.get_aggregate_status(10000.0)
+    mock_trade_repo.get_closed_trades.assert_awaited_once()
+    _, kwargs = mock_trade_repo.get_closed_trades.await_args
+    assert kwargs["limit"] is None
+    assert "closed_since" in kwargs

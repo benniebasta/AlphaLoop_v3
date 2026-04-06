@@ -34,6 +34,11 @@ from alphaloop.data.indicators import (
 from alphaloop.pipeline.construction import TradeConstructor
 from alphaloop.pipeline.types import DirectionHypothesis
 from alphaloop.signals.algorithmic import compute_direction
+from alphaloop.trading.strategy_loader import (
+    resolve_algorithmic_setup_tag,
+    resolve_strategy_signal_logic,
+    resolve_strategy_signal_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +73,36 @@ class VBTBacktestResult:
 
     # Error
     error: str | None = None
+
+
+def _resolve_backtest_setup_tag(params: dict[str, Any]) -> str:
+    """Resolve the backtest hypothesis setup tag through the shared strategy contract."""
+    raw_tools = params.get("tools")
+    if isinstance(raw_tools, dict):
+        tool_flags = dict(raw_tools)
+    elif isinstance(raw_tools, (list, tuple, set)):
+        tool_flags = {str(name): True for name in raw_tools}
+    else:
+        tool_flags = {}
+
+    strategy_like = {
+        "signal_mode": params.get("signal_mode"),
+        "setup_family": params.get("setup_family"),
+        "strategy_spec": params.get("strategy_spec"),
+        "source": params.get("source"),
+        "params": dict(params),
+        "tools": tool_flags,
+    }
+    return resolve_algorithmic_setup_tag(strategy_like)
+
+
+def _configured_signal_rules(params: dict[str, Any]) -> list[dict]:
+    """Resolve signal rules through the shared strategy contract."""
+    return resolve_strategy_signal_rules(params, default_to_ema=True)
+
+
+def _configured_signal_logic(params: dict[str, Any]) -> str:
+    return resolve_strategy_signal_logic(params)
 
 
 def run_vectorbt_backtest(
@@ -137,10 +172,11 @@ def run_vectorbt_backtest(
     bb_pctb_s = bb_data.get("pct_b_series")  # May not exist in all versions
     adx_data = compute_adx(ohlcv_df)
 
-    signal_rules = params.get("signal_rules", [{"source": "ema_crossover"}])
-    signal_logic = params.get("signal_logic", "AND")
+    signal_rules = _configured_signal_rules(params)
+    signal_logic = _configured_signal_logic(params)
     rsi_ob = float(params.get("rsi_ob", 70.0))
     rsi_os = float(params.get("rsi_os", 30.0))
+    setup_tag = _resolve_backtest_setup_tag(params)
 
     # --- Bar-by-bar simulation ---
     n = len(ohlcv_df)
@@ -254,7 +290,7 @@ def run_vectorbt_backtest(
         hypothesis = DirectionHypothesis(
             direction=direction,
             confidence=confidence,
-            setup_tag="pullback",
+            setup_tag=setup_tag,
             reasoning=reasoning,
             source_names="+".join(r.get("source", "ema_crossover") for r in signal_rules),
             generated_at=datetime.now(timezone.utc),

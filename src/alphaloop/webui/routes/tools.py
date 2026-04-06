@@ -45,6 +45,8 @@ async def pipeline_status(
                 "blocked_by": d.blocked_by,
                 "block_reason": d.block_reason,
                 "size_modifier": d.size_modifier,
+                "journey": (d.tool_results or {}).get("journey"),
+                "construction_source": (d.tool_results or {}).get("construction_source"),
             }
             for d in decisions
         ],

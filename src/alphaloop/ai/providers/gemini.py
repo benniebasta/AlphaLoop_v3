@@ -43,6 +43,7 @@ class GeminiProvider:
         system: str | None = None,
         timeout: float = 60.0,
         response_mime_type: str = "application/json",
+        thinking_budget: int | None = None,
         **kwargs: Any,
     ) -> str:
         """
@@ -84,13 +85,17 @@ class GeminiProvider:
                 "parts": [{"text": msg["content"]}],
             })
 
+        gen_config: dict[str, Any] = {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+            "responseMimeType": response_mime_type,
+        }
+        if thinking_budget is not None:
+            gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
         body: dict[str, Any] = {
             "contents": contents,
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-                "responseMimeType": response_mime_type,
-            },
+            "generationConfig": gen_config,
         }
 
         # Collect system text from explicit param + any system-role messages
@@ -142,9 +147,10 @@ class GeminiProvider:
         # AI-01: A completely empty response must be treated as a provider error,
         # not silently returned to the caller where it would fail JSON parsing.
         if not text or not text.strip():
+            hint = " — max_tokens may be too low for this thinking model" if finish_reason == "MAX_TOKENS" else ""
             raise AlphaLoopError(
                 f"Gemini returned an empty response for model {model_id} "
-                f"(finishReason={finish_reason!r}, parts={len(parts)})"
+                f"(finishReason={finish_reason!r}, parts={len(parts)}){hint}"
             )
 
         usage = data.get("usageMetadata", {})

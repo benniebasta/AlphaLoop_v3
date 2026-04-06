@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +21,20 @@ from alphaloop.backtester.asset_trainer import create_strategy_version
 from alphaloop.backtester.params import BacktestParams
 from alphaloop.core.constants import STRATEGY_VERSIONS_DIR
 from alphaloop.db.models.instance import RunningInstance
+from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.db.repositories.settings_repo import SettingsRepository
-from alphaloop.trading.strategy_loader import normalize_signal_mode
+from alphaloop.trading.strategy_loader import (
+    build_active_strategy_payload,
+    normalize_signal_mode,
+    normalize_strategy_summary,
+    migrate_legacy_strategy_spec_v1,
+    resolve_signal_instruction,
+    resolve_strategy_signal_mode,
+    resolve_strategy_spec_version,
+    resolve_strategy_source,
+    resolve_validator_instruction,
+    serialize_strategy_spec,
+)
 from alphaloop.webui.deps import get_db_session
 
 logger = logging.getLogger(__name__)
@@ -42,6 +55,35 @@ PROMOTION_GATE_DEFAULTS = {
     "algo_ai": True,
     "ai_signal": False,
 }
+
+
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for strategy write actions when AUTH_TOKEN is set."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _record_operator_audit(
+    session: AsyncSession,
+    *,
+    action: str,
+    target: str,
+    old_value: str | None,
+    new_value: str | None,
+    source_ip: str = "unknown",
+) -> None:
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action=action,
+        target=target,
+        old_value=old_value,
+        new_value=new_value,
+        source_ip=source_ip,
+    ))
 
 
 class PromoteRequest(BaseModel):
@@ -196,23 +238,68 @@ async def _candidate_gate_bypass(
     return not enabled
 
 
+def _effective_signal_mode(data: dict) -> str:
+    return resolve_strategy_signal_mode(data)
+
+
+def _effective_source(data: dict) -> str:
+    return resolve_strategy_source(data)
+
+
+def _normalized_summary(data: dict) -> dict:
+    return normalize_strategy_summary(data)
+
+
 def _active_strategy_payload(data: dict) -> dict:
-    return {
-        "symbol": data.get("symbol", ""),
-        "version": data.get("version", 0),
-        "name": data.get("name", ""),
-        "status": data.get("status", ""),
-        "params": data.get("params", {}),
-        "tools": data.get("tools", {}),
-        "validation": data.get("validation", {}),
-        "ai_models": data.get("ai_models", {}),
-        "signal_instruction": data.get("signal_instruction", ""),
-        "validator_instruction": data.get("validator_instruction", ""),
-        "signal_mode": normalize_signal_mode(data.get("signal_mode")),
-        "summary": data.get("summary", {}),
-        "scoring_weights": data.get("scoring_weights", {}),
-        "confidence_thresholds": data.get("confidence_thresholds", {}),
-    }
+    payload = build_active_strategy_payload(data)
+    payload["symbol"] = str(data.get("symbol") or payload.get("symbol") or "")
+    return payload
+
+
+def _refresh_strategy_spec(data: dict) -> None:
+    data["strategy_spec"] = migrate_legacy_strategy_spec_v1(data).to_dict()
+
+
+def _sync_strategy_spec_write_fields(data: dict, explicit_fields: set[str] | None = None) -> None:
+    """
+    Keep explicit strategy_spec in sync with intentional flat-field edits.
+
+    The runtime prefers strategy_spec.prompt_bundle and strategy_spec.signal_mode,
+    so write paths must update those fields when operators edit prompts or mode.
+    """
+    explicit_fields = explicit_fields or set()
+    raw_spec = data.get("strategy_spec")
+    if isinstance(raw_spec, dict):
+        spec = dict(raw_spec)
+        spec["signal_mode"] = (
+            normalize_signal_mode(data.get("signal_mode"))
+            if "signal_mode" in explicit_fields
+            else _effective_signal_mode(data)
+        )
+        prompt_bundle = dict(spec.get("prompt_bundle") or {})
+        prompt_bundle["signal_instruction"] = (
+            str(data.get("signal_instruction") or "")
+            if "signal_instruction" in explicit_fields
+            else resolve_signal_instruction(data)
+        )
+        prompt_bundle["validator_instruction"] = (
+            str(data.get("validator_instruction") or "")
+            if "validator_instruction" in explicit_fields
+            else resolve_validator_instruction(data)
+        )
+        spec["prompt_bundle"] = prompt_bundle
+        metadata = dict(spec.get("metadata") or {})
+        if "source" in explicit_fields:
+            explicit_source = str(data.get("source") or "").strip()
+            metadata["source"] = explicit_source or _effective_source(data)
+        else:
+            metadata["source"] = _effective_source(data)
+        metadata["symbol"] = str(data.get("symbol") or "")
+        metadata["version"] = int(data.get("version", 0) or 0)
+        spec["metadata"] = metadata
+        data["strategy_spec"] = spec
+
+    data["strategy_spec"] = migrate_legacy_strategy_spec_v1(data).to_dict()
 
 
 async def _sync_active_strategy_settings(
@@ -258,7 +345,9 @@ def _load_all_versions() -> list[dict]:
     for f in sorted(STRATEGY_VERSIONS_DIR.glob("*.json"), reverse=True):
         try:
             data = json.loads(f.read_text())
-            data["signal_mode"] = normalize_signal_mode(data.get("signal_mode"))
+            _refresh_strategy_spec(data)
+            data["signal_mode"] = _effective_signal_mode(data)
+            data["summary"] = _normalized_summary(data)
             data["_path"] = str(f)
             versions.append(data)
         except (json.JSONDecodeError, OSError):
@@ -273,23 +362,37 @@ def _load_version(symbol: str, version: int) -> dict | None:
         return None
     try:
         data = json.loads(path.read_text())
-        data["signal_mode"] = normalize_signal_mode(data.get("signal_mode"))
+        _refresh_strategy_spec(data)
+        data["signal_mode"] = _effective_signal_mode(data)
+        data["summary"] = _normalized_summary(data)
         data["_path"] = str(path)
         return data
     except (json.JSONDecodeError, OSError):
         return None
 
 
-def _save_version(data: dict) -> None:
+def _save_version(data: dict, explicit_fields: set[str] | None = None) -> None:
     """Save a strategy version back to disk."""
     path = Path(data.get("_path", ""))
-    if not path.exists():
+    if not path.name or not path.exists():
         symbol = data["symbol"]
         version = data["version"]
         path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
 
     # Remove internal fields before saving
+    explicit_fields = explicit_fields or set()
     save_data = {k: v for k, v in data.items() if not k.startswith("_")}
+    if "signal_mode" not in explicit_fields:
+        save_data["signal_mode"] = _effective_signal_mode(save_data)
+    if "signal_instruction" not in explicit_fields:
+        save_data["signal_instruction"] = resolve_signal_instruction(save_data)
+    if "validator_instruction" not in explicit_fields:
+        save_data["validator_instruction"] = resolve_validator_instruction(save_data)
+    if "source" not in explicit_fields:
+        save_data["source"] = _effective_source(save_data)
+    if "summary" in save_data:
+        save_data["summary"] = _normalized_summary(save_data)
+    _sync_strategy_spec_write_fields(save_data, explicit_fields)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(save_data, indent=2))
     tmp.replace(path)
@@ -314,7 +417,7 @@ async def list_strategies(
     if signal_modes:
         versions = [
             v for v in versions
-            if normalize_signal_mode(v.get("signal_mode")) in signal_modes
+            if _effective_signal_mode(v) in signal_modes
         ]
     return {"strategies": versions[:limit], "total": len(versions)}
 
@@ -333,12 +436,21 @@ async def update_strategy(
     symbol: str,
     version: int,
     body: UpdateStrategyRequest,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Update the editable parts of a strategy version."""
+    _require_operator_auth(authorization)
     data = _load_version(symbol, version)
     if data is None:
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+    explicit_fields = set(body.model_fields_set)
+
+    if "signal_instruction" not in explicit_fields:
+        data["signal_instruction"] = resolve_signal_instruction(data)
+    if "validator_instruction" not in explicit_fields:
+        data["validator_instruction"] = resolve_validator_instruction(data)
 
     if body.name is not None:
         data["name"] = body.name.strip()
@@ -348,7 +460,7 @@ async def update_strategy(
         mode = _strict_signal_mode(body.signal_mode)
         if mode is None:
             raise HTTPException(400, f"Unsupported signal_mode '{body.signal_mode}'")
-        update_source = _resolve_update_source(body.source, data.get("source"))
+        update_source = _resolve_update_source(body.source, _effective_source(data))
         _validate_signal_mode_for_source(mode, update_source)
         data["signal_mode"] = mode
     if body.source is not None:
@@ -376,7 +488,19 @@ async def update_strategy(
     if body.confidence_thresholds is not None:
         data["confidence_thresholds"] = body.confidence_thresholds
 
-    _save_version(data)
+    _save_version(data, explicit_fields)
+    _record_operator_audit(
+        session,
+        action="strategy_update",
+        target=f"{symbol}_v{version}",
+        old_value="version_file",
+        new_value=json.dumps({
+            "signal_mode": _effective_signal_mode(data),
+            "status": data.get("status"),
+            "spec_version": resolve_strategy_spec_version(data) or "v1",
+        }, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
     await _sync_active_strategy_settings(session, data)
     await session.commit()
 
@@ -420,8 +544,8 @@ async def evaluate_promotion(
     repo = SettingsRepository(session)
     bypass_candidate_gate = await _candidate_gate_bypass(
         repo,
-        data.get("source"),
-        data.get("signal_mode"),
+        _effective_source(data),
+        _effective_signal_mode(data),
     )
 
     result = await pipeline.evaluate_promotion(
@@ -444,9 +568,12 @@ async def promote_strategy(
     symbol: str,
     version: int,
     body: PromoteRequest,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Promote a strategy to the next deployment stage."""
+    _require_operator_auth(authorization)
     data = _load_version(symbol, version)
     if data is None:
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
@@ -472,8 +599,8 @@ async def promote_strategy(
     repo = SettingsRepository(session)
     bypass_candidate_gate = await _candidate_gate_bypass(
         repo,
-        data.get("source"),
-        data.get("signal_mode"),
+        _effective_source(data),
+        _effective_signal_mode(data),
     )
 
     result = await pipeline.promote(
@@ -493,6 +620,19 @@ async def promote_strategy(
             "Strategy %s v%d promoted: %s -> %s",
             symbol, version, current_status, result["new_status"],
         )
+    _record_operator_audit(
+        session,
+        action="strategy_promote",
+        target=f"{symbol}_v{version}",
+        old_value=str(current_status),
+        new_value=json.dumps({
+            "promoted": bool(result.get("promoted")),
+            "new_status": result.get("new_status"),
+            "reason": result.get("reason"),
+        }, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
+    await session.commit()
 
     return {
         "symbol": symbol,
@@ -502,8 +642,14 @@ async def promote_strategy(
 
 
 @router.post("/ai-signal")
-async def create_ai_signal_card(body: CreateAISignalCardRequest) -> dict:
+async def create_ai_signal_card(
+    body: CreateAISignalCardRequest,
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Create a new AI_SIGNAL strategy card with starter prompts."""
+    _require_operator_auth(authorization)
     from alphaloop.backtester.params import BacktestParams
 
     symbol = body.symbol.strip().upper()
@@ -513,7 +659,26 @@ async def create_ai_signal_card(body: CreateAISignalCardRequest) -> dict:
 
     version_data = create_strategy_version(
         symbol=symbol,
-        params=BacktestParams(),
+        params=BacktestParams(
+            signal_mode="ai_signal",
+            setup_family="discretionary_ai",
+            signal_rules=[],
+            source=source,
+            strategy_spec={
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "entry_model": {
+                    "type": "prompt_defined",
+                    "signal_rules": [],
+                    "signal_logic": "AND",
+                },
+                "metadata": {
+                    "source": source,
+                    "symbol": symbol,
+                },
+            },
+        ),
         metrics={
             "total_trades": 0,
             "win_rate": 0.0,
@@ -541,6 +706,19 @@ async def create_ai_signal_card(body: CreateAISignalCardRequest) -> dict:
         version_data["symbol"],
         version_data["_version"],
     )
+    _record_operator_audit(
+        session,
+        action="strategy_create",
+        target=f"{version_data['symbol']}_v{version_data['_version']}",
+        old_value=None,
+        new_value=json.dumps({
+            "signal_mode": version_data.get("signal_mode"),
+            "source": resolve_strategy_source(version_data),
+            "spec_version": resolve_strategy_spec_version(version_data) or "v1",
+        }, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
+    await session.commit()
     return {
         "status": "ok",
         "strategy": version_data,
@@ -551,9 +729,12 @@ async def create_ai_signal_card(body: CreateAISignalCardRequest) -> dict:
 async def activate_strategy(
     symbol: str,
     version: int,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Set a strategy as the active live strategy for its symbol."""
+    _require_operator_auth(authorization)
     data = _load_version(symbol, version)
     if data is None:
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
@@ -572,6 +753,14 @@ async def activate_strategy(
     await repo.set(f"active_strategy_{symbol}", json.dumps(
         _active_strategy_payload(data)
     ))
+    _record_operator_audit(
+        session,
+        action="strategy_activate",
+        target=f"{symbol}_v{version}",
+        old_value=None,
+        new_value=status,
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
     await session.commit()
 
     logger.info("Activated strategy %s v%d for live trading", symbol, version)
@@ -587,9 +776,12 @@ async def start_canary(
     symbol: str,
     version: int,
     body: CanaryRequest,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Start a canary deployment for a strategy version."""
+    _require_operator_auth(authorization)
     data = _load_version(symbol, version)
     if data is None:
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
@@ -615,6 +807,18 @@ async def start_canary(
         allocation_pct=body.allocation_pct,
         duration_hours=body.duration_hours,
     )
+    _record_operator_audit(
+        session,
+        action="strategy_canary_start",
+        target=f"{symbol}_v{version}",
+        old_value=None,
+        new_value=json.dumps({
+            "allocation_pct": body.allocation_pct,
+            "duration_hours": body.duration_hours,
+        }, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
+    await session.commit()
 
     return result
 
@@ -623,9 +827,12 @@ async def start_canary(
 async def end_canary(
     symbol: str,
     version: int,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """End a canary deployment and get recommendation."""
+    _require_operator_auth(authorization)
     data = _load_version(symbol, version)
     if data is None:
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
@@ -655,6 +862,15 @@ async def end_canary(
         canary_id=f"canary_{symbol}_{version}",
         metrics=metrics,
     )
+    _record_operator_audit(
+        session,
+        action="strategy_canary_end",
+        target=f"{symbol}_v{version}",
+        old_value=None,
+        new_value=json.dumps(result, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
+    await session.commit()
 
     return result
 
@@ -664,16 +880,23 @@ async def update_strategy_models(
     symbol: str,
     version: int,
     body: dict,
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Update AI model assignments for a strategy version."""
+    _require_operator_auth(authorization)
     path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
     if not path.exists():
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
 
     data = json.loads(path.read_text())
+    _refresh_strategy_spec(data)
+    data["signal_mode"] = _effective_signal_mode(data)
     if "ai_models" not in data:
         data["ai_models"] = {}
-    update_source = _resolve_update_source(body.get("source"), data.get("source"))
+    update_source = _resolve_update_source(body.get("source"), _effective_source(data))
+    explicit_fields = set(body.keys())
 
     for role in ["signal", "validator", "research", "param_suggest", "regime", "fallback"]:
         if role in body:
@@ -694,18 +917,30 @@ async def update_strategy_models(
     if "validator_instruction" in body:
         data["validator_instruction"] = body["validator_instruction"] or ""
 
-    # Atomic write
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(path)
+    _save_version(data, explicit_fields)
+    data = _load_version(symbol, version) or data
+
+    _record_operator_audit(
+        session,
+        action="strategy_models_update",
+        target=f"{symbol}_v{version}",
+        old_value="ai_models",
+        new_value=json.dumps({
+            "ai_models": data["ai_models"],
+            "signal_mode": _effective_signal_mode(data),
+        }, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
+    await _sync_active_strategy_settings(session, data)
+    await session.commit()
 
     logger.info("Updated AI models for %s v%d: %s", symbol, version, data["ai_models"])
     return {
         "status": "ok",
         "ai_models": data["ai_models"],
-        "signal_mode": data.get("signal_mode", "ai_signal"),
-        "signal_instruction": data.get("signal_instruction", ""),
-        "validator_instruction": data.get("validator_instruction", ""),
+        "signal_mode": _effective_signal_mode(data),
+        "signal_instruction": resolve_signal_instruction(data),
+        "validator_instruction": resolve_validator_instruction(data),
     }
 
 
@@ -732,15 +967,26 @@ async def set_overlay(
     symbol: str,
     version: int,
     body: dict,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Set dry-run overlay tools for a strategy version."""
+    _require_operator_auth(authorization)
     extra_tools = body.get("extra_tools", [])
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
     await repo.set(
         f"dry_run_overlay_{symbol}_v{version}",
         json.dumps({"extra_tools": extra_tools}),
+    )
+    _record_operator_audit(
+        session,
+        action="strategy_overlay_update",
+        target=f"{symbol}_v{version}",
+        old_value=None,
+        new_value=json.dumps({"extra_tools": extra_tools}, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
     )
     await session.commit()
     logger.info("Set overlay for %s v%d: %s", symbol, version, extra_tools)
@@ -751,9 +997,12 @@ async def set_overlay(
 async def delete_strategy(
     symbol: str,
     version: int,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Delete a strategy version JSON file."""
+    _require_operator_auth(authorization)
     path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
     if not path.exists():
         raise HTTPException(404, f"Strategy {symbol} v{version} not found")
@@ -782,5 +1031,14 @@ async def delete_strategy(
             pass
 
     path.unlink()
+    _record_operator_audit(
+        session,
+        action="strategy_delete",
+        target=f"{symbol}_v{version}",
+        old_value="version_file",
+        new_value="deleted",
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
+    await session.commit()
     logger.info("Deleted strategy %s v%d", symbol, version)
     return {"status": "ok", "deleted": f"{symbol}_v{version}"}

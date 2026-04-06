@@ -15,12 +15,14 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alphaloop.trading.strategy_loader import normalize_signal_mode
+from alphaloop.core.constants import STRATEGY_VERSIONS_DIR
+from alphaloop.db.models.operator_audit import OperatorAuditLog
+from alphaloop.trading.strategy_loader import build_active_strategy_payload
 from alphaloop.db.models.instance import RunningInstance
 from alphaloop.webui.deps import get_db_session, get_container
 
@@ -36,31 +38,79 @@ class BotCreate(BaseModel):
     strategy_version: str | None = None
 
 
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for operator bot-control actions when AUTH_TOKEN is set."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _record_operator_audit(
+    session: AsyncSession,
+    *,
+    action: str,
+    target: str,
+    old_value: str | None,
+    new_value: str | None,
+    source_ip: str,
+) -> None:
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action=action,
+        target=target,
+        old_value=old_value,
+        new_value=new_value,
+        source_ip=source_ip,
+    ))
+
+
 def _bot_to_dict(b: RunningInstance, bound_strategy: dict | None = None) -> dict:
+    bound_version = None
+    if bound_strategy:
+        try:
+            version = int(bound_strategy.get("version", 0) or 0)
+            if version > 0:
+                bound_version = f"v{version}"
+        except (TypeError, ValueError):
+            bound_version = None
     d = {
         "id": b.id,
         "symbol": b.symbol,
         "instance_id": b.instance_id,
         "pid": b.pid,
         "started_at": b.started_at.isoformat() + "Z" if b.started_at else None,
-        "strategy_version": b.strategy_version,
+        "strategy_version": b.strategy_version or bound_version,
     }
     if bound_strategy:
+        payload = build_active_strategy_payload(bound_strategy)
+        summary = payload.get("summary", {})
+        sharpe = summary.get("sharpe")
+        max_dd_pct = summary.get("max_dd_pct")
+        total_pnl = summary.get("total_pnl")
         d["strategy"] = {
-            "name": bound_strategy.get("name", ""),
-            "version": bound_strategy.get("version", 0),
-            "signal_mode": normalize_signal_mode(bound_strategy.get("signal_mode")),
-            "status": bound_strategy.get("status", ""),
-            "tools": bound_strategy.get("tools", {}),
+            "name": payload.get("name", ""),
+            "version": payload.get("version", 0),
+            "signal_mode": payload.get("signal_mode", ""),
+            "status": payload.get("status", ""),
+            "tools": payload.get("tools", {}),
             "overlay": bound_strategy.get("overlay", []),
             "metrics": {
-                "win_rate": bound_strategy.get("summary", {}).get("win_rate", 0),
-                "sharpe": bound_strategy.get("summary", {}).get("sharpe", 0),
-                "max_dd_pct": bound_strategy.get("summary", {}).get("max_dd_pct", 0),
-                "total_pnl": bound_strategy.get("summary", {}).get("total_pnl", 0),
+                "win_rate": summary.get("win_rate", 0),
+                "sharpe": sharpe if sharpe is not None else 0,
+                "max_dd_pct": max_dd_pct if max_dd_pct is not None else 0,
+                "total_pnl": total_pnl if total_pnl is not None else 0,
             },
         }
     return d
+
+
+def _bound_active_strategy_payload(symbol: str, strategy_data: dict) -> dict:
+    payload = build_active_strategy_payload(strategy_data)
+    payload["symbol"] = symbol
+    return payload
 
 
 def _pid_alive(pid: int) -> bool:
@@ -121,7 +171,6 @@ async def list_bots(
                     raw = await settings_svc.get(f"active_strategy_{b.symbol}")
                 if raw:
                     bound = json.loads(raw)
-                    bound["signal_mode"] = normalize_signal_mode(bound.get("signal_mode"))
                     # Fetch dry-run overlay tools for this strategy
                     ver = bound.get("version", 0)
                     overlay_raw = await settings_svc.get(f"dry_run_overlay_{b.symbol}_v{ver}")
@@ -136,9 +185,12 @@ async def list_bots(
 @router.post("")
 async def register_bot(
     body: BotCreate,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Register a new running bot instance."""
+    _require_operator_auth(authorization)
     # Check for collision by instance_id (not symbol — multiple agents per symbol allowed)
     existing = await session.execute(
         select(RunningInstance).where(RunningInstance.instance_id == body.instance_id)
@@ -156,22 +208,43 @@ async def register_bot(
     )
     session.add(bot)
     await session.flush()
+    _record_operator_audit(
+        session,
+        action="bot_register",
+        target=body.instance_id,
+        old_value=None,
+        new_value=f"{body.symbol}:{body.pid}:{body.strategy_version or ''}",
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
+    await session.commit()
     return {"status": "ok", "bot": _bot_to_dict(bot)}
 
 
 @router.delete("/{instance_id}")
 async def unregister_bot(
     instance_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Remove a bot instance record."""
+    _require_operator_auth(authorization)
     result = await session.execute(
         select(RunningInstance).where(RunningInstance.instance_id == instance_id)
     )
     bot = result.scalar_one_or_none()
     if bot is None:
         raise HTTPException(status_code=404, detail="Bot not found")
+    _record_operator_audit(
+        session,
+        action="bot_unregister",
+        target=instance_id,
+        old_value=f"{bot.symbol}:{bot.pid}:{bot.strategy_version or ''}",
+        new_value="deleted",
+        source_ip=request.client.host if request and request.client else "unknown",
+    )
     await session.delete(bot)
+    await session.commit()
     return {"status": "ok", "removed": instance_id}
 
 
@@ -182,12 +255,14 @@ class AgentStartRequest(BaseModel):
     dry_run: bool = True
     strategy_version: int | None = None
     risk_budget_pct: float = 1.0
+    poll_interval_sec: float = 60.0
 
 
 @router.post("/start")
 async def start_agent(
     body: AgentStartRequest,
     request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
     container=Depends(get_container),
 ) -> dict:
@@ -198,6 +273,8 @@ async def start_agent(
     Binds the selected strategy card to active_strategy_{instance_id} before launch.
     Multiple agents can run on the same symbol with different strategy cards.
     """
+    _require_operator_auth(authorization)
+
     # Purge stale records for this symbol (dead PIDs only)
     existing = await session.execute(
         select(RunningInstance).where(RunningInstance.symbol == body.symbol)
@@ -217,9 +294,8 @@ async def start_agent(
             settings_svc = SettingsService(container.db_session_factory)
 
             # Look up the strategy JSON file
-            versions_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "strategy_versions"
             strategy_data = None
-            for f in versions_dir.glob(f"{body.symbol}_v*.json"):
+            for f in STRATEGY_VERSIONS_DIR.glob(f"{body.symbol}_v*.json"):
                 try:
                     data = json.loads(f.read_text())
                     if data.get("version") == body.strategy_version:
@@ -229,22 +305,10 @@ async def start_agent(
                     continue
 
             if strategy_data:
+                active_payload = _bound_active_strategy_payload(body.symbol, strategy_data)
                 await settings_svc.set(
                     f"active_strategy_{instance_id}",
-                    json.dumps({
-                        "symbol": body.symbol,
-                        "version": strategy_data.get("version", 0),
-                        "name": strategy_data.get("name", ""),
-                        "status": strategy_data.get("status", ""),
-                        "params": strategy_data.get("params", {}),
-                        "tools": strategy_data.get("tools", {}),
-                        "validation": strategy_data.get("validation", {}),
-                        "ai_models": strategy_data.get("ai_models", {}),
-                        "signal_instruction": strategy_data.get("signal_instruction", ""),
-                        "validator_instruction": strategy_data.get("validator_instruction", ""),
-                        "signal_mode": normalize_signal_mode(strategy_data.get("signal_mode")),
-                        "summary": strategy_data.get("summary", {}),
-                    }),
+                    json.dumps(active_payload),
                 )
                 logger.info(
                     "Bound strategy %s v%d to instance %s",
@@ -279,6 +343,7 @@ async def start_agent(
         "--instance-id", instance_id,
         "--risk-budget", str(risk_budget),
         "--webui-port", str(_webui_port),
+        "--poll-interval", str(max(10.0, body.poll_interval_sec)),
     ]
     if body.dry_run:
         cmd.append("--dry-run")
@@ -303,9 +368,21 @@ async def start_agent(
             symbol=body.symbol,
             instance_id=instance_id,
             pid=proc.pid,
-            strategy_version=None,
+            strategy_version=(
+                f"v{int(active_payload.get('version', 0) or 0)}"
+                if body.strategy_version is not None and strategy_data
+                else None
+            ),
         )
         session.add(pre_reg)
+        _record_operator_audit(
+            session,
+            action="bot_start",
+            target=instance_id,
+            old_value=None,
+            new_value=f"{body.symbol}:{proc.pid}:{'dry_run' if body.dry_run else 'live'}",
+            source_ip=request.client.host if request.client else "unknown",
+        )
         await session.flush()
         return {
             "status": "ok",
@@ -323,12 +400,16 @@ async def start_agent(
 @router.post("/{instance_id}/stop")
 async def stop_agent(
     instance_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """
     Stop a running trading agent by sending SIGTERM to its process.
     The agent's shutdown handler will unregister itself from the DB.
     """
+    _require_operator_auth(authorization)
+
     result = await session.execute(
         select(RunningInstance).where(RunningInstance.instance_id == instance_id)
     )
@@ -399,6 +480,14 @@ async def stop_agent(
 
     # Remove DB record (agent shutdown handler may not have run on force kill)
     await session.delete(bot)
+    _record_operator_audit(
+        session,
+        action="bot_stop",
+        target=instance_id,
+        old_value=f"{bot.symbol}:{pid}:running",
+        new_value=_method,
+        source_ip=request.client.host if request.client else "unknown",
+    )
     await session.flush()
 
     return {"status": "ok", "instance_id": instance_id, "stop_method": _method}

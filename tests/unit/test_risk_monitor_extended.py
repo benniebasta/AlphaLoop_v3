@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from alphaloop.risk.monitor import RiskMonitor
@@ -121,3 +123,60 @@ async def test_not_seeded_blocks_trades():
     allowed, reason = await m.can_open_trade()
     assert allowed is False
     assert "not seeded" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_day_rollover_preserves_kill_switch_and_force_close():
+    """Day rollover must not silently clear a live kill switch."""
+    m = RiskMonitor(10_000.0, consecutive_loss_limit=1)
+    m._seeded = True
+    await m.record_trade_close(-100.0)
+    assert m.kill_switch_active is True
+    assert m.force_close_all is True
+
+    m.today = m.today - timedelta(days=1)
+    allowed, reason = await m.can_open_trade()
+
+    assert allowed is False
+    assert "kill switch" in reason.lower()
+    assert m.kill_switch_active is True
+    assert m.force_close_all is True
+    assert m._daily_pnl == 0.0
+
+
+@pytest.mark.asyncio
+async def test_no_new_risk_blocks_new_trades(monitor):
+    """No-new-risk mode should block entries without relying on kill switch."""
+    monitor.activate_no_new_risk("reconciler_failure")
+
+    allowed, reason = await monitor.can_open_trade()
+
+    assert allowed is False
+    assert "no new risk" in reason.lower()
+    assert "reconciler_failure" in reason
+    assert monitor.no_new_risk_active is True
+
+
+@pytest.mark.asyncio
+async def test_no_new_risk_requires_all_reasons_to_clear(monitor):
+    """Compound no-new-risk state remains active until all reasons clear."""
+    monitor.activate_no_new_risk("reconciler_failure")
+    monitor.activate_no_new_risk("broker_db_split_brain")
+
+    cleared = monitor.clear_no_new_risk_reason("reconciler_failure")
+    allowed, reason = await monitor.can_open_trade()
+
+    assert cleared is True
+    assert allowed is False
+    assert monitor.no_new_risk_active is True
+    assert monitor.no_new_risk_reasons == ("broker_db_split_brain",)
+    assert "broker_db_split_brain" in reason
+
+    cleared_final = monitor.clear_no_new_risk_reason("broker_db_split_brain")
+    allowed_after, reason_after = await monitor.can_open_trade()
+
+    assert cleared_final is True
+    assert allowed_after is True
+    assert reason_after == ""
+    assert monitor.no_new_risk_active is False
+    assert monitor.no_new_risk_reasons == ()

@@ -150,14 +150,58 @@ class SupervisionService:
         *,
         limit: int = 100,
         include_acknowledged: bool = True,
+        include_resolved: bool = False,
     ) -> list[IncidentRecord]:
         async with self._session_factory() as session:
             query = select(IncidentRecord).order_by(IncidentRecord.created_at.desc())
+            if not include_resolved:
+                query = query.where(IncidentRecord.status != "RESOLVED")
             if not include_acknowledged:
                 query = query.where(IncidentRecord.status != "ACKNOWLEDGED")
             query = query.limit(limit)
             result = await session.execute(query)
             return list(result.scalars())
+
+    async def resolve_incidents(
+        self,
+        incident_ids: list[int],
+        *,
+        operator: str,
+        note: str = "",
+    ) -> list[IncidentRecord]:
+        if not incident_ids:
+            return []
+
+        async with self._session_factory() as session:
+            query = select(IncidentRecord).where(IncidentRecord.id.in_(incident_ids))
+            result = await session.execute(query)
+            incidents = list(result.scalars())
+            for incident in incidents:
+                incident.status = "RESOLVED"
+                incident.acknowledged_by = operator
+                incident.acknowledged_note = note
+                incident.acknowledged_at = datetime.now(timezone.utc)
+            await session.commit()
+            for incident in incidents:
+                await session.refresh(incident)
+
+        for incident in incidents:
+            await self.record_event(
+                category="operator_action",
+                event_type="incident_resolved",
+                severity="info",
+                symbol=incident.symbol,
+                instance_id=incident.instance_id,
+                entity_id=str(incident.id),
+                message=f"Incident {incident.id} resolved by {operator}",
+                payload={
+                    "incident_id": incident.id,
+                    "incident_type": incident.incident_type,
+                    "operator": operator,
+                    "note": note,
+                },
+            )
+        return incidents
 
     async def list_events(
         self,

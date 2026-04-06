@@ -44,8 +44,10 @@ class BoundedAIValidator:
         *,
         ai_caller=None,
         validator_model: str = "",
+        validator_instruction: str = "",
         system_prompt_builder=None,
         user_prompt_builder=None,
+        fail_open: bool = True,
         # Legacy params kept for backward compat — no longer used for revalidation
         min_rr: float = 1.5,
         sl_min_points: float = 20.0,
@@ -54,8 +56,10 @@ class BoundedAIValidator:
     ):
         self._caller = ai_caller
         self._model = validator_model
+        self._validator_instruction = str(validator_instruction or "").strip()
         self._system_builder = system_prompt_builder
         self._user_builder = user_prompt_builder
+        self._fail_open = fail_open
 
     async def validate(
         self,
@@ -72,8 +76,10 @@ class BoundedAIValidator:
             Adjusted CandidateSignal if approved, None if rejected.
         """
         if not self._caller or not self._model:
-            logger.info("[AIValidator] No AI caller configured — auto-approve")
-            return signal
+            return self._fallback_signal(
+                signal,
+                "[AIValidator] No AI caller configured",
+            )
 
         # Build prompts
         system_prompt = ""
@@ -81,8 +87,16 @@ class BoundedAIValidator:
 
         if self._system_builder:
             system_prompt = self._system_builder(context, regime)
+        if not system_prompt:
+            system_prompt = self._default_system_prompt()
+            if self._validator_instruction:
+                system_prompt = f"{self._validator_instruction}\n\n{system_prompt}"
         if self._user_builder:
             user_prompt = self._user_builder(
+                signal, regime, quality, conviction, context
+            )
+        if not user_prompt:
+            user_prompt = self._default_user_prompt(
                 signal, regime, quality, conviction, context
             )
 
@@ -94,18 +108,21 @@ class BoundedAIValidator:
                 user_prompt=user_prompt,
             )
         except Exception as exc:
-            logger.warning("[AIValidator] AI call failed: %s — auto-approve", exc)
-            return signal
+            return self._fallback_signal(
+                signal,
+                f"[AIValidator] AI call failed: {exc}",
+            )
 
         if not response:
-            logger.warning("[AIValidator] Empty response — auto-approve")
-            return signal
+            return self._fallback_signal(signal, "[AIValidator] Empty response")
 
         # Parse AI response
         parsed = self._parse_response(response)
         if parsed is None:
-            logger.warning("[AIValidator] Failed to parse response — auto-approve")
-            return signal
+            return self._fallback_signal(
+                signal,
+                "[AIValidator] Failed to parse response",
+            )
 
         status = parsed.get("status", "").lower()
 
@@ -127,6 +144,67 @@ class BoundedAIValidator:
             return signal
 
         return adjusted
+
+    def _default_system_prompt(self) -> str:
+        return (
+            "You are a conservative trade validator. Review the proposed trade, "
+            "protect capital first, and respond with JSON only. "
+            "Allowed statuses are APPROVED or REJECTED. "
+            "You may optionally include a confidence value, but you may not "
+            "change direction, entry, stop loss, or take profit."
+        )
+
+    @staticmethod
+    def _default_user_prompt(
+        signal: CandidateSignal,
+        regime: RegimeSnapshot,
+        quality: QualityResult,
+        conviction: ConvictionScore,
+        context,
+    ) -> str:
+        session_name = ""
+        if isinstance(context, dict):
+            session = context.get("session", {})
+            if isinstance(session, dict):
+                session_name = str(session.get("name", "") or "")
+        return (
+            "Review this trade candidate and return JSON only.\n"
+            "{\n"
+            '  "status": "APPROVED" | "REJECTED",\n'
+            '  "confidence": 0.0-1.0 or null,\n'
+            '  "rejection_reasons": ["..."],\n'
+            '  "reasoning": "short explanation"\n'
+            "}\n\n"
+            f"Direction: {signal.direction}\n"
+            f"Setup: {signal.setup_type}\n"
+            f"Entry zone: {signal.entry_zone}\n"
+            f"Stop loss: {signal.stop_loss}\n"
+            f"Take profit: {signal.take_profit}\n"
+            f"Raw confidence: {signal.raw_confidence:.4f}\n"
+            f"RR ratio: {signal.rr_ratio:.4f}\n"
+            f"Regime: {regime.regime}\n"
+            f"Macro regime: {regime.macro_regime}\n"
+            f"Volatility band: {regime.volatility_band}\n"
+            f"Session: {session_name or 'unknown'}\n"
+            f"Quality overall: {quality.overall_score:.2f}\n"
+            f"Group scores: {quality.group_scores}\n"
+            f"Conviction score: {conviction.score:.2f}\n"
+            f"Conviction decision: {conviction.decision}\n"
+            f"Conviction reasoning: {conviction.reasoning}\n"
+            f"Signal reasoning: {signal.reasoning}\n"
+        )
+
+    def _fallback_signal(
+        self,
+        signal: CandidateSignal,
+        message: str,
+    ) -> CandidateSignal | None:
+        """Handle validator degradation according to the configured failure mode."""
+        if self._fail_open:
+            logger.warning("%s — auto-approve", message)
+            return signal
+        logger.warning("%s — fail-closed reject", message)
+        return None
 
     # ------------------------------------------------------------------
     # Adjustment + revalidation

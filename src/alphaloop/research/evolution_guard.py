@@ -23,6 +23,16 @@ from alphaloop.db.repositories.research_repo import ResearchRepository
 logger = logging.getLogger(__name__)
 
 
+def _metric(metrics: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    """Return the first non-null metric value across known key aliases."""
+    for key in keys:
+        if key in metrics:
+            value = metrics.get(key)
+            if value is not None:
+                return value
+    return default
+
+
 class EvolutionGuard:
     """
     Safety guard for strategy evolution — prevents runaway parameter drift,
@@ -106,7 +116,7 @@ class EvolutionGuard:
                 f"OOS win_rate {win_rate:.1%} below minimum {self._evo.oos_min_wr:.1%}"
             )
 
-        sharpe = oos_metrics.get("sharpe_ratio")
+        sharpe = _metric(oos_metrics, "sharpe_ratio", "sharpe")
         if sharpe is not None and sharpe < 0:
             reasons.append(f"OOS Sharpe {sharpe:.2f} is negative")
 

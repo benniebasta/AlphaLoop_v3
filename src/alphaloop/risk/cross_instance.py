@@ -54,12 +54,11 @@ class CrossInstanceRiskAggregator:
             )
 
             # Today's closed trades across all instances
-            all_closed = await self.trade_repo.get_closed_trades(limit=100)
             today_start = utc_day_start()
-            today_closed = [
-                t for t in all_closed
-                if getattr(t, "closed_at", None) and t.closed_at >= today_start
-            ]
+            today_closed = await self.trade_repo.get_closed_trades(
+                closed_since=today_start,
+                limit=None,
+            )
             total_daily_pnl = sum(
                 float(getattr(t, "pnl_usd", 0) or 0) for t in today_closed
             )

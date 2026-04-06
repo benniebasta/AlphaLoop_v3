@@ -49,6 +49,7 @@ class RiskMonitor:
         self._open_trades: int = 0
         self._open_risk_usd: float = 0.0
         self._kill_switch_active: bool = False
+        self._no_new_risk_reasons: set[str] = set()
         self.force_close_all: bool = False
         self._session_pnl: dict[str, float] = {}
         self._rolling_dd_modifier: float = 1.0
@@ -145,6 +146,10 @@ class RiskMonitor:
 
             self._ensure_day_reset()
 
+            if self._no_new_risk_reasons:
+                reasons = ", ".join(sorted(self._no_new_risk_reasons))
+                return False, f"No new risk mode is ACTIVE: {reasons}"
+
             if self._kill_switch_active:
                 return False, "Kill switch is ACTIVE"
 
@@ -210,6 +215,10 @@ class RiskMonitor:
 
             self._ensure_day_reset()
 
+            if self._no_new_risk_reasons:
+                reasons = ", ".join(sorted(self._no_new_risk_reasons))
+                return False, f"No new risk mode is ACTIVE: {reasons}"
+
             if self._kill_switch_active:
                 return False, "Kill switch is ACTIVE"
 
@@ -271,6 +280,8 @@ class RiskMonitor:
             "open_trades": self._open_trades,
             "open_risk_usd": round(self._open_risk_usd, 2),
             "kill_switch": self._kill_switch_active,
+            "no_new_risk": bool(self._no_new_risk_reasons),
+            "no_new_risk_reasons": sorted(self._no_new_risk_reasons),
             "force_close_all": self.force_close_all,
             "rolling_dd_modifier": self._rolling_dd_modifier,
             "seeded": self._seeded,
@@ -288,9 +299,39 @@ class RiskMonitor:
         """Read-only view of the kill-switch state for external callers."""
         return self._kill_switch_active
 
+    @property
+    def no_new_risk_active(self) -> bool:
+        """True when new exposure must not be opened."""
+        return bool(self._no_new_risk_reasons)
+
+    @property
+    def no_new_risk_reasons(self) -> tuple[str, ...]:
+        """Stable view of active no-new-risk reasons."""
+        return tuple(sorted(self._no_new_risk_reasons))
+
     def activate_kill_switch(self, reason: str) -> None:
         """Public wrapper so callers do not mutate private state directly."""
         self._activate_kill_switch(reason)
+
+    def activate_no_new_risk(self, reason: str) -> None:
+        """Prevent new exposure until the specific reason is resolved."""
+        clean_reason = (reason or "").strip()
+        if not clean_reason:
+            raise ValueError("No-new-risk reason must be non-empty")
+        if clean_reason not in self._no_new_risk_reasons:
+            self._no_new_risk_reasons.add(clean_reason)
+            logger.critical("NO_NEW_RISK ACTIVATED: %s", clean_reason)
+
+    def clear_no_new_risk_reason(self, reason: str) -> bool:
+        """Clear one active reason; returns True when removed."""
+        clean_reason = (reason or "").strip()
+        if not clean_reason:
+            return False
+        if clean_reason in self._no_new_risk_reasons:
+            self._no_new_risk_reasons.remove(clean_reason)
+            logger.warning("NO_NEW_RISK CLEARED: %s", clean_reason)
+            return True
+        return False
 
     def _check_kill_switch(self) -> None:
         if self.account_balance <= 0:
@@ -322,8 +363,5 @@ class RiskMonitor:
                 )
             self.today = today
             self._daily_pnl = 0.0
-            self._kill_switch_active = False
-            self.force_close_all = False
-            self._consecutive_losses = 0
             self._session_pnl = {}
             logger.info("[RiskMonitor] Day boundary reset — kill switch cleared, consecutive losses reset")

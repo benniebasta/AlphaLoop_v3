@@ -11,8 +11,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from alphaloop.trading.strategy_loader import (
+    build_runtime_strategy_context,
+    resolve_strategy_signal_mode,
+)
 
+logger = logging.getLogger(__name__)
 
 class SignalDispatcher:
     """
@@ -82,14 +86,27 @@ class SignalDispatcher:
         DirectionHypothesis | None
             None means no directional view (HOLD / insufficient data).
         """
-        if signal_mode == "ai_signal" and self._signal_engine:
+        if active_strategy is not None:
+            runtime_strategy = build_runtime_strategy_context(active_strategy)
+        else:
+            runtime_strategy = {
+                "signal_mode": resolve_strategy_signal_mode({"signal_mode": signal_mode}),
+                "signal_instruction": "",
+                "ai_models": {},
+            }
+        effective_signal_mode = runtime_strategy.get("signal_mode", signal_mode)
+        runtime_ai_models = dict(runtime_strategy.get("ai_models") or {})
+        signal_model_id = str(runtime_ai_models.get("signal") or self.signal_model_id or "")
+
+        if effective_signal_mode == "ai_signal" and self._signal_engine:
             # AI path: the signal engine queries the LLM and returns a direction
             # hypothesis.  SL/TP construction happens in orchestrator Stage 3B.
             try:
                 return await self._signal_engine.generate_hypothesis(
                     ctx,
                     ai_caller=self._ai_caller,
-                    model_id=self.signal_model_id,
+                    model_id=signal_model_id,
+                    prompt_instructions=runtime_strategy.get("signal_instruction", ""),
                 )
             except Exception as e:
                 logger.warning("[dispatcher] AI signal engine error: %s", e)
@@ -103,5 +120,5 @@ class SignalDispatcher:
                 logger.warning("[dispatcher] Algo engine error: %s", e)
                 return None
 
-        logger.debug("[dispatcher] No engine configured for mode=%s", signal_mode)
+        logger.debug("[dispatcher] No engine configured for mode=%s", effective_signal_mode)
         return None

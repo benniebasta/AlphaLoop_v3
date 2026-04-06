@@ -15,6 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphaloop.db.models.instance import RunningInstance
+from alphaloop.db.models.operational_event import OperationalEvent
+from alphaloop.db.models.pipeline import PipelineDecision
 from alphaloop.db.models.trade import TradeLog
 from alphaloop.webui.deps import get_db_session
 
@@ -279,6 +281,22 @@ async def live_data(
     )
     recent_trades = list((await session.execute(recent_q)).scalars())
 
+    pipeline_q = (
+        select(PipelineDecision)
+        .where(PipelineDecision.symbol == symbol)
+        .order_by(PipelineDecision.occurred_at.desc())
+        .limit(5)
+    )
+    recent_pipeline = list((await session.execute(pipeline_q)).scalars())
+
+    event_q = (
+        select(OperationalEvent)
+        .where(OperationalEvent.symbol == symbol)
+        .order_by(OperationalEvent.created_at.desc())
+        .limit(8)
+    )
+    recent_events = list((await session.execute(event_q)).scalars())
+
     current_sess = _current_session()
 
     # Phase 7G: Data source disclosure — this endpoint uses yfinance analytics,
@@ -332,8 +350,30 @@ async def live_data(
         },
         "ema_state": computed_ema_state,
         "next_news": None,
-        "agent_thoughts": [],
-        "pipeline_status": [],
+        "agent_thoughts": [
+            {
+                "time": event.created_at.isoformat() if event.created_at else None,
+                "severity": event.severity,
+                "event_type": event.event_type,
+                "message": event.message,
+                "payload": event.payload,
+            }
+            for event in recent_events
+        ],
+        "pipeline_status": [
+            {
+                "time": decision.occurred_at.isoformat() if decision.occurred_at else None,
+                "allowed": decision.allowed,
+                "blocked_by": decision.blocked_by,
+                "block_reason": decision.block_reason,
+                "direction": decision.direction,
+                "size_modifier": decision.size_modifier,
+                "journey": (decision.tool_results or {}).get("journey"),
+                "construction_source": (decision.tool_results or {}).get("construction_source"),
+                "instance_id": decision.instance_id,
+            }
+            for decision in recent_pipeline
+        ],
         "recent_trades": [
             {
                 "direction": t.direction,

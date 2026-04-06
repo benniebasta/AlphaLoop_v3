@@ -97,16 +97,10 @@ class RiskGateRunner:
 
         # --- Portfolio cap ---
         if self._portfolio_cap:
-            direction = getattr(signal, "direction", "")
-            entry_mid = 0.0
-            ez = getattr(signal, "entry_zone", (0, 0))
-            if ez:
-                entry_mid = (ez[0] + ez[1]) / 2
-            sl = getattr(signal, "stop_loss", 0)
-            risk_pts = abs(entry_mid - sl) if entry_mid and sl else 0
-
-            allowed, reason = self._portfolio_cap.check(
-                symbol, direction, risk_pts, context
+            allowed, reason = self._check_portfolio_cap(
+                signal=signal,
+                context=context,
+                symbol=symbol,
             )
             if not allowed:
                 return RiskGateResult(
@@ -190,3 +184,79 @@ class RiskGateRunner:
             logger.error("[RiskGate] Risk monitor error: %s", exc)
             # Fail-closed for risk checks
             return False, f"Risk monitor error: {exc}"
+
+    def _check_portfolio_cap(self, *, signal, context, symbol: str) -> tuple[bool, str]:
+        """
+        Support both legacy ``check(...)`` guards and current ``is_capped(...)`` guards.
+
+        ``PortfolioCapGuard`` in ``risk.guards`` exposes ``is_capped`` only, so Stage 7
+        must adapt the candidate into the open-trade portfolio view rather than calling
+        a non-existent method.
+        """
+        guard = self._portfolio_cap
+        direction = getattr(signal, "direction", "")
+
+        if hasattr(guard, "check"):
+            entry_mid = 0.0
+            ez = getattr(signal, "entry_zone", (0, 0))
+            if ez:
+                entry_mid = (ez[0] + ez[1]) / 2
+            sl = getattr(signal, "stop_loss", 0)
+            risk_pts = abs(entry_mid - sl) if entry_mid and sl else 0
+            return guard.check(symbol, direction, risk_pts, context)
+
+        if hasattr(guard, "is_capped"):
+            rm = getattr(context, "risk_monitor", None)
+            balance = float(getattr(rm, "account_balance", 0) or 0)
+            projected = self._projected_open_trades(signal=signal, context=context, symbol=symbol)
+            if guard.is_capped(open_trades=projected, balance=balance):
+                return False, "correlation-adjusted portfolio cap exceeded"
+            return True, ""
+
+        logger.error("[RiskGate] Unsupported portfolio cap guard: %r", type(guard))
+        return False, "Unsupported portfolio cap guard"
+
+    @staticmethod
+    def _projected_open_trades(*, signal, context, symbol: str) -> list[dict[str, Any]]:
+        existing = list(getattr(context, "open_trades", []) or [])
+        normalized: list[dict[str, Any]] = []
+        for trade in existing:
+            if isinstance(trade, dict):
+                normalized.append(dict(trade))
+            else:
+                normalized.append(
+                    {
+                        "symbol": getattr(trade, "symbol", None),
+                        "direction": getattr(trade, "direction", None),
+                        "risk_amount_usd": getattr(trade, "risk_amount_usd", None),
+                        "risk_pct": getattr(trade, "risk_pct", None),
+                    }
+                )
+
+        normalized.append(
+            {
+                "symbol": symbol or getattr(context, "symbol", ""),
+                "direction": getattr(signal, "direction", ""),
+                "risk_amount_usd": RiskGateRunner._projected_risk_usd(signal, context),
+                "risk_pct": getattr(signal, "risk_pct", None),
+            }
+        )
+        return normalized
+
+    @staticmethod
+    def _projected_risk_usd(signal, context) -> float:
+        direct = getattr(signal, "risk_amount_usd", None)
+        if direct is not None:
+            return float(direct or 0.0)
+
+        context_value = getattr(context, "projected_risk_usd", None)
+        if context_value is not None:
+            return float(context_value or 0.0)
+
+        risk_pct = getattr(signal, "risk_pct", None)
+        rm = getattr(context, "risk_monitor", None)
+        balance = float(getattr(rm, "account_balance", 0) or 0.0)
+        if risk_pct is not None and balance > 0:
+            return float(risk_pct) * balance
+
+        return 0.0

@@ -4,8 +4,15 @@ import pytest
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 
-from alphaloop.backtester.vbt_engine import run_vectorbt_backtest, VBTBacktestResult
+from alphaloop.backtester.vbt_engine import (
+    VBTBacktestResult,
+    _configured_signal_logic,
+    _configured_signal_rules,
+    _resolve_backtest_setup_tag,
+    run_vectorbt_backtest,
+)
 from alphaloop.config.assets import get_asset_config
 
 
@@ -40,6 +47,29 @@ def _make_ohlcv(n=200, base_price=2700.0, trend_strength=0.5):
 
 
 class TestVBTBacktestBasic:
+    def test_backtest_rule_loader_defaults_missing_rules_for_backward_compat(self):
+        assert _configured_signal_rules({"signal_rules": None}) == [{"source": "ema_crossover"}]
+        assert _configured_signal_logic({"signal_logic": None}) == "AND"
+
+    def test_backtest_rule_loader_fails_closed_on_malformed_rules(self):
+        assert _configured_signal_rules({"signal_rules": "ema_crossover"}) == []
+        assert _configured_signal_logic({"signal_logic": "weird"}) == "AND"
+
+    def test_backtest_rule_loader_prefers_strategy_spec_entry_model(self):
+        params = {
+            "signal_rules": [{"source": "ema_crossover"}],
+            "signal_logic": "AND",
+            "strategy_spec": {
+                "entry_model": {
+                    "signal_rule_sources": ["macd_crossover"],
+                    "signal_logic": "OR",
+                }
+            },
+        }
+
+        assert _configured_signal_rules(params) == [{"source": "macd_crossover"}]
+        assert _configured_signal_logic(params) == "OR"
+
     def test_runs_without_error(self):
         """Basic smoke test — backtest should complete."""
         df = _make_ohlcv(200)
@@ -76,6 +106,23 @@ class TestVBTBacktestBasic:
 
 
 class TestConstructorUsedInBacktest:
+    def test_backtest_setup_tag_uses_flat_signal_rules_when_no_nested_params_exist(self):
+        params = {
+            "signal_mode": "algo_ai",
+            "signal_rules": [{"source": "ema_crossover"}],
+        }
+
+        assert _resolve_backtest_setup_tag(params) == "momentum"
+
+    def test_backtest_setup_tag_uses_list_style_tools(self):
+        params = {
+            "signal_mode": "algo_ai",
+            "tools": ["bos_guard"],
+            "signal_rules": [{"source": "ema_crossover"}],
+        }
+
+        assert _resolve_backtest_setup_tag(params) == "breakout"
+
     def test_no_atr_fallback_in_backtest(self):
         """Backtest should NOT use ATR-based SL — only structure."""
         df = _make_ohlcv(200)
@@ -106,6 +153,33 @@ class TestConstructorUsedInBacktest:
         if result.opportunities > 0:
             total_skipped = sum(result.skipped_by_reason.values())
             assert total_skipped > 0 or result.valid_constructed > 0
+
+    def test_backtest_uses_strategy_setup_family_for_hypothesis_setup_tag(self, monkeypatch):
+        captured: list[str] = []
+
+        def fake_construct(self, hypothesis, bid, ask, indicators, atr):
+            captured.append(hypothesis.setup_tag)
+            return SimpleNamespace(signal=None, rejection_reason="captured for test")
+
+        monkeypatch.setattr(
+            "alphaloop.pipeline.construction.TradeConstructor.construct",
+            fake_construct,
+        )
+
+        df = _make_ohlcv(200)
+        params = {
+            "signal_rules": [{"source": "ema_crossover"}],
+            "signal_logic": "AND",
+            "strategy_spec": {
+                "signal_mode": "algo_ai",
+                "setup_family": "momentum_expansion",
+            },
+        }
+
+        run_vectorbt_backtest(df, params, symbol="XAUUSD")
+
+        assert captured
+        assert all(tag == "momentum" for tag in captured)
 
 
 class TestPerformanceMetrics:

@@ -1,1 +1,1 @@
-"""Supervision services for incidents and durable operational events."""
+"""Supervision services for incidents, durable operational events, and retention."""

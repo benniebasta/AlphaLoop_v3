@@ -11,6 +11,10 @@ from typing import Any
 
 from alphaloop.ai.json_repair import repair_json
 from alphaloop.config.assets import get_asset_config, AssetConfig
+from alphaloop.core.setup_types import (
+    normalize_pipeline_setup_type,
+    normalize_schema_setup_type,
+)
 from alphaloop.pipeline.types import DirectionHypothesis
 from alphaloop.signals.schema import TradeSignal
 
@@ -550,6 +554,7 @@ class MultiAssetSignalEngine:
         # Fill defaults for fields that may be missing in truncated responses
         data.setdefault("confidence", 0.5)
         data.setdefault("reasoning", "(truncated response — auto-repaired)")
+        data["setup"] = normalize_schema_setup_type(data.get("setup"))
 
         # take_profit is required — can't trade without TP levels
         tp = data.get("take_profit")
@@ -740,7 +745,7 @@ class MultiAssetSignalEngine:
             return None
 
         direction = "BUY" if trend == "bullish" else "SELL"
-        setup_tag = data.get("setup", "pullback")
+        setup_tag = normalize_pipeline_setup_type(data.get("setup", "pullback"))
         reasoning = data.get("reasoning", "(no reasoning)")[:500]
 
         from datetime import datetime, timezone

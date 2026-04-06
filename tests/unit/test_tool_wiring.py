@@ -201,6 +201,27 @@ class TestRiskGateTools:
         result = await rg.check(self._make_signal(), _make_context())
         assert result.allowed is True
 
+    @pytest.mark.asyncio
+    async def test_portfolio_cap_guard_blocks_projected_trade(self):
+        from alphaloop.pipeline.risk_gate import RiskGateRunner
+        from alphaloop.risk.guards import PortfolioCapGuard
+
+        signal = self._make_signal()
+        signal.risk_amount_usd = 650.0
+        context = _make_context(
+            open_trades=[],
+        )
+        context.risk_monitor = SimpleNamespace(
+            account_balance=10_000.0,
+            can_open_trade=AsyncMock(return_value=(True, "")),
+        )
+        rg = RiskGateRunner(portfolio_cap_guard=PortfolioCapGuard(max_portfolio_risk_pct=6.0))
+
+        result = await rg.check(signal, context, symbol="XAUUSD")
+
+        assert result.allowed is False
+        assert "portfolio cap" in result.block_reason.lower()
+
 
 # ---------------------------------------------------------------------------
 # Stage 8: ExecutionGuard

@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alphaloop.core.container import Container
 from alphaloop.db.models.trade import TradeLog
 from alphaloop.risk.service import RiskService
+from alphaloop.supervision.service import SupervisionService
 from alphaloop.webui.deps import get_container, get_db_session
+from alphaloop.webui.routes.controls import _build_risk_lock_state
 
 router = APIRouter(prefix="/api/risk", tags=["risk"])
 
@@ -104,7 +106,13 @@ async def get_portfolio_snapshot(
 ) -> dict:
     service = getattr(container, "risk_service", None) or RiskService(container.db_session_factory)
     snapshot = await service.get_portfolio_snapshot()
-    return snapshot.to_dict()
+    supervision = getattr(container, "supervision_service", None) or SupervisionService(
+        container.db_session_factory
+    )
+    return {
+        **snapshot.to_dict(),
+        "guard_state": await _build_risk_lock_state(supervision),
+    }
 
 
 @router.get("/stress")

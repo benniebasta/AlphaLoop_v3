@@ -14,6 +14,7 @@ Tracks state transitions with timestamps for audit.
 """
 
 import logging
+import threading
 from datetime import datetime, timezone
 from enum import StrEnum
 
@@ -200,6 +201,7 @@ class OrderRegistry:
         self._orders: dict[str, OrderTracker] = {}
         self._by_ticket: dict[int, str] = {}
         self._repo = order_repo  # Phase 5B: optional DB write-through
+        self._lock = threading.RLock()
 
     async def reload_from_db(self) -> int:
         """Phase 5B: Reload active/recovery-pending orders from DB on startup."""
@@ -207,21 +209,22 @@ class OrderRegistry:
             return 0
         non_terminal = await self._repo.get_non_terminal()
         loaded = 0
-        for record in non_terminal:
-            tracker = OrderTracker(
-                order_id=record.order_id,
-                symbol=record.symbol,
-                direction=record.direction,
-                lots=record.lots,
-                state=OrderState.RECOVERY_PENDING,
-                broker_ticket=record.broker_ticket,
-                fill_price=record.fill_price,
-                fill_volume=record.fill_volume,
-            )
-            self._orders[record.order_id] = tracker
-            if record.broker_ticket:
-                self._by_ticket[record.broker_ticket] = record.order_id
-            loaded += 1
+        with self._lock:
+            for record in non_terminal:
+                tracker = OrderTracker(
+                    order_id=record.order_id,
+                    symbol=record.symbol,
+                    direction=record.direction,
+                    lots=record.lots,
+                    state=OrderState.RECOVERY_PENDING,
+                    broker_ticket=record.broker_ticket,
+                    fill_price=record.fill_price,
+                    fill_volume=record.fill_volume,
+                )
+                self._orders[record.order_id] = tracker
+                if record.broker_ticket:
+                    self._by_ticket[record.broker_ticket] = record.order_id
+                loaded += 1
         if loaded:
             logger.info(
                 "[order-registry] Reloaded %d non-terminal orders from DB", loaded,
@@ -243,41 +246,48 @@ class OrderRegistry:
             lots=lots,
             requested_price=requested_price,
         )
-        self._orders[order_id] = tracker
+        with self._lock:
+            self._orders[order_id] = tracker
         return tracker
 
     def get(self, order_id: str) -> OrderTracker | None:
-        return self._orders.get(order_id)
+        with self._lock:
+            return self._orders.get(order_id)
 
     def get_by_ticket(self, ticket: int) -> OrderTracker | None:
-        oid = self._by_ticket.get(ticket)
-        return self._orders.get(oid) if oid else None
+        with self._lock:
+            oid = self._by_ticket.get(ticket)
+            return self._orders.get(oid) if oid else None
 
     def register_ticket(self, order_id: str, ticket: int) -> None:
-        self._by_ticket[ticket] = order_id
+        with self._lock:
+            self._by_ticket[ticket] = order_id
 
     def get_active(self) -> list[OrderTracker]:
-        return [o for o in self._orders.values() if o.is_active]
+        with self._lock:
+            return [o for o in self._orders.values() if o.is_active]
 
     def get_unverified(self) -> list[OrderTracker]:
-        return [
-            o for o in self._orders.values()
-            if o.state == OrderState.FILLED and not o.verified
-        ]
+        with self._lock:
+            return [
+                o for o in self._orders.values()
+                if o.state == OrderState.FILLED and not o.verified
+            ]
 
     def cleanup_terminal(self, max_keep: int = 100) -> int:
         """Remove old terminal orders, keeping the most recent."""
-        terminal = [
-            (o.order_id, o.created_at)
-            for o in self._orders.values()
-            if o.is_terminal
-        ]
-        if len(terminal) <= max_keep:
-            return 0
-        terminal.sort(key=lambda x: x[1])
-        to_remove = terminal[: len(terminal) - max_keep]
-        for oid, _ in to_remove:
-            tracker = self._orders.pop(oid, None)
-            if tracker and tracker.broker_ticket:
-                self._by_ticket.pop(tracker.broker_ticket, None)
-        return len(to_remove)
+        with self._lock:
+            terminal = [
+                (o.order_id, o.created_at)
+                for o in self._orders.values()
+                if o.is_terminal
+            ]
+            if len(terminal) <= max_keep:
+                return 0
+            terminal.sort(key=lambda x: x[1])
+            to_remove = terminal[: len(terminal) - max_keep]
+            for oid, _ in to_remove:
+                tracker = self._orders.pop(oid, None)
+                if tracker and tracker.broker_ticket:
+                    self._by_ticket.pop(tracker.broker_ticket, None)
+            return len(to_remove)

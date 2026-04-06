@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from alphaloop.config.assets import get_asset_config
-from alphaloop.signals.engine import _build_signal_user_prompt
+from alphaloop.core.types import SetupType
+from alphaloop.signals.engine import MultiAssetSignalEngine, _build_signal_user_prompt
 
 
 def test_build_signal_user_prompt_accepts_namespace_session() -> None:
@@ -21,3 +23,13 @@ def test_build_signal_user_prompt_accepts_namespace_session() -> None:
 
     assert "SESSION: London (quality 0.8)" in prompt
     assert "CURRENT PRICE:" in prompt
+
+
+def test_parse_signal_normalizes_legacy_setup_alias_to_schema_enum() -> None:
+    engine = MultiAssetSignalEngine(symbol="XAUUSD")
+    signal = engine._parse_signal(
+        '{"trend":"bullish","setup":"range_bounce","entry_zone":[2339.0,2341.0],"stop_loss":2330.0,"take_profit":[2355.0],"confidence":0.72,"reasoning":"Structured range bounce setup with defined support."}'
+    )
+
+    assert signal is not None
+    assert signal.setup == SetupType.RANGE

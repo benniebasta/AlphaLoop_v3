@@ -94,7 +94,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     # Echo back the subprotocol so the browser does not close the connection
     # (RFC 6455 §4.2.2: server must match a requested subprotocol or omit).
-    subproto = provided_token if ws.headers.get("sec-websocket-protocol") else None
+    # Use the raw client header — not provided_token — so dev-mode (no AUTH_TOKEN)
+    # still echoes back whatever token the browser sent from localStorage.
+    subproto = ws.headers.get("sec-websocket-protocol", "").strip() or None
     await ws.accept(subprotocol=subproto)
     _clients.add(ws)
 

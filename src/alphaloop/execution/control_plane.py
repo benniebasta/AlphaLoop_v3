@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, delete
 from sqlalchemy.exc import IntegrityError
 
+from alphaloop.core.setup_types import normalize_pipeline_setup_type
 from alphaloop.db.models.execution_lock import ExecutionLock
 from alphaloop.db.repositories.order_repo import OrderRepository
 from alphaloop.execution.order_state import compute_client_order_id
@@ -256,7 +257,9 @@ class InstitutionalControlPlane:
         else:
             timestamp_bucket = generated_at.astimezone(timezone.utc).strftime("%Y%m%d%H%M")
 
-        setup_type = getattr(signal, "setup_type", "") or getattr(signal, "setup_tag", "")
+        setup_type = normalize_pipeline_setup_type(
+            getattr(signal, "setup_type", "") or getattr(signal, "setup_tag", "")
+        )
         signal_id = f"{symbol}:{setup_type}:{timestamp_bucket}"
         return compute_client_order_id(
             signal_id=signal_id,

@@ -47,7 +47,8 @@ class TradeRepository:
         strategy_version: str | None = None,
         instance_id: str | None = None,
         since: datetime | None = None,
-        limit: int = 500,
+        closed_since: datetime | None = None,
+        limit: int | None = 500,
     ) -> list[TradeLog]:
         q = select(TradeLog).where(TradeLog.outcome.in_(["WIN", "LOSS", "BE"]))
         if symbol:
@@ -58,7 +59,11 @@ class TradeRepository:
             q = q.where(TradeLog.instance_id == instance_id)
         if since:
             q = q.where(TradeLog.opened_at >= since)
-        q = q.order_by(TradeLog.opened_at.desc()).limit(limit)
+        if closed_since:
+            q = q.where(TradeLog.closed_at >= closed_since)
+        q = q.order_by(TradeLog.closed_at.desc(), TradeLog.opened_at.desc())
+        if limit is not None:
+            q = q.limit(limit)
         result = await self._session.execute(q)
         return list(result.scalars())
 

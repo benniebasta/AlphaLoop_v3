@@ -42,7 +42,7 @@ const AI_SIGNAL_MODES = [
 ];
 const ALL_SIGNAL_MODES = [...LEGACY_SIGNAL_MODES, ...AI_SIGNAL_MODES];
 
-const DETAIL_TAB_ORDER = ['tune', 'tools', 'validation', 'signal'];
+const DETAIL_TAB_ORDER = ['presets', 'tune', 'tools', 'validation', 'signal'];
 
 const SIGNAL_SOURCES = [
   { value: 'ema_crossover',      label: 'EMA Crossover' },
@@ -255,6 +255,208 @@ const VALIDATION_PRESETS = {
   },
 };
 
+const FULL_PRESETS = [
+  {
+    id: 'conservative_swing',
+    name: 'Conservative Swing',
+    description: 'High-conviction swing trades with all guards active. Low frequency, high quality.',
+    icon: '🛡️',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.8, tp1_rr:1.5, tp2_rr:3.0, tp1_close_pct:0.50, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:25, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:true, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.72, min_rr:1.5, min_session_score:0.75, max_spread_points:40, avoid_pre_news_minutes:45, avoid_post_news_minutes:30, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:0.8, check_liq_vacuum:true, liq_vacuum_spike_mult:2.5, liq_vacuum_body_pct:30, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'balanced',
+    name: 'Balanced',
+    description: 'Core filters active, extras off. Solid general-purpose baseline for any market.',
+    icon: '⚖️',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.5, tp1_rr:1.5, tp2_rr:2.5, tp1_close_pct:0.60, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:20, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:false, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:false, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.68, min_rr:1.5, min_session_score:0.70, max_spread_points:50, avoid_pre_news_minutes:30, avoid_post_news_minutes:20, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:false, check_tick_jump:true, tick_jump_atr_max:0.8, check_liq_vacuum:true, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:false, claude_enabled:true },
+  },
+  {
+    id: 'intraday',
+    name: 'Intraday',
+    description: '15min\u2013few hours. Clean London/NY trend captures. Between scalping and swing.',
+    icon: '⚡',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:13, ema_slow:34, sl_atr_mult:1.4, tp1_rr:1.5, tp2_rr:2.5, tp1_close_pct:0.60, rsi_period:10, rsi_ob:72, rsi_os:28, risk_pct:0.01, macd_fast:8, macd_slow:21, macd_signal:5, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:20, volume_ma_period:14 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:false, tick_jump_guard:true, liq_vacuum_guard:false, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:false, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'scalping', min_confidence:0.65, min_rr:1.5, min_session_score:0.70, max_spread_points:40, avoid_pre_news_minutes:30, avoid_post_news_minutes:15, check_news:true, check_rsi:true, rsi_ob:72, rsi_os:28, check_ema200_trend:true, check_bos:true, check_fvg:false, check_tick_jump:true, tick_jump_atr_max:0.7, check_liq_vacuum:false, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:false, claude_enabled:true },
+  },
+  {
+    id: 'aggressive_scalp',
+    name: 'Aggressive Scalp',
+    description: 'High frequency, tight SL, minimal blocking filters. Fast entries, quick exits.',
+    icon: '🔥',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:9, ema_slow:21, sl_atr_mult:1.0, tp1_rr:1.2, tp2_rr:2.0, tp1_close_pct:0.70, rsi_period:7, rsi_ob:75, rsi_os:25, risk_pct:0.008, macd_fast:5, macd_slow:13, macd_signal:5, bb_period:14, bb_std_dev:1.8, adx_period:10, adx_min_threshold:20, volume_ma_period:14 },
+    tools: { session_filter:true, news_filter:false, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:false, tick_jump_guard:false, liq_vacuum_guard:false, vwap_guard:false, dxy_filter:false, sentiment_filter:false, risk_filter:false, correlation_guard:false, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:false, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'scalping', min_confidence:0.62, min_rr:1.2, min_session_score:0.65, max_spread_points:30, avoid_pre_news_minutes:15, avoid_post_news_minutes:10, check_news:false, check_rsi:true, rsi_ob:75, rsi_os:25, check_ema200_trend:true, check_bos:true, check_fvg:false, check_tick_jump:false, tick_jump_atr_max:0.6, check_liq_vacuum:false, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:20, check_regime:true, check_setup_type:false, claude_enabled:false },
+  },
+  {
+    id: 'news_breakout',
+    name: 'News Breakout',
+    description: 'Event-driven. Trades volatility spikes \u2014 NFP, CPI, FOMC. news_filter is OFF to allow entry.',
+    icon: '📰',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:2.5, tp1_rr:2.0, tp2_rr:4.0, tp1_close_pct:0.50, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.008, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.5, adx_period:14, adx_min_threshold:20, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:false, volatility_filter:true, ema200_filter:false, bos_guard:false, fvg_guard:false, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:false, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:false, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'scalping', min_confidence:0.60, min_rr:2.0, min_session_score:0.40, max_spread_points:100, avoid_pre_news_minutes:0, avoid_post_news_minutes:0, check_news:false, check_rsi:false, rsi_ob:70, rsi_os:30, check_ema200_trend:false, check_bos:false, check_fvg:false, check_tick_jump:true, tick_jump_atr_max:2.0, check_liq_vacuum:true, liq_vacuum_spike_mult:3.0, liq_vacuum_body_pct:20, check_regime:false, check_setup_type:false, claude_enabled:false },
+  },
+  {
+    id: 'mean_reversion',
+    name: 'Mean Reversion',
+    description: 'Fade extremes in ranging markets. Bollinger + VWAP deviation entries. Trend filters OFF.',
+    icon: '🔄',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.0, tp1_rr:0.8, tp2_rr:1.5, tp1_close_pct:0.70, rsi_period:14, rsi_ob:75, rsi_os:25, risk_pct:0.008, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.2, adx_period:14, adx_min_threshold:15, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:false, ema200_filter:false, bos_guard:false, fvg_guard:false, tick_jump_guard:false, liq_vacuum_guard:false, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:false, macd_filter:false, bollinger_filter:true, adx_filter:false, volume_filter:false, swing_structure:false, ema_crossover:false, rsi_feature:true, trendilo:false, fast_fingers:false, choppiness_index:true, alma_filter:false },
+    validation: { mode:'scalping', min_confidence:0.62, min_rr:0.8, min_session_score:0.60, max_spread_points:40, avoid_pre_news_minutes:20, avoid_post_news_minutes:10, check_news:true, check_rsi:true, rsi_ob:75, rsi_os:25, check_ema200_trend:false, check_bos:false, check_fvg:false, check_tick_jump:false, tick_jump_atr_max:0.6, check_liq_vacuum:false, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:20, check_regime:true, check_setup_type:false, claude_enabled:false },
+  },
+  {
+    id: 'position_macro',
+    name: 'Position / Macro',
+    description: 'Multi-day directional trades. Wide SL, high R:R. Full macro filter stack engaged.',
+    icon: '🌍',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:89, sl_atr_mult:4.0, tp1_rr:3.0, tp2_rr:8.0, tp1_close_pct:0.40, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.008, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:25, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:false, liq_vacuum_guard:false, vwap_guard:false, dxy_filter:true, sentiment_filter:true, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:true, volume_filter:true, swing_structure:true, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.75, min_rr:3.0, min_session_score:0.80, max_spread_points:50, avoid_pre_news_minutes:60, avoid_post_news_minutes:45, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:false, tick_jump_atr_max:1.0, check_liq_vacuum:false, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'liquidity_sweep',
+    name: 'Liquidity Sweep',
+    description: 'SMC stop-hunt entries. Trade after liquidity grabs. BOS + FVG + liq vacuum confluence.',
+    icon: '🌀',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.6, tp1_rr:2.0, tp2_rr:3.5, tp1_close_pct:0.45, rsi_period:14, rsi_ob:72, rsi_os:28, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:22, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:true, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.70, min_rr:2.0, min_session_score:0.68, max_spread_points:45, avoid_pre_news_minutes:30, avoid_post_news_minutes:20, check_news:true, check_rsi:true, rsi_ob:72, rsi_os:28, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:1.2, check_liq_vacuum:true, liq_vacuum_spike_mult:3.0, liq_vacuum_body_pct:30, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'compression',
+    name: 'Compression',
+    description: 'Coiled spring entries. Detect tight range/low ATR then enter on first expansion.',
+    icon: '🧊',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.2, tp1_rr:2.0, tp2_rr:4.0, tp1_close_pct:0.50, rsi_period:14, rsi_ob:68, rsi_os:32, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:1.5, adx_period:14, adx_min_threshold:15, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:false, liq_vacuum_guard:false, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:false, macd_filter:false, bollinger_filter:true, adx_filter:false, volume_filter:true, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:true, alma_filter:false },
+    validation: { mode:'scalping', min_confidence:0.65, min_rr:2.0, min_session_score:0.65, max_spread_points:35, avoid_pre_news_minutes:30, avoid_post_news_minutes:15, check_news:true, check_rsi:false, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:false, tick_jump_atr_max:0.6, check_liq_vacuum:false, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:20, check_regime:true, check_setup_type:false, claude_enabled:true },
+  },
+  {
+    id: 'structure_hunter',
+    name: 'Structure Hunter',
+    description: 'BOS + FVG confluences only. Waits for clean structure breaks with imbalance fill.',
+    icon: '🧱',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:89, sl_atr_mult:1.6, tp1_rr:1.8, tp2_rr:3.5, tp1_close_pct:0.45, rsi_period:14, rsi_ob:72, rsi_os:28, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:22, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:true, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.70, min_rr:1.8, min_session_score:0.72, max_spread_points:45, avoid_pre_news_minutes:45, avoid_post_news_minutes:30, check_news:true, check_rsi:true, rsi_ob:72, rsi_os:28, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:0.9, check_liq_vacuum:true, liq_vacuum_spike_mult:2.5, liq_vacuum_body_pct:30, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'regime_aware',
+    name: 'Regime Aware',
+    description: 'Regime classifier + ADX + choppiness active. Adapts signal quality to market state.',
+    icon: '🔍',
+    assetClass: null,
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.5, tp1_rr:1.5, tp2_rr:2.5, tp1_close_pct:0.55, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:22, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:false, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:true, volume_filter:true, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:true, fast_fingers:false, choppiness_index:true, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.68, min_rr:1.5, min_session_score:0.65, max_spread_points:45, avoid_pre_news_minutes:30, avoid_post_news_minutes:20, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:false, check_tick_jump:true, tick_jump_atr_max:0.8, check_liq_vacuum:true, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'ai_adaptive',
+    name: 'AI Adaptive',
+    description: 'All detection tools ON. AI Signal mode with max context \u2014 system adapts signal to regime.',
+    icon: '🧠',
+    assetClass: null,
+    signal_mode: 'ai_signal',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.5, tp1_rr:1.5, tp2_rr:2.5, tp1_close_pct:0.55, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:20, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:true, sentiment_filter:true, risk_filter:true, correlation_guard:true, macd_filter:true, bollinger_filter:true, adx_filter:true, volume_filter:true, swing_structure:true, ema_crossover:false, rsi_feature:true, trendilo:true, fast_fingers:false, choppiness_index:true, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.65, min_rr:1.5, min_session_score:0.65, max_spread_points:50, avoid_pre_news_minutes:30, avoid_post_news_minutes:20, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:1.0, check_liq_vacuum:true, liq_vacuum_spike_mult:2.5, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'ai_signal_pro',
+    name: 'AI Signal Pro',
+    description: 'Full institutional suite for AI Signal mode. Core filters, Claude validator active.',
+    icon: '🤖',
+    assetClass: null,
+    signal_mode: 'ai_signal',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.5, tp1_rr:1.5, tp2_rr:2.5, tp1_close_pct:0.60, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:20, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:true, sentiment_filter:true, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:false, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.70, min_rr:1.5, min_session_score:0.75, max_spread_points:40, avoid_pre_news_minutes:45, avoid_post_news_minutes:30, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:0.8, check_liq_vacuum:true, liq_vacuum_spike_mult:2.5, liq_vacuum_body_pct:30, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  // \u2500\u2500 Asset-class specific \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  {
+    id: 'crypto_swing',
+    name: 'Crypto Swing',
+    description: 'BTC/ETH tuned. 24/7 market \u2014 wider SL, liq cascade awareness, no DXY or sentiment.',
+    icon: '\u20bf',
+    assetClass: 'crypto',
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:2.2, tp1_rr:1.5, tp2_rr:3.0, tp1_close_pct:0.50, rsi_period:14, rsi_ob:72, rsi_os:28, risk_pct:0.008, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.2, adx_period:14, adx_min_threshold:20, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:false, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:false, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:true, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.68, min_rr:1.5, min_session_score:0.40, max_spread_points:200, avoid_pre_news_minutes:15, avoid_post_news_minutes:10, check_news:false, check_rsi:true, rsi_ob:72, rsi_os:28, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:1.2, check_liq_vacuum:true, liq_vacuum_spike_mult:3.0, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'crypto_liquidation',
+    name: 'Crypto Liq Sweep',
+    description: 'BTC/ETH liquidation cascade plays. Trades volatility spikes, not news avoidance.',
+    icon: '\ud83d\udca5',
+    assetClass: 'crypto',
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:2.5, tp1_rr:2.0, tp2_rr:4.0, tp1_close_pct:0.45, rsi_period:14, rsi_ob:75, rsi_os:25, risk_pct:0.007, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.5, adx_period:14, adx_min_threshold:20, volume_ma_period:20 },
+    tools: { session_filter:false, news_filter:false, volatility_filter:true, ema200_filter:false, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:false, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:false, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'scalping', min_confidence:0.60, min_rr:2.0, min_session_score:0.35, max_spread_points:300, avoid_pre_news_minutes:0, avoid_post_news_minutes:0, check_news:false, check_rsi:false, rsi_ob:75, rsi_os:25, check_ema200_trend:false, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:2.0, check_liq_vacuum:true, liq_vacuum_spike_mult:3.5, liq_vacuum_body_pct:20, check_regime:false, check_setup_type:false, claude_enabled:false },
+  },
+  {
+    id: 'gold_session',
+    name: 'Gold Session',
+    description: 'XAUUSD/XAGUSD tuned. DXY + sentiment active. Strict news avoidance. London/NY only.',
+    icon: '\ud83e\udd47',
+    assetClass: 'spot_metal',
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.5, tp1_rr:1.5, tp2_rr:2.5, tp1_close_pct:0.60, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:20, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:true, liq_vacuum_guard:true, vwap_guard:true, dxy_filter:true, sentiment_filter:true, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:true, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.70, min_rr:1.5, min_session_score:0.70, max_spread_points:30, avoid_pre_news_minutes:45, avoid_post_news_minutes:30, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:true, tick_jump_atr_max:0.8, check_liq_vacuum:true, liq_vacuum_spike_mult:2.5, liq_vacuum_body_pct:30, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'fx_london',
+    name: 'FX London',
+    description: 'EUR/GBP pairs. Tight spreads, session-strict London/NY overlap, DXY correlation active.',
+    icon: '\ud83d\udcb7',
+    assetClass: 'forex_major',
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.3, tp1_rr:1.5, tp2_rr:2.5, tp1_close_pct:0.60, rsi_period:14, rsi_ob:70, rsi_os:30, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:18, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:true, tick_jump_guard:false, liq_vacuum_guard:false, vwap_guard:true, dxy_filter:true, sentiment_filter:false, risk_filter:true, correlation_guard:true, macd_filter:false, bollinger_filter:false, adx_filter:false, volume_filter:false, swing_structure:true, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.68, min_rr:1.5, min_session_score:0.72, max_spread_points:5, avoid_pre_news_minutes:30, avoid_post_news_minutes:20, check_news:true, check_rsi:true, rsi_ob:70, rsi_os:30, check_ema200_trend:true, check_bos:true, check_fvg:true, check_tick_jump:false, tick_jump_atr_max:0.8, check_liq_vacuum:false, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:true, claude_enabled:true },
+  },
+  {
+    id: 'index_trend',
+    name: 'Index Trend',
+    description: 'NAS100/US30 tuned. ADX trend filter, NY session only, no DXY. Volatility-aware.',
+    icon: '\ud83d\udcc8',
+    assetClass: 'index',
+    signal_mode: 'algo_ai',
+    params: { ema_fast:21, ema_slow:55, sl_atr_mult:1.8, tp1_rr:1.5, tp2_rr:3.0, tp1_close_pct:0.50, rsi_period:14, rsi_ob:72, rsi_os:28, risk_pct:0.01, macd_fast:12, macd_slow:26, macd_signal:9, bb_period:20, bb_std_dev:2.0, adx_period:14, adx_min_threshold:25, volume_ma_period:20 },
+    tools: { session_filter:true, news_filter:true, volatility_filter:true, ema200_filter:true, bos_guard:true, fvg_guard:false, tick_jump_guard:true, liq_vacuum_guard:false, vwap_guard:true, dxy_filter:false, sentiment_filter:false, risk_filter:true, correlation_guard:false, macd_filter:false, bollinger_filter:false, adx_filter:true, volume_filter:true, swing_structure:false, ema_crossover:false, rsi_feature:false, trendilo:false, fast_fingers:false, choppiness_index:false, alma_filter:false },
+    validation: { mode:'swing', min_confidence:0.70, min_rr:1.5, min_session_score:0.80, max_spread_points:100, avoid_pre_news_minutes:30, avoid_post_news_minutes:20, check_news:true, check_rsi:true, rsi_ob:72, rsi_os:28, check_ema200_trend:true, check_bos:true, check_fvg:false, check_tick_jump:true, tick_jump_atr_max:1.0, check_liq_vacuum:false, liq_vacuum_spike_mult:2.0, liq_vacuum_body_pct:25, check_regime:true, check_setup_type:false, claude_enabled:true },
+  },
+];
+
 let _activeSymbol = ''; // '' = all
 let _modelCatalog = []; // loaded from /api/test/models
 let _assetCatalog = []; // loaded from /api/assets
@@ -264,6 +466,7 @@ let _strategySymbolCatalog = []; // merged assets + MT5 symbols for the AI Signa
 let _detailState = null;
 let _detailOriginal = null;
 let _detailTab = 'tune';
+let _lastAppliedPresetId = null;
 
 function getSignalModesForStrategy(strategy) {
   const source = String(strategy?.source || '').trim().toLowerCase();
@@ -945,6 +1148,14 @@ export async function render(el) {
     });
   }
 
+  function getAssetClassForSymbol(symbol) {
+    const sym = (symbol || '').toUpperCase().replace(/[mM]$/, '');
+    const catalog = _strategySymbolCatalog.find(e => e.symbol === sym);
+    if (catalog?.asset_class) return catalog.asset_class;
+    const fallback = _FALLBACK_ASSETS.find(a => a.symbol === sym);
+    return fallback?.asset_class || 'unknown';
+  }
+
   function currentStrategy() {
     return _detailState || _detailOriginal || null;
   }
@@ -980,7 +1191,8 @@ export async function render(el) {
       .then(data => {
         _detailState = data;
         _detailOriginal = JSON.parse(JSON.stringify(data));
-        _detailTab = 'tune';
+        _detailTab = 'presets';
+        _lastAppliedPresetId = null;
         renderDetailShell();
       })
       .catch(err => showToast(`Failed to load detail: ${err.message}`, 'error'));
@@ -1018,6 +1230,7 @@ export async function render(el) {
       if (el) el.checked = !!value;
       if (current && current.tools) current.tools[key] = !!value;
     });
+    _detailTab = 'tools';
     renderDetailShell();
   }
 
@@ -1050,11 +1263,27 @@ export async function render(el) {
     renderDetailShell();
   }
 
+  function applyFullPreset(presetId) {
+    const preset = FULL_PRESETS.find(p => p.id === presetId);
+    if (!preset) return;
+    const current = currentStrategy();
+    if (!current) return;
+    const allowedModes = getSignalModesForStrategy(current).map(([m]) => m);
+    if (allowedModes.includes(preset.signal_mode)) current.signal_mode = preset.signal_mode;
+    current.params     = { ...(current.params     || {}), ...preset.params };
+    current.tools      = { ...(current.tools      || {}), ...preset.tools };
+    current.validation = { ...(current.validation || {}), ...preset.validation };
+    _lastAppliedPresetId = presetId;
+    _detailTab = 'presets';
+    renderDetailShell();
+  }
+
   const TAB_ICONS = {
-    tune: '\u2699',       // gear
-    tools: '\u{1F527}',    // wrench
-    validation: '\u{1F6E1}', // shield
-    signal: '\u26A1',     // bolt
+    presets: '\u{1F3AF}',
+    tune: '\u2699',
+    tools: '\u{1F527}',
+    validation: '\u{1F6E1}',
+    signal: '\u{1F4E1}',
   };
 
   const VALIDATION_BOOL_ICONS = {
@@ -1093,6 +1322,69 @@ export async function render(el) {
     fast_fingers: '\u{1F446}', choppiness_index: '\u{1F32A}', alma_filter: '\u{1F52E}',
     tick_jump_guard: '\u26A0', liq_vacuum_guard: '\u{1F300}',
   };
+
+  function renderPresetsTab(strat) {
+    const assetClass = getAssetClassForSymbol(strat.symbol);
+    const assetClassLabels = { spot_metal:'Gold/Silver', crypto:'Crypto', forex_major:'Forex', index:'Index' };
+    const assetClassColors = { spot_metal:'#f59e0b', crypto:'#3b82f6', forex_major:'#22c55e', index:'#8b5cf6' };
+    const modeColors      = { ai_signal:'var(--primary)', algo_ai:'var(--blue)', algo_only:'#8b5cf6' };
+    const modeLabels      = { ai_signal:'AI Signal', algo_ai:'Algo+AI', algo_only:'Algo Only' };
+    const chip = (text, bg) =>
+      `<span style="display:inline-flex;align-items:center;font-size:9px;font-weight:700;padding:2px 7px;border-radius:9999px;background:${bg};color:#fff;white-space:nowrap">${escapeHtml(text)}</span>`;
+
+    const renderCard = (preset) => {
+      const isMatch   = preset.assetClass !== null && preset.assetClass === assetClass;
+      const isApplied = preset.id === _lastAppliedPresetId;
+      const toolCount = Object.values(preset.tools).filter(Boolean).length;
+      const border    = isApplied ? '2px solid var(--green)' : isMatch ? '1px solid var(--primary)' : '1px solid var(--border)';
+      const bg        = isApplied ? 'rgba(34,197,94,0.08)' : isMatch ? 'rgba(239,159,39,0.06)' : 'var(--bg2)';
+      const chips = [
+        chip(modeLabels[preset.signal_mode] || preset.signal_mode, modeColors[preset.signal_mode] || '#6b7280'),
+        chip(`${toolCount} tools`, '#4b5563'),
+        chip(preset.validation.mode, '#374151'),
+        preset.assetClass ? chip(assetClassLabels[preset.assetClass] || preset.assetClass, assetClassColors[preset.assetClass] || '#6b7280') : chip('Universal', '#6b7280'),
+      ].join('&nbsp;');
+      return `
+        <div style="border:${border};background:${bg};border-radius:12px;padding:14px 16px;position:relative;cursor:pointer;transition:box-shadow .12s"
+             class="preset-full-card" data-preset-id="${escapeHtml(preset.id)}">
+          ${isMatch && !isApplied ? `<div style="position:absolute;top:9px;right:11px;font-size:9px;font-weight:800;color:var(--primary);text-transform:uppercase;letter-spacing:.06em">Recommended</div>` : ''}
+          ${isApplied ? `<div style="position:absolute;top:9px;right:11px;font-size:9px;font-weight:800;color:var(--green);text-transform:uppercase;letter-spacing:.06em">\u2713 Applied</div>` : ''}
+          <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px">
+            <span style="font-size:20px;line-height:1.2;flex-shrink:0">${preset.icon}</span>
+            <div>
+              <div style="font-size:13px;font-weight:700;color:var(--text)">${escapeHtml(preset.name)}</div>
+              <div style="font-size:10px;color:var(--muted);margin-top:2px;line-height:1.4">${escapeHtml(preset.description)}</div>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">${chips}</div>
+          <button class="btn btn-sm ${isApplied ? '' : 'btn-primary'} preset-apply-btn"
+                  data-preset-id="${escapeHtml(preset.id)}"
+                  style="width:100%;font-size:11px;padding:6px 0;${isApplied ? 'background:var(--green);color:#fff;border-color:var(--green)' : ''}">
+            ${isApplied ? '\u2713 Applied' : '\u26a1 Apply Preset'}
+          </button>
+        </div>`;
+    };
+
+    const section = (title, color, presets) => {
+      if (!presets.length) return '';
+      return `
+        <div class="sd-section">
+          <div class="sd-section-title" style="color:${color}">${escapeHtml(title)}</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px">
+            ${presets.map(renderCard).join('')}
+          </div>
+        </div>`;
+    };
+
+    const matchLabel = assetClassLabels[assetClass] ? `\ud83c\udfaf Recommended for ${assetClassLabels[assetClass]}` : '\ud83c\udfaf Recommended';
+    const matched    = FULL_PRESETS.filter(p => p.assetClass === assetClass);
+    const universal  = FULL_PRESETS.filter(p => p.assetClass === null);
+    const others     = FULL_PRESETS.filter(p => p.assetClass !== null && p.assetClass !== assetClass);
+
+    return (matched.length ? section(matchLabel, 'var(--primary)', matched) : '')
+      + section('\u26a1 Universal', 'var(--blue)', universal)
+      + (others.length ? section('\ud83d\udce6 Other Asset Classes', 'var(--muted)', others) : '');
+  }
 
   function renderDetailShell() {
     const shell = document.getElementById('strategy-detail-shell');
@@ -1158,7 +1450,6 @@ export async function render(el) {
         <div class="sd-tool-group">
           <div class="sd-tool-group-header" style="color:${group.color}">
             <span>${group.label}</span>
-            ${group.key === 'pre_signal' ? '<button class="btn btn-sm detail-preset-v1 sd-preset-btn" style="font-size:10px;padding:3px 8px">V1 Exact</button>' : ''}
           </div>
           ${group.tools.map(name => {
             const on = tools[name] !== false;
@@ -1181,16 +1472,6 @@ export async function render(el) {
 
     /* ── Validation tab ── */
     const validationHtml = `
-      <div class="sd-section">
-        <div class="sd-section-title">
-          <span class="sd-sec-icon">\u{1F3AF}</span> Mode Preset
-        </div>
-        <div class="sd-mode-bar">
-          <button class="sd-mode-btn detail-validation-preset ${validationMode === 'scalping' ? 'active' : ''}" data-preset="scalping">\u26A1 Scalping</button>
-          <button class="sd-mode-btn detail-validation-preset ${validationMode === 'swing' ? 'active' : ''}" data-preset="swing">\u{1F4C8} Swing</button>
-        </div>
-      </div>
-
       <div class="sd-section">
         <div class="sd-section-title">
           <span class="sd-sec-icon">\u{1F916}</span> Validator Model
@@ -1353,7 +1634,9 @@ export async function render(el) {
       </div>
     `;
 
+    const presetsHtml = renderPresetsTab(strat);
     const content = {
+      presets: presetsHtml,
       tune,
       tools: toolsHtml,
       validation: validationHtml,
@@ -1373,16 +1656,6 @@ export async function render(el) {
         <button class="sd-close" id="detail-close" title="Close">\u2715</button>
       </div>
       <div class="sd-tabs">${tabs}</div>
-      <div class="sd-presets">
-        ${strat.signal_mode === 'ai_signal' ? `
-          <button class="sd-preset-btn accent detail-preset-global" data-preset="ai_signal_default">\u{1F916} AI Signal Defaults</button>
-        ` : `
-          <button class="sd-preset-btn accent detail-preset-global" data-preset="v1_exact">\u{1F4CC} V1 Exact</button>
-          <button class="sd-preset-btn accent-green detail-preset-global" data-preset="balanced">\u2696 Balanced</button>
-          <button class="sd-preset-btn accent-amber detail-preset-global" data-preset="aggressive">\u{1F525} Aggressive</button>
-        `}
-        <div class="spacer"></div>
-      </div>
       <div class="sd-body">${content}</div>
       <div class="sd-footer">
         <button class="btn btn-sm" id="detail-reset" style="background:var(--bg3);border:1px solid var(--border)">\u21BA Reset</button>
@@ -1416,14 +1689,11 @@ export async function render(el) {
         renderDetailShell();
       });
     });
-    document.querySelectorAll('.detail-preset-global').forEach(btn => {
-      btn.addEventListener('click', () => applyToolPreset(btn.dataset.preset || 'balanced'));
-    });
-    document.querySelectorAll('.detail-preset-v1').forEach(btn => {
-      btn.addEventListener('click', () => applyToolPreset('v1_exact'));
-    });
-    document.querySelectorAll('.detail-validation-preset').forEach(btn => {
-      btn.addEventListener('click', () => applyValidationPreset(btn.dataset.preset || 'swing'));
+    document.querySelectorAll('.preset-apply-btn, .preset-full-card').forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        applyFullPreset(el.dataset.presetId);
+      });
     });
     document.querySelectorAll('.detail-signal-mode').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -1566,7 +1836,18 @@ export async function render(el) {
     const strat = currentStrategy();
     const params = {};
     DETAIL_TUNE_FIELDS.forEach(field => {
-      params[field.key] = readNum(detailId('tune-num', field.key), field.min);
+      const el = document.getElementById(detailId('tune-num', field.key));
+      if (el) {
+        // Tune tab is active — read live from DOM
+        const value = parseFloat(el.value);
+        params[field.key] = Number.isFinite(value) ? value : field.min;
+      } else {
+        // Tune tab not rendered — preserve in-memory state, fall back to field.min
+        const stored = strat?.params?.[field.key];
+        params[field.key] = (stored !== undefined && stored !== null && Number.isFinite(Number(stored)))
+          ? Number(stored)
+          : field.min;
+      }
     });
     // Always preserve signal_rules and signal_logic (edited on Signal tab)
     params.signal_rules = strat?.params?.signal_rules || [{ source: 'ema_crossover' }];
@@ -1576,22 +1857,48 @@ export async function render(el) {
 
   function readToolsSection() {
     const tools = {};
+    const strat = currentStrategy();
     DETAIL_TOOL_GROUPS.forEach(group => {
       group.tools.forEach(name => {
-        tools[name] = readBool(detailId('tool', name), true);
+        const el = document.getElementById(detailId('tool', name));
+        if (el) {
+          // Tools tab is active — read live from DOM
+          tools[name] = el.checked;
+        } else {
+          // Tools tab not rendered — preserve in-memory state, default to true for unknown tools
+          tools[name] = strat?.tools?.[name] !== false;
+        }
       });
     });
     return tools;
   }
 
   function readValidationSection() {
+    const strat = currentStrategy();
     const validation = {};
-    validation.mode = document.querySelector('input[name="validation-mode"]:checked')?.value || 'swing';
+    // mode: read from DOM if available, else preserve in-memory
+    const modeEl = document.querySelector('input[name="validation-mode"]:checked');
+    validation.mode = modeEl ? modeEl.value : (strat?.validation?.mode || 'swing');
     DETAIL_VALIDATION_FIELDS.forEach(field => {
-      validation[field.key] = readNum(detailId('validation-num', field.key), field.min);
+      const el = document.getElementById(detailId('validation-num', field.key));
+      if (el) {
+        const value = parseFloat(el.value);
+        validation[field.key] = Number.isFinite(value) ? value : field.min;
+      } else {
+        const stored = strat?.validation?.[field.key];
+        validation[field.key] = (stored !== undefined && stored !== null && Number.isFinite(Number(stored)))
+          ? Number(stored)
+          : field.min;
+      }
     });
     ['check_news','check_rsi','check_ema200_trend','check_bos','check_fvg','check_tick_jump','check_liq_vacuum','check_regime','check_setup_type','claude_enabled'].forEach(key => {
-      validation[key] = readBool(detailId('validation-bool', key), true);
+      const el = document.getElementById(detailId('validation-bool', key));
+      if (el) {
+        validation[key] = !!el.checked;
+      } else {
+        // Validation tab not rendered — preserve in-memory state, default true
+        validation[key] = strat?.validation?.[key] !== false;
+      }
     });
     return validation;
   }

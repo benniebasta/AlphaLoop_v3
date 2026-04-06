@@ -90,3 +90,23 @@ async def test_preflight_allows_dry_run_without_journal():
     assert approval.order_id
     assert approval.client_order_id
     assert not approval.order_intent_persisted
+
+
+def test_client_order_id_normalizes_setup_aliases():
+    continuation_signal = _signal()
+    continuation_signal.setup_type = "continuation"
+    alias_signal = _signal()
+    alias_signal.setup_type = "momentum_expansion"
+
+    canonical = InstitutionalControlPlane._build_client_order_id(
+        symbol="XAUUSD",
+        signal=continuation_signal,
+        strategy_id="XAUUSD.v4",
+    )
+    alias = InstitutionalControlPlane._build_client_order_id(
+        symbol="XAUUSD",
+        signal=alias_signal,
+        strategy_id="XAUUSD.v4",
+    )
+
+    assert canonical == alias

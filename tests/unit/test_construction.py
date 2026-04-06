@@ -204,6 +204,14 @@ class TestValidConstruction:
         assert result.signal is not None
         assert result.signal.rr_ratio >= 1.5
 
+    def test_strategy_family_alias_normalizes_to_pipeline_setup_type(self):
+        tc = _make_constructor()
+        hyp = _make_hypothesis("BUY", setup="momentum_expansion")
+        indicators = _make_indicators(swing_lows=[{"index": 10, "price": 2730.0}])
+        result = tc.construct(hyp, bid=2750.0, ask=2750.5, indicators=indicators, atr=10.0)
+        assert result.signal is not None
+        assert result.signal.setup_type == "continuation"
+
 
 # ── SELL side ─────────────────────────────────────────────────────────────────
 

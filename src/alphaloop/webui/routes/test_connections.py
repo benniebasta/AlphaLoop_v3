@@ -3,15 +3,46 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.webui.deps import get_config, get_db_session
 
 router = APIRouter(prefix="/api/test", tags=["test"])
 logger = logging.getLogger(__name__)
+
+
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for connection-test actions when AUTH_TOKEN is configured."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+async def _record_operator_audit(
+    session: AsyncSession,
+    *,
+    request: Request | None,
+    target: str,
+    payload: dict,
+) -> None:
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="connection_test",
+        target=target,
+        old_value=None,
+        new_value=json.dumps(payload, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
+    await session.commit()
 
 
 async def _load_mt5_settings(session: AsyncSession) -> dict[str, str]:
@@ -146,8 +177,13 @@ async def list_models(
 
 
 @router.post("/mt5")
-async def test_mt5(session: AsyncSession = Depends(get_db_session)) -> dict:
+async def test_mt5(
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Test MetaTrader 5 connection using stored credentials."""
+    _require_operator_auth(authorization)
     settings = await _load_mt5_settings(session)
     server = settings["server"]
     login = settings["login"]
@@ -191,9 +227,22 @@ async def test_mt5(session: AsyncSession = Depends(get_db_session)) -> dict:
 
     try:
         result = await asyncio.to_thread(_test)
+        await _record_operator_audit(
+            session,
+            request=request,
+            target="mt5",
+            payload=result,
+        )
         return result
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        result = {"success": False, "message": str(e)}
+        await _record_operator_audit(
+            session,
+            request=request,
+            target="mt5",
+            payload=result,
+        )
+        return result
 
 
 @router.get("/mt5/symbols")
@@ -287,8 +336,13 @@ async def list_mt5_symbols(session: AsyncSession = Depends(get_db_session)) -> d
 
 
 @router.post("/telegram")
-async def test_telegram(session: AsyncSession = Depends(get_db_session)) -> dict:
+async def test_telegram(
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Send a test message via Telegram."""
+    _require_operator_auth(authorization)
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
 
@@ -318,19 +372,36 @@ async def test_telegram(session: AsyncSession = Depends(get_db_session)) -> dict
             )
             data = resp.json()
             if data.get("ok"):
-                return {"success": True, "message": f"Message sent to chat {chat_id}"}
+                result = {"success": True, "message": f"Message sent to chat {chat_id}"}
             else:
-                return {"success": False, "message": data.get("description", "Telegram API error")}
+                result = {"success": False, "message": data.get("description", "Telegram API error")}
+            await _record_operator_audit(
+                session,
+                request=request,
+                target="telegram",
+                payload=result,
+            )
+            return result
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        result = {"success": False, "message": str(e)}
+        await _record_operator_audit(
+            session,
+            request=request,
+            target="telegram",
+            payload=result,
+        )
+        return result
 
 
 @router.post("/ollama")
 async def test_ollama(
     body: dict,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Test Ollama local endpoint connectivity."""
+    _require_operator_auth(authorization)
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
 
@@ -343,18 +414,43 @@ async def test_ollama(
             if resp.status_code == 200:
                 data = resp.json()
                 models = [m.get("name", "?") for m in data.get("models", [])]
+                result = {"success": True, "message": f"Ollama OK - {len(models)} models: {', '.join(models[:5])}"}
+                await _record_operator_audit(
+                    session,
+                    request=request,
+                    target="ollama",
+                    payload=result,
+                )
+                return result
                 return {"success": True, "message": f"Ollama OK — {len(models)} models: {', '.join(models[:5])}"}
-            return {"success": False, "message": f"Ollama responded {resp.status_code}"}
+            result = {"success": False, "message": f"Ollama responded {resp.status_code}"}
+            await _record_operator_audit(
+                session,
+                request=request,
+                target="ollama",
+                payload=result,
+            )
+            return result
     except Exception as e:
-        return {"success": False, "message": f"Cannot reach Ollama at {base_url}: {e}"}
+        result = {"success": False, "message": f"Cannot reach Ollama at {base_url}: {e}"}
+        await _record_operator_audit(
+            session,
+            request=request,
+            target="ollama",
+            payload=result,
+        )
+        return result
 
 
 @router.post("/ai-key")
 async def test_ai_key(
     body: dict,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Test a specific AI provider + model by sending a simple prompt."""
+    _require_operator_auth(authorization)
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
 
@@ -389,22 +485,52 @@ async def test_ai_key(
         response = await caller.call_model(
             model,
             messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-            max_tokens=10, temperature=0, timeout=15.0, max_retries=0,
+            max_tokens=100, temperature=0, timeout=15.0, max_retries=0,
+            response_mime_type="text/plain", thinking_budget=0,
         )
-        return {"success": True, "message": f"{provider}/{model}: {response.strip()[:50]}"}
+        result = {"success": True, "message": f"{provider}/{model}: {response.strip()[:50]}"}
+        await _record_operator_audit(
+            session,
+            request=request,
+            target=f"ai-key:{provider}",
+            payload=result,
+        )
+        return result
     except Exception as e:
-        return {"success": False, "message": f"{provider}/{model}: {e}"}
+        result = {"success": False, "message": f"{provider}/{model}: {e}"}
+        await _record_operator_audit(
+            session,
+            request=request,
+            target=f"ai-key:{provider}",
+            payload=result,
+        )
+        return result
 
 
 @router.post("/news")
-async def test_news(session: AsyncSession = Depends(get_db_session)) -> dict:
+async def test_news(
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Test the configured news provider, falling back to ForexFactory."""
+    _require_operator_auth(authorization)
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     from alphaloop.utils.crypto import decrypt_value
     import httpx
 
     repo = SettingsRepository(session)
     provider = (await repo.get("NEWS_PROVIDER") or "forexfactory").lower()
+    audit_target = f"news:{provider}"
+
+    async def _audit(result: dict) -> dict:
+        await _record_operator_audit(
+            session,
+            request=request,
+            target=audit_target,
+            payload=result,
+        )
+        return result
 
     def _get_key(raw: str) -> str:
         if not raw:
@@ -420,7 +546,7 @@ async def test_news(session: AsyncSession = Depends(get_db_session)) -> dict:
     # Test primary provider
     if provider == "finnhub":
         if not finnhub_key:
-            return {"success": False, "message": "Finnhub selected but no API key set"}
+            return await _audit({"success": False, "message": "Finnhub selected but no API key set"})
         try:
             from datetime import datetime, timedelta, timezone
             now = datetime.now(timezone.utc)
@@ -434,15 +560,18 @@ async def test_news(session: AsyncSession = Depends(get_db_session)) -> dict:
             if isinstance(data, dict) and "economicCalendar" in data:
                 events = data["economicCalendar"]
                 high = sum(1 for e in events if (e.get("impact") or "").lower() == "high")
+                return await _audit({"success": True, "message": f"Finnhub OK - {len(events)} events next 7 days ({high} HIGH impact)"})
                 return {"success": True, "message": f"Finnhub OK — {len(events)} events next 7 days ({high} HIGH impact)"}
             err = data.get("error", str(data)[:80]) if isinstance(data, dict) else str(data)[:80]
+            return await _audit({"success": False, "message": f"Finnhub: {err} - falling back to ForexFactory"})
             return {"success": False, "message": f"Finnhub: {err} — falling back to ForexFactory"}
         except Exception as e:
+            return await _audit({"success": False, "message": f"Finnhub failed: {e} - falling back to ForexFactory"})
             return {"success": False, "message": f"Finnhub failed: {e} — falling back to ForexFactory"}
 
     elif provider == "fmp":
         if not fmp_key:
-            return {"success": False, "message": "FMP selected but no API key set"}
+            return await _audit({"success": False, "message": "FMP selected but no API key set"})
         try:
             from datetime import datetime, timedelta, timezone
             now = datetime.now(timezone.utc)
@@ -455,10 +584,13 @@ async def test_news(session: AsyncSession = Depends(get_db_session)) -> dict:
                 data = resp.json()
             if isinstance(data, list):
                 high = sum(1 for e in data if (e.get("impact") or "").upper() == "HIGH")
+                return await _audit({"success": True, "message": f"FMP OK - {len(data)} events next 7 days ({high} HIGH impact)"})
                 return {"success": True, "message": f"FMP OK — {len(data)} events next 7 days ({high} HIGH impact)"}
             err = data.get("Error Message") or data.get("message") or str(data)[:80]
+            return await _audit({"success": False, "message": f"FMP: {err} - falling back to ForexFactory"})
             return {"success": False, "message": f"FMP: {err} — falling back to ForexFactory"}
         except Exception as e:
+            return await _audit({"success": False, "message": f"FMP failed: {e} - falling back to ForexFactory"})
             return {"success": False, "message": f"FMP failed: {e} — falling back to ForexFactory"}
 
     # ForexFactory (default)
@@ -468,16 +600,22 @@ async def test_news(session: AsyncSession = Depends(get_db_session)) -> dict:
             resp.raise_for_status()
             events = resp.json()
         if not isinstance(events, list):
-            return {"success": False, "message": f"Unexpected FF response: {str(events)[:80]}"}
+            return await _audit({"success": False, "message": f"Unexpected FF response: {str(events)[:80]}"})
         high = sum(1 for e in events if (e.get("impact") or "").lower() == "high")
+        return await _audit({"success": True, "message": f"ForexFactory OK - {len(events)} events this week ({high} HIGH impact)"})
         return {"success": True, "message": f"ForexFactory OK — {len(events)} events this week ({high} HIGH impact)"}
     except Exception as e:
-        return {"success": False, "message": f"ForexFactory feed failed: {e}"}
+        return await _audit({"success": False, "message": f"ForexFactory feed failed: {e}"})
 
 
 @router.post("/ai")
-async def test_ai(session: AsyncSession = Depends(get_db_session)) -> dict:
+async def test_ai(
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Test AI model connection by sending a simple prompt."""
+    _require_operator_auth(authorization)
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
 
@@ -513,14 +651,30 @@ async def test_ai(session: AsyncSession = Depends(get_db_session)) -> dict:
         response = await caller.call_model(
             model,
             messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-            max_tokens=10,
+            max_tokens=100,
             temperature=0,
             timeout=15.0,
             max_retries=0,
+            response_mime_type="text/plain",
+            thinking_budget=0,
         )
-        return {
+        result = {
             "success": True,
             "message": f"{provider}/{model} responded: {response.strip()[:50]}",
         }
+        await _record_operator_audit(
+            session,
+            request=request,
+            target=f"ai:{provider}",
+            payload=result,
+        )
+        return result
     except Exception as e:
-        return {"success": False, "message": f"{provider}/{model}: {e}"}
+        result = {"success": False, "message": f"{provider}/{model}: {e}"}
+        await _record_operator_audit(
+            session,
+            request=request,
+            target=f"ai:{provider}",
+            payload=result,
+        )
+        return result

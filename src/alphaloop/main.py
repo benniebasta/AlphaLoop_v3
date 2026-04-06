@@ -8,10 +8,98 @@ import asyncio
 import logging
 import signal
 import uuid
+from datetime import timezone
 
 from alphaloop import __version__
 
 logger = logging.getLogger(__name__)
+
+
+def _reconciliation_payload(report, *, stage: str) -> dict:
+    """Serialize a reconciliation report for incidents and telemetry."""
+    return {
+        "stage": stage,
+        "reconciled": report.reconciled,
+        "has_critical": report.has_critical,
+        "issue_count": report.issue_count,
+        "broker_positions": report.broker_positions,
+        "db_open_trades": report.db_open_trades,
+        "issues": [
+            {
+                "ticket": issue.ticket,
+                "symbol": issue.symbol,
+                "issue_type": issue.issue_type,
+                "description": issue.description,
+                "severity": issue.severity,
+                "auto_resolved": issue.auto_resolved,
+            }
+            for issue in report.issues
+        ],
+    }
+
+
+async def _trip_reconciliation_kill_switch(
+    risk_monitor,
+    reason: str,
+    *,
+    record_incident,
+    incident_type: str,
+    details: str,
+    no_new_risk_reason: str | None = None,
+    payload: dict | None = None,
+) -> None:
+    """Fail closed when reconciliation becomes unsafe."""
+    if risk_monitor is not None:
+        if hasattr(risk_monitor, "activate_no_new_risk"):
+            risk_reason = no_new_risk_reason or incident_type
+            risk_monitor.activate_no_new_risk(risk_reason)
+        risk_monitor.activate_kill_switch(reason)
+    await record_incident(
+        incident_type,
+        details,
+        severity="critical",
+        payload=payload or {},
+    )
+
+
+async def _run_pipeline_retention_cycle(
+    session_factory,
+    *,
+    retention_days: int = 30,
+    batch_size: int = 500,
+    record_event=None,
+    retention_service=None,
+) -> dict:
+    """Run one pipeline-journey retention cycle with migration-safe skipping."""
+    from alphaloop.supervision.pipeline_retention import PipelineJourneyRetentionService
+
+    service = retention_service or PipelineJourneyRetentionService(session_factory)
+    report = await service.archive_expired_decisions(
+        retention_days=retention_days,
+        batch_size=batch_size,
+    )
+    payload = {
+        "cutoff": report.cutoff.astimezone(timezone.utc).isoformat(),
+        "archived_count": report.archived_count,
+        "purged_count": report.purged_count,
+        "skipped": report.skipped,
+        "skip_reason": report.skip_reason,
+    }
+    if record_event is not None:
+        severity = "warning" if report.skipped else "info"
+        message = (
+            report.skip_reason
+            if report.skipped
+            else f"Archived {report.archived_count} pipeline decisions"
+        )
+        await record_event(
+            "maintenance",
+            "pipeline_retention_cycle_completed",
+            message,
+            severity=severity,
+            payload=payload,
+        )
+    return payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,12 +143,12 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Risk budget multiplier 0.0-1.0 (default: 1.0 = full budget)",
     )
-    # ── Phase 0: Remediation containment flags ───────────────────────────────
+    # Live-start gating flags.
     parser.add_argument(
         "--allow-v4-live",
         action="store_true",
         default=False,
-        help="Allow v4 execution path in live mode (default: False — forces dry-run)",
+        help="Allow live execution without forcing dry-run (default: False)",
     )
     parser.add_argument(
         "--force-start",
@@ -107,13 +195,13 @@ async def main_async() -> None:
     dry_run = not args.live
     instance_id = args.instance_id or f"{args.symbol}_{uuid.uuid4().hex[:8]}"
 
-    _recon_report = None  # Phase 3E: initialized here so manifest can reference it
+    _recon_report = None  # initialized here so manifest can reference it
 
-    # ── Phase 0A: v4 live containment ────────────────────────────────────────
+    # Live startup remains explicitly gated unless the operator opts in.
     if args.live and not args.allow_v4_live:
         logger.critical(
-            "[DEGRADED] Operator requested --live but v4 execution path is under "
-            "remediation. Forcing dry-run. Use --allow-v4-live to override."
+            "[DEGRADED] Operator requested --live but live execution remains "
+            "explicitly gated. Forcing dry-run. Use --allow-v4-live to override."
         )
         dry_run = True
     # ─────────────────────────────────────────────────────────────────────────
@@ -207,7 +295,7 @@ async def main_async() -> None:
     # Always connect to MT5 for price data — dry_run only skips trade execution
     await executor.connect()
 
-    # ── Phase 0D: Verify broker identity on live startup ─────────────────────
+    # Verify broker identity on live startup.
     if not dry_run and (args.expected_account or args.expected_server):
         id_ok, id_err = await executor.verify_identity(
             expected_account=args.expected_account,
@@ -243,7 +331,80 @@ async def main_async() -> None:
     # ─────────────────────────────────────────────────────────────────────────
 
     if not dry_run:
-        # ── Phase 0B: Reconcile broker positions — fail closed on critical ───
+        # Recover startup orders and fail closed on unresolved state.
+        from alphaloop.db.repositories.order_repo import OrderRepository
+        from alphaloop.execution.recovery import OrderRecoveryWorker
+
+        _recovery_report = None
+        try:
+            async with container.db_session_factory() as _recovery_session:
+                order_repo = OrderRepository(_recovery_session)
+                recovery_worker = OrderRecoveryWorker(
+                    executor=executor,
+                    order_repo=order_repo,
+                )
+                _recovery_report = await recovery_worker.recover_startup_orders(
+                    instance_id=instance_id
+                )
+        except Exception as recovery_exc:
+            await _record_incident(
+                "order_recovery_block",
+                f"Startup order recovery failed: {recovery_exc}",
+                payload={"stage": "startup", "reason": "exception"},
+            )
+            logger.critical(
+                "Startup order recovery FAILED with exception: %s", recovery_exc,
+            )
+            raise SystemExit(1)
+
+        if _recovery_report is not None and _recovery_report.total_orders:
+            _recovery_payload = _recovery_report.to_payload(stage="startup")
+            await _record_event(
+                "recovery",
+                "startup_order_recovery_completed",
+                "Startup order recovery completed",
+                severity="warning" if _recovery_report.issues else "info",
+                payload=_recovery_payload,
+            )
+            if _recovery_report.has_critical:
+                await _record_incident(
+                    "order_recovery_block",
+                    "Startup order recovery found unresolved orders",
+                    payload=_recovery_payload,
+                )
+                logger.critical(
+                    "Startup order recovery found unresolved orders: %s",
+                    [
+                        issue.description
+                        for issue in _recovery_report.issues
+                        if issue.severity == "critical"
+                    ],
+                )
+                if args.force_start:
+                    import os as _os_or
+
+                    _operator = args.operator or _os_or.environ.get(
+                        "USER", _os_or.environ.get("USERNAME", "unknown")
+                    )
+                    if not args.force_reason:
+                        logger.critical(
+                            "[BLOCKED] --force-start requires --force-reason. Exiting."
+                        )
+                        raise SystemExit(1)
+                    logger.critical(
+                        "[FORCE START ACTIVE] Operator: %s, Reason: %s — "
+                        "proceeding despite unresolved startup orders",
+                        _operator,
+                        args.force_reason,
+                    )
+                else:
+                    logger.critical(
+                        "Live startup BLOCKED — unresolved startup orders require "
+                        "manual review or recovery."
+                    )
+                    raise SystemExit(1)
+
+        # Reconcile broker positions and fail closed on critical drift.
         from alphaloop.execution.reconciler import PositionReconciler
         from alphaloop.db.repositories.trade_repo import TradeRepository
 
@@ -273,7 +434,7 @@ async def main_async() -> None:
                     "proceeding despite reconciliation failure",
                     _operator, args.force_reason,
                 )
-                # Phase 3A: Persist force-start to operator audit log
+                # Persist force-start to the operator audit log.
                 try:
                     from alphaloop.db.models.operator_audit import OperatorAuditLog
                     async with container.db_session_factory() as _fs_sess:
@@ -302,25 +463,7 @@ async def main_async() -> None:
                 raise SystemExit(1)
 
         if _recon_report is not None:
-            _recon_payload = {
-                "stage": "startup",
-                "reconciled": _recon_report.reconciled,
-                "has_critical": _recon_report.has_critical,
-                "issue_count": _recon_report.issue_count,
-                "broker_positions": _recon_report.broker_positions,
-                "db_open_trades": _recon_report.db_open_trades,
-                "issues": [
-                    {
-                        "ticket": issue.ticket,
-                        "symbol": issue.symbol,
-                        "issue_type": issue.issue_type,
-                        "description": issue.description,
-                        "severity": issue.severity,
-                        "auto_resolved": issue.auto_resolved,
-                    }
-                    for issue in _recon_report.issues
-                ],
-            }
+            _recon_payload = _reconciliation_payload(_recon_report, stage="startup")
             await _record_event(
                 "reconciliation",
                 "startup_reconciliation_completed",
@@ -349,7 +492,7 @@ async def main_async() -> None:
                         "proceeding despite critical reconciliation issues",
                         _operator, args.force_reason,
                     )
-                    # Phase 3A: Persist force-start to operator audit log
+                    # Persist force-start to the operator audit log.
                     try:
                         from alphaloop.db.models.operator_audit import OperatorAuditLog
                         _issues_summary = "; ".join(
@@ -382,7 +525,7 @@ async def main_async() -> None:
                 logger.info("Startup reconciliation: no discrepancies found")
         # ─────────────────────────────────────────────────────────────────────
 
-    # ── Phase 3D: Lease-based single-writer execution lock ─────────────────
+    # Lease-based single-writer execution lock.
     _lock_heartbeat_task = None
     _scope_key = "n/a"
     if not dry_run:
@@ -452,7 +595,7 @@ async def main_async() -> None:
     balance = await executor.get_account_balance()
     sizer = PositionSizer(balance, symbol=args.symbol)
     risk_monitor = RiskMonitor(balance, budget_multiplier=args.risk_budget)
-    # ── Phase 3B: Seed risk monitor from DB with trade_repo ────────────────
+    # Seed the risk monitor from DB state and repositories.
     async with container.db_session_factory() as _seed_session:
         from alphaloop.db.repositories.trade_repo import TradeRepository
         _seed_repo = TradeRepository(_seed_session)
@@ -587,7 +730,7 @@ async def main_async() -> None:
     except Exception as _regime_wire_err:
         logger.warning("[startup] Could not wire regime state callback: %s", _regime_wire_err)
 
-    # ── Phase 3E: Runtime capability manifest ──────────────────────────────
+    # Runtime capability manifest.
     _mode = "dry-run"
     if args.live and not dry_run and args.force_start:
         _mode = "live (FORCE START)"
@@ -619,7 +762,7 @@ async def main_async() -> None:
     )
     logger.info("[startup-manifest-json] %s", _manifest_json.dumps(_manifest))
 
-    # Phase 3E: Publish manifest to event bus
+    # Publish the runtime capability manifest to the event bus.
     try:
         from alphaloop.core.events import CycleStarted  # reuse as lightweight event
         from dataclasses import dataclass as _dc_manifest
@@ -788,7 +931,7 @@ async def main_async() -> None:
             _webui_ingest, data=payload,
             headers=headers, method="POST",
         )
-        urllib.request.urlopen(req, timeout=1)
+        urllib.request.urlopen(req, timeout=3)
 
     async def _bridge_event(event) -> None:
         try:
@@ -820,6 +963,7 @@ async def main_async() -> None:
 
     # H-03: Background reconciliation task — runs every 15 minutes in live mode
     _bg_recon_task = None
+    _bg_retention_task = None
     if not dry_run:
         async def _bg_reconcile():
             """Periodic reconciliation to detect orphaned positions."""
@@ -838,29 +982,114 @@ async def main_async() -> None:
                             instance_id=instance_id
                         )
                     if _bg_report.has_critical:
+                        _bg_payload = _reconciliation_payload(_bg_report, stage="background")
                         logger.critical(
                             "[recon-bg] Critical discrepancy found: %d issues",
                             _bg_report.issue_count,
                         )
-                        await _record_incident(
-                            "bg_reconciliation_critical",
-                            f"Background reconciliation found {_bg_report.issue_count} critical issues",
+                        await _record_event(
+                            "reconciliation",
+                            "background_reconciliation_completed",
+                            "Background reconciliation found critical issues",
                             severity="critical",
+                            payload=_bg_payload,
+                        )
+                        await _trip_reconciliation_kill_switch(
+                            risk_monitor,
+                            "Background reconciliation found critical issues",
+                            record_incident=_record_incident,
+                            incident_type="bg_reconciliation_critical",
+                            details=(
+                                "Background reconciliation found "
+                                f"{_bg_report.issue_count} critical issues"
+                            ),
+                            no_new_risk_reason="broker_db_split_brain",
+                            payload=_bg_payload,
                         )
                     elif _bg_report.issue_count:
+                        _bg_payload = _reconciliation_payload(_bg_report, stage="background")
                         logger.warning(
                             "[recon-bg] %d discrepancies found (non-critical)",
                             _bg_report.issue_count,
+                        )
+                        await _record_event(
+                            "reconciliation",
+                            "background_reconciliation_completed",
+                            "Background reconciliation found non-critical issues",
+                            severity="warning",
+                            payload=_bg_payload,
                         )
                     else:
                         logger.debug("[recon-bg] Clean — broker/DB positions in sync")
                 except asyncio.CancelledError:
                     raise
                 except Exception as _bg_recon_err:
-                    logger.warning("[recon-bg] Reconciliation failed: %s", _bg_recon_err)
+                    logger.critical("[recon-bg] Reconciliation failed: %s", _bg_recon_err)
+                    await _trip_reconciliation_kill_switch(
+                        risk_monitor,
+                        f"Background reconciliation failed: {_bg_recon_err}",
+                        record_incident=_record_incident,
+                        incident_type="bg_reconciliation_failure",
+                        details=f"Background reconciliation failed: {_bg_recon_err}",
+                        no_new_risk_reason="reconciler_failure",
+                        payload={"stage": "background"},
+                    )
 
         _bg_recon_task = asyncio.create_task(_bg_reconcile())
         logger.info("[recon-bg] Background reconciliation task started (every 15min)")
+
+    try:
+        _retention_days = await settings_service.get_int(
+            "PIPELINE_JOURNEY_RETENTION_DAYS", 30
+        )
+        _retention_interval_hours = await settings_service.get_int(
+            "PIPELINE_RETENTION_INTERVAL_HOURS", 24
+        )
+        _retention_batch_size = await settings_service.get_int(
+            "PIPELINE_RETENTION_BATCH_SIZE", 500
+        )
+    except Exception:
+        _retention_days = 30
+        _retention_interval_hours = 24
+        _retention_batch_size = 500
+
+    async def _bg_pipeline_retention():
+        _interval_sec = max(3600, _retention_interval_hours * 3600)
+        while True:
+            await asyncio.sleep(_interval_sec)
+            try:
+                payload = await _run_pipeline_retention_cycle(
+                    container.db_session_factory,
+                    retention_days=_retention_days,
+                    batch_size=_retention_batch_size,
+                    record_event=_record_event,
+                )
+                if payload["skipped"]:
+                    logger.warning(
+                        "[retention-bg] Skipped pipeline retention: %s",
+                        payload["skip_reason"],
+                    )
+                elif payload["archived_count"] or payload["purged_count"]:
+                    logger.info(
+                        "[retention-bg] Archived %d and purged %d pipeline decisions",
+                        payload["archived_count"],
+                        payload["purged_count"],
+                    )
+                else:
+                    logger.debug("[retention-bg] No expired pipeline decisions")
+            except asyncio.CancelledError:
+                raise
+            except Exception as _retention_err:
+                logger.warning(
+                    "[retention-bg] Pipeline retention failed: %s", _retention_err
+                )
+
+    _bg_retention_task = asyncio.create_task(_bg_pipeline_retention())
+    logger.info(
+        "[retention-bg] Pipeline retention task started (every %dh, keep %dd)",
+        max(1, _retention_interval_hours),
+        max(1, _retention_days),
+    )
 
     try:
         await trading_loop.run()
@@ -869,6 +1098,12 @@ async def main_async() -> None:
             _bg_recon_task.cancel()
             try:
                 await _bg_recon_task
+            except asyncio.CancelledError:
+                pass
+        if _bg_retention_task is not None:
+            _bg_retention_task.cancel()
+            try:
+                await _bg_retention_task
             except asyncio.CancelledError:
                 pass
         logger.info("Graceful shutdown initiated for %s", instance_id)
@@ -897,25 +1132,7 @@ async def main_async() -> None:
                     trade_repo = TradeRepository(_recon_session)
                     reconciler = PositionReconciler(executor=executor, trade_repo=trade_repo)
                     report = await reconciler.reconcile(instance_id=instance_id)
-                _shutdown_payload = {
-                    "stage": "shutdown",
-                    "reconciled": report.reconciled,
-                    "has_critical": report.has_critical,
-                    "issue_count": report.issue_count,
-                    "broker_positions": report.broker_positions,
-                    "db_open_trades": report.db_open_trades,
-                    "issues": [
-                        {
-                            "ticket": issue.ticket,
-                            "symbol": issue.symbol,
-                            "issue_type": issue.issue_type,
-                            "description": issue.description,
-                            "severity": issue.severity,
-                            "auto_resolved": issue.auto_resolved,
-                        }
-                        for issue in report.issues
-                    ],
-                }
+                _shutdown_payload = _reconciliation_payload(report, stage="shutdown")
                 await _record_event(
                     "reconciliation",
                     "shutdown_reconciliation_completed",

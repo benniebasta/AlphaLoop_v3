@@ -6,9 +6,36 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphaloop.db.repositories.research_repo import ResearchRepository
+from alphaloop.trading.strategy_loader import normalize_strategy_summary
 from alphaloop.webui.deps import get_db_session
 
 router = APIRouter(prefix="/api/research", tags=["research"])
+
+
+def _report_to_dict(report) -> dict:
+    summary = normalize_strategy_summary({
+        "summary": {
+            "total_pnl_usd": report.total_pnl_usd,
+            "sharpe_ratio": report.sharpe_ratio,
+            "max_drawdown_pct": report.max_drawdown_pct,
+        }
+    })
+    return {
+        "id": report.id,
+        "symbol": report.symbol,
+        "strategy_version": report.strategy_version,
+        "report_date": report.report_date.isoformat() if report.report_date else None,
+        "total_trades": report.total_trades,
+        "win_rate": report.win_rate,
+        "avg_rr": report.avg_rr,
+        "total_pnl_usd": report.total_pnl_usd,
+        "sharpe_ratio": report.sharpe_ratio,
+        "max_drawdown_pct": report.max_drawdown_pct,
+        "total_pnl": summary.get("total_pnl", 0),
+        "sharpe": summary.get("sharpe", 0),
+        "max_dd_pct": summary.get("max_dd_pct", 0),
+        "analysis_summary": report.analysis_summary,
+    }
 
 
 @router.get("")
@@ -21,22 +48,7 @@ async def get_reports(
     repo = ResearchRepository(session)
     reports = await repo.get_latest_reports(symbol=symbol, limit=limit)
     return {
-        "reports": [
-            {
-                "id": r.id,
-                "symbol": r.symbol,
-                "strategy_version": r.strategy_version,
-                "report_date": r.report_date.isoformat() if r.report_date else None,
-                "total_trades": r.total_trades,
-                "win_rate": r.win_rate,
-                "avg_rr": r.avg_rr,
-                "total_pnl_usd": r.total_pnl_usd,
-                "sharpe_ratio": r.sharpe_ratio,
-                "max_drawdown_pct": r.max_drawdown_pct,
-                "analysis_summary": r.analysis_summary,
-            }
-            for r in reports
-        ]
+        "reports": [_report_to_dict(r) for r in reports]
     }
 
 

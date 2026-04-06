@@ -2,20 +2,42 @@
 
 from __future__ import annotations
 
+import json
+import os
 import random
 import uuid
-import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphaloop.backtester import runner as bt_runner
+from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.db.repositories.backtest_repo import BacktestRepository
+from alphaloop.trading.strategy_loader import (
+    build_strategy_resolution_input,
+    normalize_strategy_signal_logic,
+    normalize_strategy_signal_rules,
+    normalize_strategy_tools,
+    resolve_strategy_setup_family,
+    resolve_strategy_signal_mode,
+    resolve_strategy_source,
+    serialize_strategy_spec,
+)
 from alphaloop.webui.deps import get_db_session
 
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
+
+
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for backtest write actions when AUTH_TOKEN is configured."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 # ── Creative name generator ──────────────────────────────────────────────────
 
@@ -88,28 +110,115 @@ def _normalize_backtest_signal_mode(raw_mode: str | None) -> str:
     return "algo_ai"
 
 
-def _extract_backtest_signal_mode(plan: str | None) -> str:
+def _parse_backtest_plan(plan: str | None) -> dict | None:
+    """Return parsed plan payload when it is a JSON object."""
     if not plan:
-        return "algo_ai"
+        return None
     try:
         data = json.loads(plan)
     except (json.JSONDecodeError, TypeError):
-        return _normalize_backtest_signal_mode(plan)
-    if isinstance(data, dict):
-        return _normalize_backtest_signal_mode(data.get("signal_mode"))
-    return "algo_ai"
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _extract_backtest_signal_mode(plan: str | None) -> str:
+    data = _parse_backtest_plan(plan)
+    if data is not None:
+        return _normalize_backtest_signal_mode(resolve_strategy_signal_mode(data))
+    return _normalize_backtest_signal_mode(plan)
+
+
+def _extract_backtest_setup_family(plan: str | None) -> str:
+    data = _parse_backtest_plan(plan)
+    if data is not None:
+        return resolve_strategy_setup_family(data)
+    return ""
+
+
+def _extract_backtest_source(plan: str | None) -> str:
+    data = _parse_backtest_plan(plan)
+    if data is not None:
+        return resolve_strategy_source(data)
+    return ""
+
+
+def _extract_backtest_strategy_spec(plan: str | None) -> dict:
+    data = _parse_backtest_plan(plan)
+    if data is not None:
+        return serialize_strategy_spec(data)
+    return {}
+
+
+def _extract_backtest_tools(plan: str | None) -> list[str]:
+    data = _parse_backtest_plan(plan)
+    if data is None:
+        return []
+    flags = normalize_strategy_tools(data.get("tools") or {})
+    return [name for name, enabled in flags.items() if enabled]
+
+
+def _extract_backtest_signal_rules(plan: str | None) -> list[dict]:
+    data = _parse_backtest_plan(plan)
+    if data is not None:
+        raw_rules = data.get("signal_rules")
+        return normalize_strategy_signal_rules(
+            raw_rules,
+            default_to_ema=(raw_rules is None),
+        )
+    return normalize_strategy_signal_rules(None, default_to_ema=True)
+
+
+def _extract_backtest_signal_logic(plan: str | None) -> str:
+    data = _parse_backtest_plan(plan)
+    if data is not None:
+        return normalize_strategy_signal_logic(data.get("signal_logic"))
+    return "AND"
+
+
+def _build_backtest_plan_payload(
+    *,
+    signal_mode: str,
+    signal_rules: list[dict],
+    signal_logic: str,
+    signal_auto: bool,
+    tools: list[str],
+) -> dict:
+    tool_flags = {name: True for name in tools}
+    strategy_like = build_strategy_resolution_input(
+        {
+            "signal_mode": signal_mode,
+            "source": "backtest_runner",
+            "tools": tool_flags,
+        },
+        signal_rules=signal_rules,
+        signal_logic=signal_logic,
+    )
+    normalized_signal_rules = normalize_strategy_signal_rules(
+        strategy_like["params"].get("signal_rules"),
+        default_to_ema=(strategy_like["params"].get("signal_rules") is None),
+    )
+    normalized_signal_logic = normalize_strategy_signal_logic(
+        strategy_like["params"].get("signal_logic")
+    )
+    strategy_like["params"]["signal_rules"] = normalized_signal_rules
+    strategy_like["params"]["signal_logic"] = normalized_signal_logic
+    return {
+        "signal_mode": _normalize_backtest_signal_mode(resolve_strategy_signal_mode(strategy_like)),
+        "setup_family": resolve_strategy_setup_family(strategy_like),
+        "source": resolve_strategy_source(strategy_like),
+        "strategy_spec": serialize_strategy_spec(strategy_like),
+        "signal_rules": normalized_signal_rules,
+        "signal_logic": normalized_signal_logic,
+        "signal_auto": signal_auto,
+        "tools": tool_flags,
+    }
 
 
 def _extract_plan_field(plan: str | None, field: str, default):
     """Extract a field from the plan JSON, falling back to default."""
-    if not plan:
-        return default
-    try:
-        data = json.loads(plan)
-        if isinstance(data, dict):
-            return data.get(field, default)
-    except (json.JSONDecodeError, TypeError):
-        pass
+    data = _parse_backtest_plan(plan)
+    if data is not None:
+        return data.get(field, default)
     return default
 
 
@@ -138,9 +247,12 @@ def _run_to_dict(r) -> dict:
         "error_message": r.error_message,
         "is_running": bt_runner.is_running(r.run_id),
         "signal_mode": _extract_backtest_signal_mode(plan),
-        "signal_rules": _extract_plan_field(plan, "signal_rules", [{"source": "ema_crossover"}]),
-        "signal_logic": _extract_plan_field(plan, "signal_logic", "AND"),
+        "setup_family": _extract_backtest_setup_family(plan),
+        "source": _extract_backtest_source(plan),
+        "signal_rules": _extract_backtest_signal_rules(plan),
+        "signal_logic": _extract_backtest_signal_logic(plan),
         "signal_auto": _extract_plan_field(plan, "signal_auto", False),
+        "tools": _extract_backtest_tools(plan),
     }
 
 
@@ -171,9 +283,12 @@ async def get_backtest(
 @router.post("")
 async def create_backtest(
     body: BacktestCreate,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Create and immediately start a backtest run."""
+    _require_operator_auth(authorization)
     repo = BacktestRepository(session)
 
     # Auto-generate creative name if not provided
@@ -201,13 +316,18 @@ async def create_backtest(
         "use_volume_filter": body.use_volume_filter,
         "use_swing_structure": body.use_swing_structure,
     }.items() if v]
-    signal_rules = body.signal_rules or [{"source": "ema_crossover"}]
-    plan_payload = {
-        "signal_mode": signal_mode,
-        "signal_rules": signal_rules,
-        "signal_logic": body.signal_logic,
-        "signal_auto": body.signal_auto,
-    }
+    signal_rules = normalize_strategy_signal_rules(
+        body.signal_rules,
+        default_to_ema=(body.signal_rules is None),
+    )
+    signal_logic = normalize_strategy_signal_logic(body.signal_logic)
+    plan_payload = _build_backtest_plan_payload(
+        signal_mode=signal_mode,
+        signal_rules=signal_rules,
+        signal_logic=signal_logic,
+        signal_auto=body.signal_auto,
+        tools=tools,
+    )
     run = await repo.create(
         run_id=uuid.uuid4().hex[:12],
         symbol=body.symbol,
@@ -217,7 +337,7 @@ async def create_backtest(
         timeframe=body.timeframe,
         balance=body.balance,
         max_generations=body.max_generations,
-        tools_json=tools,
+        tools_json=plan_payload["tools"],
         state="pending",
     )
     await session.commit()
@@ -238,9 +358,29 @@ async def create_backtest(
             name=name,
             signal_mode=signal_mode,
             signal_rules=signal_rules,
-            signal_logic=body.signal_logic,
+            signal_logic=signal_logic,
             signal_auto=body.signal_auto,
+            setup_family=plan_payload["setup_family"],
+            strategy_spec=plan_payload["strategy_spec"],
+            source=plan_payload["source"],
         )
+
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="backtest_create",
+        target=run.run_id,
+        old_value=None,
+        new_value=json.dumps({
+            "symbol": body.symbol,
+            "days": body.days,
+            "timeframe": body.timeframe,
+            "signal_mode": plan_payload["signal_mode"],
+            "setup_family": plan_payload["setup_family"],
+            "source": plan_payload["source"],
+        }, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
+    await session.commit()
 
     return {"status": "ok", "backtest": _run_to_dict(run)}
 
@@ -248,19 +388,40 @@ async def create_backtest(
 @router.patch("/{run_id}/stop")
 async def stop_backtest(
     run_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Request a running backtest to stop."""
+    _require_operator_auth(authorization)
     repo = BacktestRepository(session)
     run = await repo.get_by_run_id(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Not found")
     if bt_runner.request_stop(run_id):
+        session.add(OperatorAuditLog(
+            operator="webui",
+            action="backtest_stop",
+            target=run_id,
+            old_value=run.state,
+            new_value="stop_requested",
+            source_ip=request.client.host if request and request.client else "unknown",
+        ))
+        await session.commit()
         return {"status": "ok", "message": "Stop requested"}
     # Task not running (lost on server restart) — fix stale DB state
     if run.state == "running":
         run.state = "paused"
         run.message = "Stopped (task lost on server restart)"
+        await session.commit()
+        session.add(OperatorAuditLog(
+            operator="webui",
+            action="backtest_stop",
+            target=run_id,
+            old_value="running",
+            new_value="paused",
+            source_ip=request.client.host if request and request.client else "unknown",
+        ))
         await session.commit()
         return {"status": "ok", "message": "Stale state fixed to paused"}
     return {"status": "ok", "message": "Not running"}
@@ -269,9 +430,12 @@ async def stop_backtest(
 @router.patch("/{run_id}/resume")
 async def resume_backtest(
     run_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Resume a paused backtest from where it left off."""
+    _require_operator_auth(authorization)
     repo = BacktestRepository(session)
     run = await repo.get_by_run_id(run_id)
     if run is None:
@@ -287,7 +451,6 @@ async def resume_backtest(
     from alphaloop.webui.deps import _get_session_factory
     sf = _get_session_factory()
     if sf:
-        tools = run.tools_json if isinstance(run.tools_json, list) else []
         plan = getattr(run, "plan", None)
         await bt_runner.start_backtest(
             run_id=run.run_id,
@@ -297,28 +460,51 @@ async def resume_backtest(
             max_generations=run.max_generations,
             session_factory=sf,
             timeframe=run.timeframe or "1h",
-            tools=tools,
+            tools=_extract_backtest_tools(plan),
             name=run.name or "",
             signal_mode=_extract_backtest_signal_mode(plan),
-            signal_rules=_extract_plan_field(plan, "signal_rules", None),
-            signal_logic=_extract_plan_field(plan, "signal_logic", "AND"),
+            signal_rules=_extract_backtest_signal_rules(plan),
+            signal_logic=_extract_backtest_signal_logic(plan),
             signal_auto=_extract_plan_field(plan, "signal_auto", False),
+            setup_family=_extract_backtest_setup_family(plan),
+            strategy_spec=_extract_backtest_strategy_spec(plan),
+            source=_extract_backtest_source(plan),
         )
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="backtest_resume",
+        target=run_id,
+        old_value="paused",
+        new_value="running",
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
+    await session.commit()
     return {"status": "ok", "message": "Resumed"}
 
 
 @router.delete("/{run_id}")
 async def delete_backtest(
     run_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Delete a backtest run (stops if running)."""
+    _require_operator_auth(authorization)
     repo = BacktestRepository(session)
     run = await repo.get_by_run_id(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Not found")
     bt_runner.delete_run_data(run_id)
     await session.delete(run)
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="backtest_delete",
+        target=run_id,
+        old_value=run.state,
+        new_value="deleted",
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
     await session.commit()
     return {"status": "ok", "deleted": run_id}
 

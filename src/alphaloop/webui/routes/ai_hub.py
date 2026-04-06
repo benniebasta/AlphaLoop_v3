@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import json
+import os
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphaloop.core.config import AppConfig
+from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.db.repositories.settings_repo import SettingsRepository
 from alphaloop.webui.deps import get_config, get_db_session
 
@@ -31,6 +35,16 @@ _MODEL_ROLES = {
 
 class AIHubUpdate(BaseModel):
     settings: dict[str, str]
+
+
+def _require_operator_auth(authorization: str) -> None:
+    """Require bearer auth for AI hub writes when AUTH_TOKEN is configured."""
+    expected = os.environ.get("AUTH_TOKEN", "")
+    if not expected:
+        return
+    scheme, _, provided = authorization.partition(" ")
+    if scheme.lower() != "bearer" or provided.strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 @router.get("")
@@ -67,11 +81,26 @@ async def get_ai_hub(
 @router.put("")
 async def update_ai_hub(
     body: AIHubUpdate,
+    request: Request,
+    authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Update AI model role assignments."""
+    _require_operator_auth(authorization)
     repo = SettingsRepository(session)
+    old_settings = await repo.get_all()
     await repo.set_many(body.settings)
+    source_ip = request.client.host if request and request.client else "unknown"
+    for key, new_val in body.settings.items():
+        session.add(OperatorAuditLog(
+            operator="webui",
+            action="ai_hub_update",
+            target=key,
+            old_value=old_settings.get(key),
+            new_value=json.dumps({"value": new_val}),
+            source_ip=source_ip,
+        ))
+    await session.commit()
     return {"status": "ok", "updated": list(body.settings.keys())}
 
 

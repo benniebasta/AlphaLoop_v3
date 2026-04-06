@@ -7,7 +7,11 @@ import os
 from collections import deque
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from alphaloop.db.models.operator_audit import OperatorAuditLog
+from alphaloop.webui.deps import get_db_session
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 logger = logging.getLogger(__name__)
@@ -41,6 +45,7 @@ def record_waterfall(pipeline_result) -> None:
         "outcome": pipeline_result.outcome.value if hasattr(pipeline_result.outcome, "value") else str(pipeline_result.outcome),
         "elapsed_ms": pipeline_result.elapsed_ms,
         "rejection_reason": pipeline_result.rejection_reason,
+        "journey": pipeline_result.journey.to_dict() if getattr(pipeline_result, "journey", None) else None,
     }
 
     # Regime
@@ -139,10 +144,10 @@ async def get_events(
 
     By default reads the in-memory ring buffer (fast, resets on restart).
     Pass ?from_db=true to read from the durable operational_events table (survives restarts).
-    The DB path is also used automatically when the in-memory buffer is empty after a restart.
+    Note: cycle events (CycleStarted, PipelineStep, etc.) are in-memory only — they
+    are never persisted to the DB, so from_db=true will not return them.
     """
-    # Use DB if explicitly requested OR if in-memory is empty (indicates a restart)
-    use_db = from_db or (len(_event_log) == 0)
+    use_db = from_db
 
     if use_db:
         try:
@@ -203,10 +208,26 @@ async def get_waterfall(
 
 
 @router.delete("")
-async def clear_events() -> dict:
+async def clear_events(
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Clear all events and waterfall entries from the ring buffers."""
+    _check_ingest_token(authorization)
+    cleared_events = len(_event_log)
+    cleared_waterfalls = len(_waterfall_log)
     _event_log.clear()
     _waterfall_log.clear()
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="event_log_clear",
+        target="event_buffers",
+        old_value=f"events={cleared_events},waterfalls={cleared_waterfalls}",
+        new_value="cleared",
+        source_ip=request.client.host if request.client else "unknown",
+    ))
+    await session.commit()
     return {"ok": True}
 
 

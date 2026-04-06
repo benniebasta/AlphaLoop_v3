@@ -91,11 +91,16 @@ class OrderRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_non_terminal(self) -> list[OrderRecord]:
+    async def get_non_terminal(
+        self,
+        *,
+        instance_id: str | None = None,
+    ) -> list[OrderRecord]:
         """All orders in non-terminal states — for startup recovery."""
-        result = await self._session.execute(
-            select(OrderRecord).where(OrderRecord.status.in_(_NON_TERMINAL))
-        )
+        query = select(OrderRecord).where(OrderRecord.status.in_(_NON_TERMINAL))
+        if instance_id:
+            query = query.where(OrderRecord.instance_id == instance_id)
+        result = await self._session.execute(query)
         return list(result.scalars())
 
     async def list_orders(
@@ -121,3 +126,12 @@ class OrderRepository:
             select(OrderRecord).where(OrderRecord.client_order_id == client_order_id)
         )
         return result.scalar_one_or_none()
+
+    async def set_error_message(self, order_id: str, error_message: str) -> None:
+        """Annotate an order record without changing its lifecycle state."""
+        record = await self.get_by_order_id(order_id)
+        if record is None:
+            raise ValueError(f"OrderRecord not found: {order_id}")
+        record.error_message = error_message
+        record.updated_at = datetime.now(timezone.utc)
+        await self._session.flush()

@@ -26,6 +26,8 @@ import logging
 from collections import defaultdict, deque
 from statistics import mean
 
+from alphaloop.core.setup_types import normalize_pipeline_setup_type
+
 logger = logging.getLogger(__name__)
 
 MIN_SAMPLES = 20        # trades needed per setup type before applying calibration
@@ -59,14 +61,14 @@ class SetupCalibrator:
 
     def record(self, setup_type: str, won: bool) -> None:
         """Record a trade outcome for a setup type."""
-        self._history[setup_type.lower()].append(1 if won else 0)
+        self._history[normalize_pipeline_setup_type(setup_type)].append(1 if won else 0)
 
     def win_rate(self, setup_type: str) -> float:
         """
         Return historical win rate for a setup type.
         Returns 0.5 (neutral) until MIN_SAMPLES have been collected.
         """
-        h = self._history[setup_type.lower()]
+        h = self._history[normalize_pipeline_setup_type(setup_type)]
         if len(h) < MIN_SAMPLES:
             return BASELINE
         return round(mean(h), 4)
