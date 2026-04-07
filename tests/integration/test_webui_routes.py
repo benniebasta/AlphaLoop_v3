@@ -1423,6 +1423,10 @@ async def test_strategy_models_update_writes_operator_audit(client, container):
         / f"{created['symbol']}_v{created['version']}.json"
     )
     saved = json.loads(strategy_path.read_text())
+    assert saved["ai_models"]["signal"] == "gpt-5.4-mini"
+    assert saved["ai_models"]["validator"] == "gpt-5.4"
+    assert saved["strategy_spec"]["ai_models"]["signal"] == "gpt-5.4-mini"
+    assert saved["strategy_spec"]["ai_models"]["validator"] == "gpt-5.4"
     assert saved["strategy_spec"]["signal_mode"] == "ai_signal"
     assert (
         saved["strategy_spec"]["prompt_bundle"]["signal_instruction"]
@@ -1549,6 +1553,54 @@ async def test_strategy_update_preserves_spec_prompts_on_non_prompt_edit(client,
     assert saved["name"] == "Renamed Only"
     assert saved["strategy_spec"]["prompt_bundle"]["signal_instruction"] == "spec signal"
     assert saved["strategy_spec"]["prompt_bundle"]["validator_instruction"] == "spec validator"
+
+
+@pytest.mark.asyncio
+async def test_strategy_update_preserves_spec_first_ai_models_on_non_model_edit(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", tmp_path)
+    version_file = tmp_path / "XAUUSD_v12.json"
+    version_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": 12,
+        "status": "candidate",
+        "source": "ui_ai_signal_card",
+        "signal_mode": "ai_signal",
+        "ai_models": {"signal": "stale-signal"},
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "ai_models": {
+                "signal": "spec-signal",
+                "validator": "spec-validator",
+            },
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+    }, indent=2))
+
+    resp = await client.put(
+        "/api/strategies/XAUUSD/v12",
+        json={"name": "Rename Only"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["strategy"]["ai_models"] == {
+        "signal": "spec-signal",
+        "validator": "spec-validator",
+    }
+
+    saved = json.loads(version_file.read_text())
+    assert saved["name"] == "Rename Only"
+    assert saved["ai_models"] == {
+        "signal": "spec-signal",
+        "validator": "spec-validator",
+    }
+    assert saved["strategy_spec"]["ai_models"] == {
+        "signal": "spec-signal",
+        "validator": "spec-validator",
+    }
 
 
 @pytest.mark.asyncio
@@ -2041,10 +2093,16 @@ async def test_stop_bot_writes_operator_audit(client, container, monkeypatch):
 
     monkeypatch.setattr(bots_route.subprocess, "run", lambda *args, **kwargs: _RunResult())
     monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: None)
+    # On Linux the stop path uses os.kill — patch it so the PID-not-found
+    # branch is never reached and the stop always appears successful.
+    import os as _os
+    monkeypatch.setattr(bots_route.os, "kill", lambda pid, sig: None)
 
     resp = await client.post("/api/bots/test-stop-success/stop")
     assert resp.status_code == 200
-    assert resp.json()["stop_method"] == "graceful (sentinel)"
+    _stop_method = resp.json()["stop_method"]
+    # Windows uses sentinel files; Linux uses SIGTERM — both are valid.
+    assert _stop_method in ("graceful (sentinel)", "SIGTERM")
 
     async with container.db_session_factory() as session:
         audit_rows = list((await session.execute(
@@ -2054,7 +2112,7 @@ async def test_stop_bot_writes_operator_audit(client, container, monkeypatch):
     assert len(audit_rows) == 1
     assert audit_rows[0].target == "test-stop-success"
     assert audit_rows[0].old_value == "XAUUSD:31337:running"
-    assert audit_rows[0].new_value == "graceful (sentinel)"
+    assert audit_rows[0].new_value == _stop_method
 
 
 # ── Tools (Pipeline) ────────────────────────────────────────────────────────
