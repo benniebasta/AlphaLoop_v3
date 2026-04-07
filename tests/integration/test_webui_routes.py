@@ -40,12 +40,17 @@ _TEST_AUTH_TOKEN = "test-auth-token-for-integration"
 
 
 @pytest_asyncio.fixture
-async def client(container, monkeypatch):
+async def client(container, monkeypatch, tmp_path):
     """Async HTTP client wired to the ASGI app with in-memory DB.
 
     Sets AUTH_TOKEN so Phase 7E auth enforcement passes for sensitive endpoints.
+    Redirects STRATEGY_VERSIONS_DIR to tmp_path so tests never write to the
+    real strategy_versions/ directory on disk.
     """
     monkeypatch.setenv("AUTH_TOKEN", _TEST_AUTH_TOKEN)
+    import alphaloop.backtester.asset_trainer as _asset_trainer
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", tmp_path)
+    monkeypatch.setattr(_asset_trainer, "STRATEGY_VERSIONS_DIR", tmp_path)
     app = create_webui_app(container)
     transport = ASGITransport(app=app)
     async with AsyncClient(

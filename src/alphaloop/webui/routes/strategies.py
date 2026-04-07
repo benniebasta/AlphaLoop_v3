@@ -29,6 +29,7 @@ from alphaloop.trading.strategy_loader import (
     normalize_strategy_summary,
     migrate_legacy_strategy_spec_v1,
     resolve_signal_instruction,
+    resolve_strategy_ai_models,
     resolve_strategy_signal_mode,
     resolve_strategy_spec_version,
     resolve_strategy_source,
@@ -288,6 +289,15 @@ def _sync_strategy_spec_write_fields(data: dict, explicit_fields: set[str] | Non
             else resolve_validator_instruction(data)
         )
         spec["prompt_bundle"] = prompt_bundle
+        spec["ai_models"] = (
+            {
+                str(name): str(model)
+                for name, model in (data.get("ai_models") or {}).items()
+                if model
+            }
+            if "ai_models" in explicit_fields and isinstance(data.get("ai_models"), dict)
+            else resolve_strategy_ai_models(data)
+        )
         metadata = dict(spec.get("metadata") or {})
         if "source" in explicit_fields:
             explicit_source = str(data.get("source") or "").strip()
@@ -347,6 +357,7 @@ def _load_all_versions() -> list[dict]:
             data = json.loads(f.read_text())
             _refresh_strategy_spec(data)
             data["signal_mode"] = _effective_signal_mode(data)
+            data["ai_models"] = resolve_strategy_ai_models(data)
             data["summary"] = _normalized_summary(data)
             data["_path"] = str(f)
             versions.append(data)
@@ -364,6 +375,7 @@ def _load_version(symbol: str, version: int) -> dict | None:
         data = json.loads(path.read_text())
         _refresh_strategy_spec(data)
         data["signal_mode"] = _effective_signal_mode(data)
+        data["ai_models"] = resolve_strategy_ai_models(data)
         data["summary"] = _normalized_summary(data)
         data["_path"] = str(path)
         return data
@@ -393,6 +405,7 @@ def _save_version(data: dict, explicit_fields: set[str] | None = None) -> None:
     if "summary" in save_data:
         save_data["summary"] = _normalized_summary(save_data)
     _sync_strategy_spec_write_fields(save_data, explicit_fields)
+    save_data["ai_models"] = resolve_strategy_ai_models(save_data)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(save_data, indent=2))
     tmp.replace(path)
@@ -901,6 +914,7 @@ async def update_strategy_models(
     for role in ["signal", "validator", "research", "param_suggest", "regime", "fallback"]:
         if role in body:
             data["ai_models"][role] = body[role]
+            explicit_fields.add("ai_models")
 
     if "signal_mode" in body:
         mode = _strict_signal_mode(body["signal_mode"])

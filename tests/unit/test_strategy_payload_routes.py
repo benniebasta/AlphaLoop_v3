@@ -353,6 +353,32 @@ def test_load_version_normalizes_summary_metric_aliases(tmp_path, monkeypatch):
     assert loaded["summary"]["max_dd_pct"] == -8.0
 
 
+def test_load_version_prefers_spec_ai_models(tmp_path, monkeypatch):
+    strategy_file = Path(tmp_path) / "XAUUSD_v4.json"
+    strategy_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": 4,
+        "signal_mode": "ai_signal",
+        "ai_models": {"signal": "stale-signal"},
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "ai_models": {"signal": "spec-signal", "validator": "spec-validator"},
+        },
+    }))
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", Path(tmp_path))
+
+    loaded = strategies_route._load_version("XAUUSD", 4)
+
+    assert loaded is not None
+    assert loaded["ai_models"] == {
+        "signal": "spec-signal",
+        "validator": "spec-validator",
+    }
+
+
 def test_load_all_versions_prefers_spec_signal_mode(tmp_path, monkeypatch):
     strategy_file = Path(tmp_path) / "XAUUSD_v2.json"
     strategy_file.write_text(json.dumps({
@@ -403,6 +429,33 @@ def test_sync_strategy_spec_write_fields_updates_prompt_bundle_and_mode():
     assert data["strategy_spec"]["prompt_bundle"]["signal_instruction"] == "new signal prompt"
     assert data["strategy_spec"]["prompt_bundle"]["validator_instruction"] == "new validator prompt"
     assert data["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
+
+def test_sync_strategy_spec_write_fields_updates_ai_models():
+    data = {
+        "symbol": "XAUUSD",
+        "version": 3,
+        "source": "ui_ai_signal_card",
+        "signal_mode": "ai_signal",
+        "signal_instruction": "signal prompt",
+        "validator_instruction": "validator prompt",
+        "ai_models": {"signal": "gpt-5.4-mini", "validator": "gpt-5.4"},
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "ai_models": {"signal": "stale-signal"},
+            "metadata": {"source": "legacy"},
+        },
+    }
+
+    _sync_strategy_spec_write_fields(data, {"ai_models"})
+
+    assert data["strategy_spec"]["ai_models"] == {
+        "signal": "gpt-5.4-mini",
+        "validator": "gpt-5.4",
+    }
 
 
 def test_sync_strategy_spec_write_fields_preserves_effective_metadata_source_when_flat_source_blank():
@@ -539,3 +592,40 @@ def test_save_version_normalizes_summary_metric_aliases(tmp_path):
     assert saved["summary"]["sharpe"] == 1.1
     assert saved["summary"]["total_pnl"] == 222.0
     assert saved["summary"]["max_dd_pct"] == -4.5
+
+
+def test_save_version_preserves_spec_first_ai_models_on_non_model_save(tmp_path):
+    path = Path(tmp_path) / "XAUUSD_v7.json"
+    path.write_text("{}")
+    data = {
+        "_path": str(path),
+        "symbol": "XAUUSD",
+        "version": 7,
+        "status": "candidate",
+        "source": "ui_ai_signal_card",
+        "signal_mode": "ai_signal",
+        "ai_models": {"signal": "stale-signal"},
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "ai_models": {
+                "signal": "spec-signal",
+                "validator": "spec-validator",
+            },
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+    }
+
+    _save_version(data)
+
+    saved = json.loads(path.read_text())
+    assert saved["ai_models"] == {
+        "signal": "spec-signal",
+        "validator": "spec-validator",
+    }
+    assert saved["strategy_spec"]["ai_models"] == {
+        "signal": "spec-signal",
+        "validator": "spec-validator",
+    }
