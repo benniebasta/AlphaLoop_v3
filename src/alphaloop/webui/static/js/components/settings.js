@@ -62,7 +62,7 @@ const SCHEMA = [
       },
       {
         title: 'Local LLM (Ollama)', color: '#22c55e',
-        testAction: { endpoint: '/api/test/ollama', label: '🔌 Test Connection', body: {} },
+        testAction: { endpoint: '/api/test/ollama', label: '🔌 Test Connection', body: {}, liveFields: { base_url: 'QWEN_LOCAL_BASE' } },
         fields: [
           { key: 'QWEN_LOCAL_BASE', label: 'Ollama Base URL', type: 'text', desc: 'Ollama API endpoint. Default: http://localhost:11434/v1' },
         ],
@@ -849,7 +849,7 @@ export async function render(container) {
         </div>
         ${section.testAction ? `
           <div class="settings-test-row">
-            <button class="btn btn-sm settings-test-btn" data-endpoint="${section.testAction.endpoint}" data-body='${JSON.stringify(section.testAction.body || {})}' data-label="${section.testAction.label}">${section.testAction.label}</button>
+            <button class="btn btn-sm settings-test-btn" data-endpoint="${section.testAction.endpoint}" data-body='${JSON.stringify(section.testAction.body || {})}' data-live-fields='${JSON.stringify(section.testAction.liveFields || {})}' data-label="${section.testAction.label}">${section.testAction.label}</button>
             <span class="settings-test-result"></span>
           </div>` : ''}
       </div>`;
@@ -861,6 +861,13 @@ export async function render(container) {
         const endpoint = btn.dataset.endpoint;
         const bodyStr = btn.dataset.body || '{}';
         const body = JSON.parse(bodyStr);
+        // Merge live form field values into body (so test uses current input, not stale DB value)
+        const liveFields = JSON.parse(btn.dataset.liveFields || '{}');
+        const section = btn.closest('.settings-section');
+        Object.entries(liveFields).forEach(([bodyKey, dataKey]) => {
+          const input = section?.querySelector(`[data-key="${dataKey}"]`);
+          if (input?.value) body[bodyKey] = input.value;
+        });
         // Use unique result selector (endpoint + body hash)
         const resultEl = btn.nextElementSibling;
         const originalLabel = btn.dataset.label;

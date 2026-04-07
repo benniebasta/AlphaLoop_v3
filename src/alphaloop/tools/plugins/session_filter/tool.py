@@ -28,11 +28,11 @@ class SessionFilter(BaseTool):
 
     async def run(self, context) -> ToolResult:
         session = context.session
+        from alphaloop.config.assets import get_asset_config
+        asset_cfg = get_asset_config(context.symbol)
 
         if session.is_weekend or session.name == "weekend":
-            from alphaloop.config.assets import get_asset_config
-
-            if get_asset_config(context.symbol).asset_class != "crypto":
+            if asset_cfg.asset_class != "crypto":
                 return ToolResult(
                     passed=False,
                     reason="Weekend — markets closed",
@@ -41,7 +41,8 @@ class SessionFilter(BaseTool):
                     data={"session": session.name, "score": session.score},
                 )
 
-        min_score = 0.70  # configurable via strategy params
+        params = getattr(context, "params", {}) or {}
+        min_score = params.get("min_session_score", asset_cfg.min_session_score)
 
         if session.score < min_score:
             return ToolResult(

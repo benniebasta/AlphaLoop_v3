@@ -84,6 +84,8 @@ class TradeConstructor:
         self._sl_buffer_atr = sl_buffer_atr
         self._sl_atr_mult = sl_atr_mult
         self._tools: list = tools or []  # swing_structure, fvg_guard, bos_guard
+        self._last_entry: float = 0.0
+        self._last_rejection_details: list[dict] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,6 +116,7 @@ class TradeConstructor:
 
         # Entry price: BUY = ask (you buy at the ask), SELL = bid
         entry = ask if direction == "BUY" else bid
+        self._last_entry = entry
         zone_half = atr * self._zone_mult
         entry_zone = (
             round(entry - zone_half, 5),
@@ -200,6 +203,7 @@ class TradeConstructor:
             candidates = self._sell_candidates(entry, indicators, buffer, atr)
 
         self._last_candidates = len(candidates)
+        self._last_rejection_details = []
 
         for raw_price, source in candidates:
             dist = normalize_distance(entry, raw_price, self._pip_size, atr)
@@ -211,6 +215,12 @@ class TradeConstructor:
                     "[construction] SL candidate '%s' at %.5f rejected: %s",
                     source, raw_price, reason,
                 )
+                self._last_rejection_details.append({
+                    "source": source,
+                    "price": round(raw_price, 5),
+                    "distance_pts": round(dist.points, 1),
+                    "reason": reason,
+                })
 
         return None
 

@@ -218,6 +218,7 @@ def create_webui_app(container: Container) -> FastAPI:
     from alphaloop.webui.routes.event_log import router as event_log_router
     from alphaloop.webui.routes.risk_dashboard import router as risk_dashboard_router
     from alphaloop.webui.routes.controls import router as controls_router
+    from alphaloop.webui.routes.test_flow import router as test_flow_router
 
     app.include_router(dashboard_router)
     app.include_router(trades_router)
@@ -235,6 +236,7 @@ def create_webui_app(container: Container) -> FastAPI:
     app.include_router(event_log_router)
     app.include_router(risk_dashboard_router)
     app.include_router(controls_router)
+    app.include_router(test_flow_router)
 
     from alphaloop.webui.routes.alerts import router as alerts_router
     app.include_router(alerts_router)

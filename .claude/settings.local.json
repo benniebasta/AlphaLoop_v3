@@ -192,7 +192,14 @@
       "Bash(grep -r \"PipelineStep\\\\|stage.*decision\" C:Usersbenz-Documentsalphaloop_v3srcalphaloop --include=*.py)",
       "Bash(find C:Usersbenz-Documentsalphaloop_v3 -name *.py -path *pipeline* -o -name *event*)",
       "Bash(grep -rn \"stage.*decision\\\\|''''decision''''\" C:Usersbenz-Documentsalphaloop_v3srcalphalooppipeline --include=*.py)",
-      "Bash(grep -rn decision C:Usersbenz-Documentsalphaloop_v3srcalphalooptrading --include=*.py)"
+      "Bash(grep -rn decision C:Usersbenz-Documentsalphaloop_v3srcalphalooptrading --include=*.py)",
+      "Bash(findstr :8090)",
+      "Bash(tasklist /fi \"PID eq 28492\")",
+      "Bash(tasklist /FI \"PID eq 28492\")",
+      "Bash(powershell \"Get-Process -Id 28492 | Select-Object Name,Id,CommandLine\")",
+      "Bash(powershell \"Stop-Process -Id 28492 -Force\")",
+      "Bash(powershell \"Get-Content C:\\\\Users\\\\benz-\\\\Documents\\\\alphaloop_v3\\\\.env 2>$null; Get-Content C:\\\\Users\\\\benz-\\\\Documents\\\\alphaloop_v3\\\\alphaloop.env 2>$null\")",
+      "Bash(powershell \"if \\(Test-Path ''C:/Users/benz-/Documents/alphaloop_v3/.env''\\) { Get-Content ''C:/Users/benz-/Documents/alphaloop_v3/.env'' | Select-String ''AUTH_TOKEN'' }\")"
     ]
   }
 }

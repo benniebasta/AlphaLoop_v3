@@ -55,6 +55,7 @@ class PipelineStep(Event):
     status: str = ""   # "passed" | "blocked" | "skipped" | "no_signal" | "generated" | "approved" | "rejected" | "filled" | "failed"
     detail: str = ""
     results: list = field(default_factory=list)  # per-tool ToolResult dicts (populated for "filters" stage)
+    context: dict = field(default_factory=dict)  # structured diagnostic data (why a step failed)
 
 
 @dataclass

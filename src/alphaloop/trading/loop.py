@@ -863,9 +863,18 @@ class TradingLoop:
         # Emit construction events
         if result.outcome == CycleOutcome.NO_CONSTRUCTION and result.hypothesis:
             from alphaloop.core.events import ConstructionFailed
+            _construction_ctx = {
+                "entry": getattr(self._constructor, "_last_entry", 0),
+                "direction": result.hypothesis.direction,
+                "candidates": getattr(self._constructor, "_last_rejection_details", []),
+                "candidates_considered": getattr(self._constructor, "_last_candidates", 0),
+                "sl_min_pts": getattr(self._constructor, "_sl_min", None),
+                "sl_max_pts": getattr(self._constructor, "_sl_max", None),
+            }
             await self._publish_step(
                 "construction", "no_structure",
                 result.rejection_reason or "no valid SL from structure",
+                context=_construction_ctx,
             )
             await self.event_bus.publish(ConstructionFailed(
                 symbol=self.symbol,
@@ -911,7 +920,8 @@ class TradingLoop:
                 )
             else:
                 _neutral = getattr(self._algo_engine, "last_neutral_reason", None)
-            await self._publish_step("signal_gen", "no_signal", _neutral or "no setup")
+            _neutral_ctx = getattr(self._algo_engine, "last_neutral_context", {})
+            await self._publish_step("signal_gen", "no_signal", _neutral or "no setup", context=_neutral_ctx)
 
         if result.invalidation and result.invalidation.severity != "PASS":
             await self._publish_step(
@@ -1069,6 +1079,7 @@ class TradingLoop:
         status: str,
         detail: str = "",
         results: list | None = None,
+        context: dict | None = None,
     ) -> None:
         await self.event_bus.publish(PipelineStep(
             symbol=self.symbol,
@@ -1078,6 +1089,7 @@ class TradingLoop:
             status=status,
             detail=detail,
             results=results or [],
+            context=context or {},
         ))
 
     async def _run_guards(

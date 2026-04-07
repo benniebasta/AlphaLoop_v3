@@ -1,8 +1,8 @@
 {
-  "timestamp": 1775321944.1795294,
+  "timestamp": 1775570954.8308089,
   "alive": true,
   "symbol": "BTCUSD",
-  "cycle": 13,
+  "cycle": 1,
   "circuit_breaker": {
     "consecutive_failures": 0,
     "is_open": false,
@@ -16,6 +16,8 @@
     "open_trades": 0,
     "open_risk_usd": 0,
     "kill_switch": false,
+    "no_new_risk": false,
+    "no_new_risk_reasons": [],
     "force_close_all": false,
     "rolling_dd_modifier": 1.0,
     "seeded": true,

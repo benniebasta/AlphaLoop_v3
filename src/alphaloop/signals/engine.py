@@ -126,7 +126,7 @@ CRITICAL RULES:
 1. Prefer pullback setups over breakout chasing
 2. Only signal during appropriate sessions for this asset
 3. Never signal when RSI is extreme (>{asset.rsi_extreme_ob} overbought or <{asset.rsi_extreme_os} oversold)
-4. If no clear setup exists, return {{"trend": "neutral", "confidence": 0.0, "reasoning": "No setup"}}
+4. If no clear setup exists, return neutral and always explain WHY in the reasoning field (e.g. "EMA not crossed, RSI at 51, no directional confluence")
 5. Minimum confidence to signal: {asset.min_confidence}
 
 IMPORTANT: Do NOT output stop_loss, take_profit, or entry_zone. Those are derived automatically from market structure. You only output direction and confidence.
@@ -580,7 +580,10 @@ class MultiAssetSignalEngine:
 
         # Skip neutral or zero-price placeholders
         if data.get("trend") == "neutral" or data.get("confidence", 0) < 0.1:
-            self.last_neutral_reason = data.get("reasoning") or "No setup"
+            self.last_neutral_reason = (
+                data.get("reasoning")
+                or f"AI neutral (conf={data.get('confidence', 0):.2f}) — no reasoning provided"
+            )
             logger.info("[signal-engine] Neutral signal — %s", self.last_neutral_reason)
             self.last_error = None
             return None
@@ -740,7 +743,10 @@ class MultiAssetSignalEngine:
         confidence = float(data.get("confidence", 0.0))
 
         if trend == "neutral" or confidence < 0.1:
-            self.last_neutral_reason = data.get("reasoning") or "No setup"
+            self.last_neutral_reason = (
+                data.get("reasoning")
+                or f"AI neutral (conf={data.get('confidence', 0):.2f}) — no reasoning provided"
+            )
             self.last_error = None
             return None
 

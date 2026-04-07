@@ -109,6 +109,52 @@ function buildSummaryLine(type, data) {
           : stageStatus === 'passed' ? `✓ passed` : stageStatus;
         return `${stageName} · ${statusTxt} · size: ${combined.toFixed(3)}`;
       }
+      if (stageName === 'signal_gen' && stageStatus === 'no_signal') {
+        const ctx = data.context || {};
+        const rules = ctx.rules || [];
+        if (rules.length) {
+          const parts = rules.map(r => {
+            const dir = r.bull ? 'BUY' : r.bear ? 'SELL' : 'neutral';
+            const v = r.values || {};
+            let hint = '';
+            if (r.source === 'ema_crossover') {
+              hint = `fast=${v.fast} slow=${v.slow} rsi=${v.rsi}`;
+            } else if (r.source === 'macd_crossover') {
+              hint = `hist=${v.macd_hist}`;
+            } else if (r.source === 'rsi_reversal') {
+              hint = `rsi=${v.rsi} ob=${v.rsi_ob} os=${v.rsi_os}`;
+            } else if (r.source === 'bollinger_breakout') {
+              hint = `%b=${v.bb_pct_b}`;
+            } else if (r.source === 'adx_trend') {
+              hint = `adx=${v.adx} +di=${v.plus_di} -di=${v.minus_di} min=${v.adx_min}`;
+            } else if (r.source === 'bos_confirm') {
+              hint = `price=${v.price}`;
+            }
+            return `${r.source}:${dir}${hint ? ' (' + hint + ')' : ''}`;
+          });
+          return `– NO SIGNAL · ${parts.join(' | ')}`;
+        }
+        if (ctx.reason === 'seed_state') {
+          const iv = ctx.indicator_values || {};
+          return `– NO SIGNAL · seeding (fast=${iv.ema_fast} slow=${iv.ema_slow} rsi=${iv.rsi})`;
+        }
+        return `– NO SIGNAL · ${data.detail || 'no setup'}`;
+      }
+      if (stageName === 'construction' && stageStatus === 'no_structure') {
+        const ctx = data.context || {};
+        const candidates = ctx.candidates || [];
+        const entryStr = ctx.entry ? `${ctx.direction || ''}@${ctx.entry.toFixed(2)}` : '';
+        if (candidates.length) {
+          const parts = candidates.map(c =>
+            `${c.source}@${c.price?.toFixed(2)}: ${c.reason}`
+          );
+          return `No SL · ${entryStr} · ${parts.join(' | ')}`;
+        }
+        const tried = ctx.candidates_considered || 0;
+        const boundsHint = (ctx.sl_min_pts != null && ctx.sl_max_pts != null)
+          ? ` (bounds ${ctx.sl_min_pts}–${ctx.sl_max_pts} pts)` : '';
+        return `No SL · ${entryStr} · ${tried} candidate${tried !== 1 ? 's' : ''} out of bounds${boundsHint}`;
+      }
       return `${stageName} · ${stageStatus}${data.detail ? ' · ' + data.detail : ''}`;
     }
     default: {

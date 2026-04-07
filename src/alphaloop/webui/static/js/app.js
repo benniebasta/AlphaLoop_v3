@@ -9,7 +9,7 @@ const components = {};
 const ROUTES = [
   'dashboard', 'live', 'trades', 'agents', 'strategies',
   'seedlab', 'research', 'risk_dashboard', 'event_log', 'health',
-  'tools', 'ai_hub', 'settings',
+  'tools', 'ai_hub', 'settings', 'test_flow',
 ];
 
 // Backward-compatible aliases (old route → new route)

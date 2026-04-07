@@ -174,6 +174,7 @@ class AlgorithmicSignalEngine:
         self._prev_rsi: float | None = None
         self._prev_bb_pct_b: float | None = None
         self.last_neutral_reason: str | None = None
+        self.last_neutral_context: dict = {}
         if prev_ema_state:
             self._prev_fast = prev_ema_state.get("fast")
             self._prev_slow = prev_ema_state.get("slow")
@@ -242,6 +243,7 @@ class AlgorithmicSignalEngine:
         )
 
         rule_results: list[tuple[bool, bool]] = []
+        rule_diagnostics: list[dict] = []  # parallel list for "why" context
 
         for rule in signal_rules:
             src = rule.get("source", "ema_crossover")
@@ -260,49 +262,103 @@ class AlgorithmicSignalEngine:
                     self._prev_fast = ema_fast
                     self._prev_slow = ema_slow
                     continue
-                rule_results.append(check_ema_crossover(
+                result = check_ema_crossover(
                     ema_fast, self._prev_fast,
                     ema_slow, self._prev_slow,
                     rsi, rsi_ob, rsi_os,
-                ))
-                _bull, _bear = rule_results[-1]
+                )
+                rule_results.append(result)
+                _bull, _bear = result
                 logger.debug(
                     "[algo] ema_crossover: fast=%.4f prev=%.4f slow=%.4f prev=%.4f "
                     "rsi=%.2f → bull=%s bear=%s",
                     ema_fast, self._prev_fast, ema_slow, self._prev_slow,
                     rsi, _bull, _bear,
                 )
+                rule_diagnostics.append({
+                    "source": "ema_crossover",
+                    "bull": _bull, "bear": _bear,
+                    "values": {
+                        "fast": round(ema_fast, 5), "prev_fast": round(self._prev_fast, 5),
+                        "slow": round(ema_slow, 5), "prev_slow": round(self._prev_slow, 5),
+                        "rsi": round(rsi, 1), "rsi_ob": rsi_ob, "rsi_os": rsi_os,
+                    },
+                })
 
             elif src == "macd_crossover":
                 if macd_hist is not None and self._prev_macd_hist is not None:
-                    rule_results.append(check_macd_crossover(macd_hist, self._prev_macd_hist))
+                    result = check_macd_crossover(macd_hist, self._prev_macd_hist)
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "macd_crossover",
+                        "bull": result[0], "bear": result[1],
+                        "values": {
+                            "macd_hist": round(macd_hist, 5),
+                            "prev_macd_hist": round(self._prev_macd_hist, 5),
+                        },
+                    })
                 elif macd_hist is not None:
                     self._prev_macd_hist = macd_hist  # seed
                     continue
 
             elif src == "rsi_reversal":
                 if rsi is not None and self._prev_rsi is not None:
-                    rule_results.append(check_rsi_reversal(rsi, self._prev_rsi, rsi_ob, rsi_os))
+                    result = check_rsi_reversal(rsi, self._prev_rsi, rsi_ob, rsi_os)
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "rsi_reversal",
+                        "bull": result[0], "bear": result[1],
+                        "values": {
+                            "rsi": round(rsi, 1), "prev_rsi": round(self._prev_rsi, 1),
+                            "rsi_ob": rsi_ob, "rsi_os": rsi_os,
+                        },
+                    })
                 elif rsi is not None:
                     self._prev_rsi = rsi  # seed
                     continue
 
             elif src == "bollinger_breakout":
                 if bb_pct_b is not None:
-                    rule_results.append(check_bollinger(bb_pct_b))
+                    result = check_bollinger(bb_pct_b)
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "bollinger_breakout",
+                        "bull": result[0], "bear": result[1],
+                        "values": {"bb_pct_b": round(bb_pct_b, 4)},
+                    })
 
             elif src == "adx_trend":
                 if adx is not None and plus_di is not None and minus_di is not None:
-                    rule_results.append(check_adx_trend(
+                    result = check_adx_trend(
                         adx, plus_di, minus_di,
                         self.params.get("adx_min_threshold", 20.0),
-                    ))
+                    )
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "adx_trend",
+                        "bull": result[0], "bear": result[1],
+                        "values": {
+                            "adx": round(adx, 1), "plus_di": round(plus_di, 1),
+                            "minus_di": round(minus_di, 1),
+                            "adx_min": self.params.get("adx_min_threshold", 20.0),
+                        },
+                    })
 
             elif src == "bos_confirm":
                 bos_data = m15.get("bos") or {}
                 swing_h = bos_data.get("last_swing_high")
                 swing_l = bos_data.get("last_swing_low")
-                rule_results.append(check_bos(price, swing_h, swing_l))
+                result = check_bos(price, swing_h, swing_l)
+                rule_results.append(result)
+                rule_diagnostics.append({
+                    "source": "bos_confirm",
+                    "bull": result[0], "bear": result[1],
+                    "values": {
+                        "price": round(price, 5),
+                        "swing_high": round(swing_h, 5) if swing_h else None,
+                        "swing_low": round(swing_l, 5) if swing_l else None,
+                    },
+                })
 
         # Update previous-bar state for next cycle
         if ema_fast is not None:
@@ -316,6 +372,20 @@ class AlgorithmicSignalEngine:
         if bb_pct_b is not None:
             self._prev_bb_pct_b = bb_pct_b
 
+        _indicator_snapshot = {
+            "ema_fast": round(ema_fast, 5) if ema_fast is not None else None,
+            "ema_slow": round(ema_slow, 5) if ema_slow is not None else None,
+            "rsi": round(rsi, 1) if rsi is not None else None,
+            "macd_hist": round(macd_hist, 5) if macd_hist is not None else None,
+            "adx": round(adx, 1) if adx is not None else None,
+            "bb_pct_b": round(bb_pct_b, 4) if bb_pct_b is not None else None,
+        }
+        _params_snapshot = {
+            "rsi_ob": rsi_ob, "rsi_os": rsi_os,
+            "adx_min_threshold": self.params.get("adx_min_threshold", 20.0),
+            "signal_logic": signal_logic,
+        }
+
         if not rule_results:
             logger.debug(
                 "[algo] no rule results — all configured rules skipped "
@@ -327,6 +397,12 @@ class AlgorithmicSignalEngine:
                 f"Seed state — building baseline "
                 f"(EMA fast={ema_fast} slow={ema_slow} RSI={rsi})"
             )
+            self.last_neutral_context = {
+                "reason": "seed_state",
+                "rules": [],
+                "indicator_values": _indicator_snapshot,
+                "params": _params_snapshot,
+            }
             return None
 
         is_bull, is_bear = combine(rule_results, signal_logic)
@@ -340,6 +416,12 @@ class AlgorithmicSignalEngine:
                 f"No crossover: EMA fast={ema_fast:.2f} slow={ema_slow:.2f} "
                 f"RSI={rsi:.1f}" if (ema_fast and ema_slow and rsi) else "No directional agreement"
             )
+            self.last_neutral_context = {
+                "reason": "no_directional_agreement",
+                "rules": rule_diagnostics,
+                "indicator_values": _indicator_snapshot,
+                "params": _params_snapshot,
+            }
             return None
 
         direction = TrendDirection.BULLISH if is_bull else TrendDirection.BEARISH
@@ -460,6 +542,7 @@ class AlgorithmicSignalEngine:
 
         # --- Dispatch rules (identical to generate_signal) ---
         rule_results: list[tuple[bool, bool]] = []
+        rule_diagnostics: list[dict] = []
 
         for rule in signal_rules:
             src = rule.get("source", "ema_crossover")
@@ -471,37 +554,87 @@ class AlgorithmicSignalEngine:
                     self._prev_fast = ema_fast
                     self._prev_slow = ema_slow
                     continue
-                rule_results.append(check_ema_crossover(
+                result = check_ema_crossover(
                     ema_fast, self._prev_fast,
                     ema_slow, self._prev_slow,
                     rsi, rsi_ob, rsi_os,
-                ))
+                )
+                rule_results.append(result)
+                rule_diagnostics.append({
+                    "source": "ema_crossover",
+                    "bull": result[0], "bear": result[1],
+                    "values": {
+                        "fast": round(ema_fast, 5), "slow": round(ema_slow, 5),
+                        "rsi": round(rsi, 1), "rsi_ob": rsi_ob, "rsi_os": rsi_os,
+                    },
+                })
             elif src == "macd_crossover":
                 if macd_hist is not None and self._prev_macd_hist is not None:
-                    rule_results.append(check_macd_crossover(macd_hist, self._prev_macd_hist))
+                    result = check_macd_crossover(macd_hist, self._prev_macd_hist)
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "macd_crossover",
+                        "bull": result[0], "bear": result[1],
+                        "values": {"macd_hist": round(macd_hist, 5)},
+                    })
                 elif macd_hist is not None:
                     self._prev_macd_hist = macd_hist
                     continue
             elif src == "rsi_reversal":
                 if rsi is not None and self._prev_rsi is not None:
-                    rule_results.append(check_rsi_reversal(rsi, self._prev_rsi, rsi_ob, rsi_os))
+                    result = check_rsi_reversal(rsi, self._prev_rsi, rsi_ob, rsi_os)
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "rsi_reversal",
+                        "bull": result[0], "bear": result[1],
+                        "values": {
+                            "rsi": round(rsi, 1), "prev_rsi": round(self._prev_rsi, 1),
+                            "rsi_ob": rsi_ob, "rsi_os": rsi_os,
+                        },
+                    })
                 elif rsi is not None:
                     self._prev_rsi = rsi
                     continue
             elif src == "bollinger_breakout":
                 if bb_pct_b is not None:
-                    rule_results.append(check_bollinger(bb_pct_b))
+                    result = check_bollinger(bb_pct_b)
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "bollinger_breakout",
+                        "bull": result[0], "bear": result[1],
+                        "values": {"bb_pct_b": round(bb_pct_b, 4)},
+                    })
             elif src == "adx_trend":
                 if adx is not None and plus_di is not None and minus_di is not None:
-                    rule_results.append(check_adx_trend(
+                    result = check_adx_trend(
                         adx, plus_di, minus_di,
                         self.params.get("adx_min_threshold", 20.0),
-                    ))
+                    )
+                    rule_results.append(result)
+                    rule_diagnostics.append({
+                        "source": "adx_trend",
+                        "bull": result[0], "bear": result[1],
+                        "values": {
+                            "adx": round(adx, 1), "plus_di": round(plus_di, 1),
+                            "minus_di": round(minus_di, 1),
+                            "adx_min": self.params.get("adx_min_threshold", 20.0),
+                        },
+                    })
             elif src == "bos_confirm":
                 bos_data = m15.get("bos") or {}
                 swing_h = bos_data.get("last_swing_high")
                 swing_l = bos_data.get("last_swing_low")
-                rule_results.append(check_bos(price, swing_h, swing_l))
+                result = check_bos(price, swing_h, swing_l)
+                rule_results.append(result)
+                rule_diagnostics.append({
+                    "source": "bos_confirm",
+                    "bull": result[0], "bear": result[1],
+                    "values": {
+                        "price": round(price, 5),
+                        "swing_high": round(swing_h, 5) if swing_h else None,
+                        "swing_low": round(swing_l, 5) if swing_l else None,
+                    },
+                })
 
         # Update state for next cycle
         if ema_fast is not None:
@@ -515,11 +648,25 @@ class AlgorithmicSignalEngine:
         if bb_pct_b is not None:
             self._prev_bb_pct_b = bb_pct_b
 
+        _indicator_snapshot = {
+            "ema_fast": round(ema_fast, 5) if ema_fast is not None else None,
+            "ema_slow": round(ema_slow, 5) if ema_slow is not None else None,
+            "rsi": round(rsi, 1) if rsi is not None else None,
+            "macd_hist": round(macd_hist, 5) if macd_hist is not None else None,
+            "adx": round(adx, 1) if adx is not None else None,
+            "bb_pct_b": round(bb_pct_b, 4) if bb_pct_b is not None else None,
+        }
+
         if not rule_results:
             self.last_neutral_reason = (
                 f"Seed state — building baseline "
                 f"(EMA fast={ema_fast} slow={ema_slow} RSI={rsi})"
             )
+            self.last_neutral_context = {
+                "reason": "seed_state",
+                "rules": [],
+                "indicator_values": _indicator_snapshot,
+            }
             return None
 
         is_bull, is_bear = combine(rule_results, signal_logic)
@@ -529,6 +676,11 @@ class AlgorithmicSignalEngine:
                 f"RSI={rsi:.1f}" if (ema_fast and ema_slow and rsi)
                 else "No directional agreement"
             )
+            self.last_neutral_context = {
+                "reason": "no_directional_agreement",
+                "rules": rule_diagnostics,
+                "indicator_values": _indicator_snapshot,
+            }
             return None
 
         direction = TrendDirection.BULLISH if is_bull else TrendDirection.BEARISH

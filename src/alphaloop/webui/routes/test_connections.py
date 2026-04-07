@@ -153,11 +153,13 @@ async def list_models(
         await repo.get("QWEN_LOCAL_BASE")
         or api_cfg.qwen_local_base
         or "http://localhost:11434"
-    )
+    ).strip()
     try:
         import httpx
         async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get(f"{ollama_base.rstrip('/v1').rstrip('/')}/api/tags")
+            import re
+            ollama_root = re.sub(r'/v1/?$', '', ollama_base.rstrip('/'))
+            resp = await client.get(f"{ollama_root}/api/tags")
             configured[AIProvider.OLLAMA] = resp.status_code == 200
     except Exception:
         configured[AIProvider.OLLAMA] = False
@@ -405,12 +407,14 @@ async def test_ollama(
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
 
-    base_url = body.get("base_url") or await repo.get("QWEN_LOCAL_BASE") or "http://localhost:11434/v1"
+    base_url = (body.get("base_url") or await repo.get("QWEN_LOCAL_BASE") or "http://localhost:11434/v1").strip()
 
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{base_url.rstrip('/v1').rstrip('/')}/api/tags")
+            import re
+            ollama_root = re.sub(r'/v1/?$', '', base_url.rstrip('/'))
+            resp = await client.get(f"{ollama_root}/api/tags")
             if resp.status_code == 200:
                 data = resp.json()
                 models = [m.get("name", "?") for m in data.get("models", [])]
