@@ -21,7 +21,7 @@ const ALIASES = {
 };
 
 // Cache-bust version — increment when deploying new JS
-const _V = '7.1';
+const _V = '8.1';
 
 /**
  * Load a component module on demand.

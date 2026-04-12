@@ -40,7 +40,7 @@
   },
   "status": "dry_run",
   "tools": {
-    "session_filter": false,
+    "session_filter": true,
     "news_filter": true,
     "volatility_filter": true,
     "ema200_filter": true,
@@ -54,16 +54,16 @@
     "risk_filter": true,
     "correlation_guard": true,
     "macd_filter": true,
-    "bollinger_filter": false,
-    "adx_filter": false,
+    "bollinger_filter": true,
+    "adx_filter": true,
     "volume_filter": true,
     "swing_structure": true,
-    "ema_crossover": false,
-    "rsi_feature": false,
-    "trendilo": false,
-    "fast_fingers": false,
-    "choppiness_index": false,
-    "alma_filter": false
+    "ema_crossover": true,
+    "rsi_feature": true,
+    "trendilo": true,
+    "fast_fingers": true,
+    "choppiness_index": true,
+    "alma_filter": true
   },
   "validation": {
     "mode": "swing",

@@ -64,35 +64,48 @@ const DEFAULT_CONFIDENCE_THRESHOLDS = {
 };
 const DETAIL_TOOL_GROUPS = [
   {
-    key: 'pre_signal',
-    label: '① Pre-Signal',
+    key: 'trend',
+    label: '📈 Trend',
     color: 'var(--blue)',
-    tools: ['session_filter', 'news_filter', 'volatility_filter'],
+    description: 'Direction & bias context — EMAs, HTF alignment, USD index, correlations.',
+    tools: [
+      'ema200_filter', 'alma_filter', 'dxy_filter', 'ema_crossover',
+      'trendilo', 'swing_structure', 'correlation_guard',
+    ],
   },
   {
-    key: 'hard_rules',
-    label: '② Hard Rules',
+    key: 'momentum',
+    label: '⚡ Momentum',
+    color: 'var(--amber)',
+    description: 'Speed & follow-through — MACD, ADX, RSI, Bollinger, exhaustion.',
+    tools: [
+      'macd_filter', 'adx_filter', 'rsi_feature',
+      'bollinger_filter', 'fast_fingers',
+    ],
+  },
+  {
+    key: 'structure',
+    label: '🧱 Structure',
     color: 'var(--green)',
-    tools: ['ema200_filter', 'bos_guard', 'fvg_guard', 'tick_jump_guard', 'liq_vacuum_guard', 'vwap_guard'],
+    description: 'Price-structure & key levels — breaks of structure, fair value gaps, VWAP.',
+    tools: ['bos_guard', 'fvg_guard', 'vwap_guard'],
   },
   {
-    key: 'post_signal',
-    label: '③ Post-Signal',
+    key: 'volume',
+    label: '💧 Volume',
     color: '#9b7fe8',
-    tools: ['dxy_filter', 'sentiment_filter', 'risk_filter'],
+    description: 'Participation & sentiment — volume MA, polymarket sentiment.',
+    tools: ['volume_filter', 'sentiment_filter'],
   },
   {
-    key: 'guards',
-    label: '④ Guards',
+    key: 'volatility',
+    label: '🌊 Volatility',
     color: '#e09030',
-    tools: ['correlation_guard'],
-  },
-  {
-    key: 'extras',
-    label: 'Extras',
-    color: '#e09030',
-    tools: ['macd_filter', 'bollinger_filter', 'adx_filter', 'volume_filter', 'swing_structure',
-            'ema_crossover', 'rsi_feature', 'trendilo', 'fast_fingers', 'choppiness_index', 'alma_filter'],
+    description: 'Regime & safety — ATR bands, choppiness, news, liquidity, spreads, sessions.',
+    tools: [
+      'volatility_filter', 'choppiness_index', 'news_filter',
+      'liq_vacuum_guard', 'tick_jump_guard', 'risk_filter', 'session_filter',
+    ],
   },
 ];
 
@@ -1444,31 +1457,43 @@ export async function render(el) {
       </div>
     `;
 
-    /* ── Tools tab ── */
-    const toolsHtml = DETAIL_TOOL_GROUPS.map(group => `
-      <div class="sd-section">
-        <div class="sd-tool-group">
-          <div class="sd-tool-group-header" style="color:${group.color}">
-            <span>${group.label}</span>
-          </div>
-          ${group.tools.map(name => {
-            const on = tools[name] !== false;
-            return `
-              <label class="sd-tool-item">
-                <div style="display:flex;align-items:center;gap:8px">
-                  <span style="font-size:14px;width:20px;text-align:center">${TOOL_ICONS[name] || '\u{1F50C}'}</span>
-                  <div>
-                    <div class="sd-tool-name">${escapeHtml(TOOL_LABELS[name] || name)}</div>
-                    <div class="sd-tool-key">${name}</div>
+    /* ── Tools tab ── grouped by Stage 4B scoring category ── */
+    const toolsHtml = DETAIL_TOOL_GROUPS.map(group => {
+      const enabledCount = group.tools.filter(n => tools[n] !== false).length;
+      const totalCount = group.tools.length;
+      const isDead = enabledCount === 0;
+      const headerMeta = `
+        <span class="sd-tool-group-count" style="color:${isDead ? 'var(--red)' : 'var(--muted)'}">
+          ${enabledCount}/${totalCount}${isDead ? ' · group will score neutral 50' : ''}
+        </span>
+      `;
+      return `
+        <div class="sd-section">
+          <div class="sd-tool-group">
+            <div class="sd-tool-group-header" style="color:${group.color}">
+              <span>${group.label}</span>
+              ${headerMeta}
+            </div>
+            ${group.description ? `<div class="sd-tool-group-desc">${escapeHtml(group.description)}</div>` : ''}
+            ${group.tools.map(name => {
+              const on = tools[name] !== false;
+              return `
+                <label class="sd-tool-item">
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:14px;width:20px;text-align:center">${TOOL_ICONS[name] || '\u{1F50C}'}</span>
+                    <div>
+                      <div class="sd-tool-name">${escapeHtml(TOOL_LABELS[name] || name)}</div>
+                      <div class="sd-tool-key">${name}</div>
+                    </div>
                   </div>
-                </div>
-                <input id="${detailId('tool', name)}" type="checkbox" ${on ? 'checked' : ''}>
-              </label>
-            `;
-          }).join('')}
+                  <input id="${detailId('tool', name)}" type="checkbox" ${on ? 'checked' : ''}>
+                </label>
+              `;
+            }).join('')}
+          </div>
         </div>
-      </div>
-    `).join('');
+      `;
+    }).join('');
 
     /* ── Validation tab ── */
     const validationHtml = `
