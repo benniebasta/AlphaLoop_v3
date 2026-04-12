@@ -4,7 +4,12 @@ from alphaloop.db.models.base import Base, TimestampMixin
 from alphaloop.db.models.settings import AppSetting
 from alphaloop.db.models.trade import TradeLog, TradeAuditLog
 from alphaloop.db.models.research import ResearchReport, ParameterSnapshot, EvolutionEvent
-from alphaloop.db.models.pipeline import PipelineDecision, PipelineDecisionArchive, RejectionLog
+from alphaloop.db.models.pipeline import (
+    PipelineDecision,
+    PipelineDecisionArchive,
+    PipelineStageDecision,
+    RejectionLog,
+)
 from alphaloop.db.models.backtest import BacktestRun
 from alphaloop.db.models.instance import RunningInstance
 from alphaloop.db.models.strategy import StrategyVersion
@@ -27,6 +32,7 @@ __all__ = [
     "EvolutionEvent",
     "PipelineDecision",
     "PipelineDecisionArchive",
+    "PipelineStageDecision",
     "RejectionLog",
     "BacktestRun",
     "RunningInstance",

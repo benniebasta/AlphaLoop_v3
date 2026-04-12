@@ -684,16 +684,25 @@ class TradingLoop:
             enabled_tools=_active_tools,
         )
 
-    async def _log_pipeline_decision(self, result) -> None:
+    async def _log_pipeline_decision(self, result, *, signal_mode: str = "algo_only") -> None:
         """S-06: Persist one PipelineDecision (+ RejectionLog if blocked) to DB.
+
+        Gate-1: also writes one PipelineStageDecision row per journey stage into
+        the ``pipeline_stage_decisions`` table so the observability funnel
+        endpoint can query pass/reject counts per stage without unpacking the
+        legacy ``tool_results.journey`` JSON blob.
 
         Fire-and-forget — caller wraps in try/except so failures never block trading.
         """
         if not self._session_factory:
             return
 
-        from alphaloop.db.models.pipeline import PipelineDecision, RejectionLog
-        from alphaloop.pipeline.types import CycleOutcome
+        from alphaloop.db.models.pipeline import (
+            PipelineDecision,
+            PipelineStageDecision,
+            RejectionLog,
+        )
+        from alphaloop.pipeline.types import CycleOutcome, build_trade_decision
 
         direction = None
         if result.signal:
@@ -730,6 +739,10 @@ class TradingLoop:
             else:
                 blocked_by = "pipeline"
 
+        # Build the TradeDecision projection once and reuse it for per-stage rows.
+        decision = build_trade_decision(result, symbol=self.symbol, mode=signal_mode)
+        cycle_id = f"{self.instance_id or 'loop'}-{int(decision.occurred_at.timestamp() * 1000)}"
+
         async with self._session_factory() as session:
             dec = PipelineDecision(
                 symbol=self.symbol,
@@ -741,6 +754,7 @@ class TradingLoop:
                 tool_results={
                     "journey": journey_payload,
                     "construction_source": result.construction_source,
+                    "trade_decision": decision.to_dict(),
                 } if journey_payload or result.construction_source else None,
                 instance_id=self.instance_id,
             )
@@ -758,6 +772,34 @@ class TradingLoop:
                     instance_id=self.instance_id,
                 )
                 session.add(rej)
+
+            # Per-stage funnel ledger — one row per CandidateJourneyStage.
+            journey = getattr(result, "journey", None)
+            if journey is not None and journey.stages:
+                for idx, stage in enumerate(journey.stages):
+                    session.add(
+                        PipelineStageDecision(
+                            occurred_at=decision.occurred_at,
+                            cycle_id=cycle_id,
+                            source="live",
+                            symbol=self.symbol,
+                            instance_id=self.instance_id,
+                            mode=signal_mode,
+                            stage=stage.stage,
+                            stage_index=idx,
+                            status=stage.status,
+                            blocked_by=stage.blocked_by,
+                            detail=(stage.detail or "")[:2000] or None,
+                            payload=stage.payload or None,
+                            outcome=decision.outcome,
+                            reject_stage=decision.reject_stage,
+                            direction=decision.direction,
+                            setup_type=decision.setup_type,
+                            conviction_score=decision.conviction_score,
+                            size_multiplier=decision.size_multiplier,
+                            latency_ms=decision.latency_ms,
+                        )
+                    )
 
             await session.commit()
 
@@ -824,7 +866,7 @@ class TradingLoop:
 
         # S-06: Persist pipeline decision to DB for Tools tab (fire-and-forget)
         try:
-            await self._log_pipeline_decision(result)
+            await self._log_pipeline_decision(result, signal_mode=signal_mode)
         except Exception:
             pass
 

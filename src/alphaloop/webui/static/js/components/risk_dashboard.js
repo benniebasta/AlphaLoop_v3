@@ -5,7 +5,7 @@
  *  - VaR/CVaR gauges (Section B)
  *  - Stress Test scenarios panel (Section C)
  */
-import { apiGet } from '../api.js';
+import { apiGet, apiPost } from '../api.js';
 
 function pnlColor(val) {
   const n = parseFloat(val);
@@ -189,7 +189,113 @@ function renderRisk(data, stress) {
     <div class="card" style="padding:0;overflow:auto">
       ${stressHtml}
     </div>
+
+    <!-- Section D: Operator actions (Gate-1) — incidents & risk-lock state -->
+    <div class="section-label" style="margin-top:20px">Incidents &amp; Risk Lock</div>
+    <div id="risk-incidents-card" class="card"><div class="muted">Loading…</div></div>
+    <div id="risk-lock-card" class="card" style="margin-top:12px"><div class="muted">Loading…</div></div>
   `;
+}
+
+function escapeHtml(value) {
+  if (value == null) return '';
+  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+}
+
+function renderIncidentsHtml(data) {
+  const incidents = (data && data.incidents) || [];
+  if (!incidents.length) {
+    return '<h4>Active incidents</h4><div class="muted">None. 🎉</div>';
+  }
+  const rows = incidents.map(inc => {
+    const sev = (inc.severity || '').toUpperCase();
+    const sevColor = sev === 'CRITICAL' ? 'var(--red)' : (sev === 'HIGH' ? 'var(--amber)' : 'var(--muted)');
+    const acked = inc.status === 'ACKNOWLEDGED' || inc.status === 'RESOLVED';
+    const btn = acked
+      ? `<span class="muted">${escapeHtml(inc.status)}${inc.acknowledged_by ? ' · ' + escapeHtml(inc.acknowledged_by) : ''}</span>`
+      : `<button class="btn btn-sm btn-primary" data-ack-id="${inc.id}">Acknowledge</button>`;
+    return `
+      <tr>
+        <td><b style="color:${sevColor}">${escapeHtml(sev)}</b></td>
+        <td>${escapeHtml(inc.incident_type)}</td>
+        <td>${escapeHtml(inc.title || '')}</td>
+        <td class="muted">${escapeHtml(inc.symbol || '—')}</td>
+        <td class="muted">${escapeHtml(inc.created_at || '')}</td>
+        <td>${btn}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <h4>Active incidents (${incidents.length})</h4>
+    <table class="obs-compare">
+      <thead><tr><th>severity</th><th>type</th><th>title</th><th>symbol</th><th>opened</th><th>action</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderRiskLockHtml(state) {
+  if (!state) return '<h4>Risk lock</h4><div class="muted">—</div>';
+  if (!state.no_new_risk_active) {
+    return `<h4>Risk lock</h4><div style="color:var(--green)"><b>INACTIVE</b> — ${escapeHtml(state.clear_rule || '')}</div>`;
+  }
+  const reasons = (state.active_reasons || [])
+    .map(r => `<li><b>${escapeHtml(r)}</b> <span class="muted">— ${escapeHtml((state.reason_details[r] || {}).clear_prerequisite || '')}</span></li>`)
+    .join('');
+  const btn = state.compound_clearable
+    ? `<button class="btn btn-primary" id="risk-clear-nnr">Clear no-new-risk</button>`
+    : `<button class="btn btn-sm" disabled title="all active reasons must be acknowledged first">Clear (not clearable yet)</button>`;
+  return `
+    <h4>Risk lock — <span style="color:var(--red)">ACTIVE</span></h4>
+    <ul>${reasons}</ul>
+    <div style="margin-top:8px">${btn}</div>
+    <div class="muted" style="margin-top:6px;font-size:11px">${escapeHtml(state.clear_rule || '')}</div>`;
+}
+
+async function loadOperatorPanels() {
+  const incidentsCard = document.getElementById('risk-incidents-card');
+  const lockCard = document.getElementById('risk-lock-card');
+  if (!incidentsCard || !lockCard) return;
+  try {
+    const [incs, lock] = await Promise.all([
+      apiGet('/api/controls/incidents?limit=50&include_acknowledged=true').catch(e => ({ incidents: [], error: e.message })),
+      apiGet('/api/controls/risk-state').catch(e => ({ error: e.message })),
+    ]);
+    incidentsCard.innerHTML = renderIncidentsHtml(incs);
+    lockCard.innerHTML = renderRiskLockHtml(lock);
+
+    incidentsCard.querySelectorAll('button[data-ack-id]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-ack-id');
+        const note = prompt('Optional note for the acknowledgment:') || '';
+        btn.disabled = true;
+        try {
+          await apiPost(`/api/controls/incidents/${id}/ack`, { operator: 'webui', note });
+          await loadOperatorPanels();
+        } catch (err) {
+          btn.disabled = false;
+          alert('Ack failed: ' + err.message);
+        }
+      });
+    });
+
+    const clearBtn = lockCard.querySelector('#risk-clear-nnr');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', async () => {
+        if (!confirm('Clear no-new-risk? All active reasons will be resolved.')) return;
+        const note = prompt('Note for audit log:') || '';
+        clearBtn.disabled = true;
+        try {
+          const res = await apiPost('/api/controls/no-new-risk/clear', { operator: 'webui', note });
+          alert(res.cleared ? 'Cleared.' : (res.message || 'Done.'));
+          await loadOperatorPanels();
+        } catch (err) {
+          clearBtn.disabled = false;
+          alert('Clear failed: ' + err.message);
+        }
+      });
+    }
+  } catch (err) {
+    incidentsCard.innerHTML = `<div style="color:var(--red)">${escapeHtml(err.message)}</div>`;
+  }
 }
 
 export async function render(container) {
@@ -214,6 +320,7 @@ export async function render(container) {
       if (el) el.innerHTML = renderRisk(data, stress);
       const ts = document.getElementById('risk-updated');
       if (ts) ts.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
+      await loadOperatorPanels();
     } catch (err) {
       const el = document.getElementById('risk-content');
       if (el) el.innerHTML = `<div class="page-error">Error: ${err.message}</div>`;

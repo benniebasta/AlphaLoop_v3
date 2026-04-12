@@ -227,8 +227,9 @@ Canary Deployment (optional):
 
 ## 5. AI Override Hooks
 
-AI can influence each pipeline stage. Signal mode is set per-strategy on the Strategy Card;
-only two modes exist: `algo_only` and `algo_plus_ai` (there is no `ai_only` mode).
+AI can influence each pipeline stage. Signal mode is set per-strategy on the Strategy Card.
+Three modes exist: `algo_only`, `algo_ai`, and `ai_signal`. `algo_ai` is the mode formerly
+referred to as `algo_plus_ai` in older drafts; there is no `ai_only` mode.
 
 | Stage | AI Role | Default Model | When Active |
 |-------|---------|---------------|-------------|

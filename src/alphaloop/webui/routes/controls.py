@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -201,6 +202,126 @@ async def get_controls_portfolio(
     service = getattr(container, "risk_service", None) or RiskService(container.db_session_factory)
     snapshot = await service.get_portfolio_snapshot()
     return snapshot.to_dict()
+
+
+@router.get("/guards-status")
+async def get_guards_status(
+    container: Container = Depends(get_container),
+) -> dict:
+    """Live status of stateful risk guards and recent circuit-breaker signals.
+
+    Gate-1 observability endpoint. Reads the persisted guard state from
+    ``app_settings['risk_guard_state']`` (written by
+    ``risk/guard_persistence.save_guard_state``) and the most recent
+    circuit_breaker-tagged operational events.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from alphaloop.db.models.operational_event import OperationalEvent
+    from alphaloop.db.models.settings import AppSetting
+
+    drawdown_pause: dict[str, Any] = {
+        "available": False,
+        "global_paused": False,
+        "global_pause_until": None,
+        "per_symbol": {},
+        "note": "guard state not yet persisted",
+    }
+    circuit_breaker: dict[str, Any] = {
+        "available": False,
+        "is_open": False,
+        "recent_events": [],
+        "note": "per-process in-memory; DB view approximates via operational_event",
+    }
+
+    session_factory = getattr(container, "db_session_factory", None)
+    if session_factory is None:
+        return {
+            "drawdown_pause": drawdown_pause,
+            "circuit_breaker": circuit_breaker,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async with session_factory() as session:
+        # Drawdown pause — from persisted guard state
+        row = (await session.execute(
+            select(AppSetting).where(AppSetting.key == "risk_guard_state")
+        )).scalar_one_or_none()
+        if row and row.value:
+            try:
+                state = json.loads(row.value)
+                dd = state.get("dd_pause") or {}
+                now = datetime.now(timezone.utc)
+                global_until = dd.get("global_pause_until")
+                global_paused = False
+                if global_until:
+                    try:
+                        gu = datetime.fromisoformat(global_until)
+                        global_paused = gu > now
+                    except (ValueError, TypeError):
+                        gu = None
+                else:
+                    gu = None
+                per_sym: dict[str, dict[str, Any]] = {}
+                for sym, ts in (dd.get("paused_until") or {}).items():
+                    try:
+                        until = datetime.fromisoformat(ts)
+                    except (ValueError, TypeError):
+                        continue
+                    per_sym[sym] = {
+                        "paused": until > now,
+                        "until": until.isoformat(),
+                    }
+                drawdown_pause = {
+                    "available": True,
+                    "global_paused": global_paused,
+                    "global_pause_until": (gu.isoformat() if gu else None),
+                    "per_symbol": per_sym,
+                    "saved_at": state.get("saved_at"),
+                    "note": None,
+                }
+            except (json.JSONDecodeError, TypeError):
+                drawdown_pause["note"] = "guard state JSON invalid"
+
+        # Circuit breaker — surface last 10 circuit_breaker events
+        try:
+            ev_rows = list((await session.execute(
+                select(OperationalEvent)
+                .where(OperationalEvent.event_type.like("%circuit_breaker%"))
+                .order_by(OperationalEvent.created_at.desc())
+                .limit(10)
+            )).scalars())
+        except Exception:
+            ev_rows = []
+        if ev_rows:
+            circuit_breaker = {
+                "available": True,
+                "is_open": any(
+                    (getattr(ev, "severity", "") or "").upper() in ("ERROR", "CRITICAL")
+                    and "open" in (getattr(ev, "event_type", "") or "")
+                    for ev in ev_rows[:3]
+                ),
+                "recent_events": [
+                    {
+                        "event_type": getattr(ev, "event_type", None),
+                        "severity": getattr(ev, "severity", None),
+                        "message": getattr(ev, "message", None),
+                        "created_at": getattr(ev, "created_at").isoformat()
+                            if getattr(ev, "created_at", None) else None,
+                    }
+                    for ev in ev_rows
+                ],
+                "note": "derived from operational_event (approximate)",
+            }
+
+    return {
+        "drawdown_pause": drawdown_pause,
+        "circuit_breaker": circuit_breaker,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.get("/risk-state")

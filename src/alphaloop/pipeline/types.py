@@ -316,3 +316,197 @@ class CandidateJourney:
             "final_outcome": self.final_outcome,
             "rejection_reason": self.rejection_reason,
         }
+
+
+# ---------------------------------------------------------------------------
+# TradeDecision — unified per-cycle explainability object (Gate-1 observability)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TradeDecision:
+    """Single per-cycle explainability record used by UI + funnel endpoint.
+
+    Read-only projection of PipelineResult — never drives behaviour, only
+    displayed in the observability UI so every blocked trade is traceable
+    to a stage, a reason, and the exact penalty/scalar chain.
+    """
+
+    symbol: str = ""
+    mode: str = "algo_only"
+    direction: str | None = None
+    setup_type: str | None = None
+    outcome: str = ""  # CycleOutcome.value
+    reject_stage: str | None = None
+    reject_reason: str | None = None
+    confidence_raw: float | None = None
+    confidence_adjusted: float | None = None
+    conviction_score: float | None = None
+    conviction_decision: str | None = None
+    penalties: list[dict[str, Any]] = field(default_factory=list)  # [{source, points, reason}]
+    size_multiplier: float = 1.0  # product of all size scalars (0 if not executed)
+    hard_block: bool = False
+    ai_verdict: str = "skipped"  # approve | reduce | reject | skipped
+    execution_status: str = "none"  # executed | delayed | blocked | none
+    latency_ms: float = 0.0
+    journey: CandidateJourney | None = None
+    occurred_at: datetime = field(default_factory=_utcnow)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "mode": self.mode,
+            "direction": self.direction,
+            "setup_type": self.setup_type,
+            "outcome": self.outcome,
+            "reject_stage": self.reject_stage,
+            "reject_reason": self.reject_reason,
+            "confidence_raw": self.confidence_raw,
+            "confidence_adjusted": self.confidence_adjusted,
+            "conviction_score": self.conviction_score,
+            "conviction_decision": self.conviction_decision,
+            "penalties": list(self.penalties),
+            "size_multiplier": self.size_multiplier,
+            "hard_block": self.hard_block,
+            "ai_verdict": self.ai_verdict,
+            "execution_status": self.execution_status,
+            "latency_ms": self.latency_ms,
+            "journey": self.journey.to_dict() if self.journey else None,
+            "occurred_at": self.occurred_at.isoformat(),
+        }
+
+
+def build_trade_decision(result: Any, *, symbol: str, mode: str) -> TradeDecision:
+    """Project a PipelineResult into a TradeDecision (read-only, no side effects).
+
+    Lives in types.py to avoid circular imports with orchestrator — the
+    orchestrator and trading loop both call this after _finalise().
+    """
+    outcome_value = getattr(getattr(result, "outcome", None), "value", str(getattr(result, "outcome", "")))
+    rejection_reason = getattr(result, "rejection_reason", None)
+    journey = getattr(result, "journey", None)
+
+    # Resolve the reject stage from the last journey entry that has a blocked_by marker.
+    reject_stage: str | None = None
+    if journey and journey.stages:
+        for stage in reversed(journey.stages):
+            if stage.blocked_by:
+                reject_stage = stage.blocked_by
+                break
+        if reject_stage is None:
+            # NO_SIGNAL / NO_CONSTRUCTION have no blocked_by but still resolve to a stage name
+            last = journey.stages[-1]
+            if last.status in ("no_signal", "rejected", "held", "soft_invalidated"):
+                reject_stage = last.stage
+
+    signal = getattr(result, "signal", None)
+    hypothesis = getattr(result, "hypothesis", None)
+    conviction = getattr(result, "conviction", None)
+    sizing = getattr(result, "sizing", None)
+    risk_gate = getattr(result, "risk_gate", None)
+    invalidation = getattr(result, "invalidation", None)
+    execution_guard = getattr(result, "execution_guard", None)
+
+    direction = None
+    setup_type = None
+    raw_conf = None
+    if signal is not None:
+        direction = getattr(signal, "direction", None)
+        setup_type = getattr(signal, "setup_type", None)
+        raw_conf = getattr(signal, "raw_confidence", None)
+    elif hypothesis is not None:
+        direction = getattr(hypothesis, "direction", None)
+        setup_type = getattr(hypothesis, "setup_tag", None)
+        raw_conf = getattr(hypothesis, "confidence", None)
+
+    penalties: list[dict[str, Any]] = []
+    conviction_score: float | None = None
+    conviction_decision: str | None = None
+    adjusted_conf: float | None = None
+    if conviction is not None:
+        conviction_score = float(getattr(conviction, "score", 0.0))
+        conviction_decision = getattr(conviction, "decision", None)
+        adjusted_conf = float(getattr(conviction, "normalized", 0.0)) or None
+        inv_pen = float(getattr(conviction, "invalidation_penalty", 0.0) or 0.0)
+        if inv_pen:
+            penalties.append({"source": "invalidation", "points": inv_pen, "reason": "soft invalidation"})
+        conf_pen = float(getattr(conviction, "conflict_penalty", 0.0) or 0.0)
+        if conf_pen:
+            penalties.append({"source": "conflict", "points": conf_pen, "reason": "cross-group disagreement"})
+        port_pen = float(getattr(conviction, "portfolio_penalty", 0.0) or 0.0)
+        if port_pen:
+            penalties.append({"source": "portfolio", "points": port_pen, "reason": "portfolio heat / risk budget"})
+        if bool(getattr(conviction, "penalties_prorated", False)):
+            penalties.append({
+                "source": "budget_cap",
+                "points": float(getattr(conviction, "penalty_budget_cap", 0.0) or 0.0),
+                "reason": "penalty budget pro-rated",
+            })
+        if bool(getattr(conviction, "quality_floor_triggered", False)):
+            penalties.append({"source": "quality_floor", "points": 0.0, "reason": "quality floor triggered"})
+
+    if invalidation is not None and getattr(invalidation, "conviction_penalty", 0.0) and conviction is None:
+        penalties.append({
+            "source": "invalidation",
+            "points": float(invalidation.conviction_penalty),
+            "reason": "soft invalidation (no conviction stage)",
+        })
+
+    # Size multiplier = product of all applied scalars; zero if no sizing row.
+    size_mult = 0.0
+    if sizing is not None:
+        size_mult = float(
+            getattr(sizing, "conviction_scalar", 1.0)
+            * getattr(sizing, "regime_scalar", 1.0)
+            * getattr(sizing, "freshness_scalar", 1.0)
+            * getattr(sizing, "risk_gate_scalar", 1.0)
+            * getattr(sizing, "equity_curve_scalar", 1.0)
+        )
+
+    # AI verdict resolution from the ai_validator journey entry, if any.
+    ai_verdict = "skipped"
+    if journey:
+        for stage in journey.stages:
+            if stage.stage == "ai_validator":
+                if stage.status in ("rejected", "reject"):
+                    ai_verdict = "reject"
+                elif stage.status in ("approved", "approve"):
+                    ai_verdict = "approve"
+                elif stage.status == "skipped":
+                    ai_verdict = "skipped"
+                else:
+                    ai_verdict = stage.status
+                break
+
+    # Execution status
+    exec_status = "none"
+    if outcome_value == "trade_opened":
+        exec_status = "executed"
+    elif outcome_value == "delayed":
+        exec_status = "delayed"
+    elif outcome_value in ("rejected", "held", "order_failed"):
+        exec_status = "blocked"
+
+    # Hard block = any blocked_by stage that is not a soft-hold or no_signal path
+    soft_blockers = {"conviction", "regime_setup_policy", "shadow_mode", "freshness"}
+    hard_block = bool(reject_stage and reject_stage not in soft_blockers and outcome_value in ("rejected", "order_failed"))
+
+    return TradeDecision(
+        symbol=symbol,
+        mode=mode,
+        direction=direction,
+        setup_type=setup_type,
+        outcome=outcome_value,
+        reject_stage=reject_stage,
+        reject_reason=rejection_reason,
+        confidence_raw=raw_conf,
+        confidence_adjusted=adjusted_conf,
+        conviction_score=conviction_score,
+        conviction_decision=conviction_decision,
+        penalties=penalties,
+        size_multiplier=size_mult,
+        hard_block=hard_block,
+        ai_verdict=ai_verdict,
+        execution_status=exec_status,
+        latency_ms=float(getattr(result, "elapsed_ms", 0.0) or 0.0),
+        journey=journey,
+    )

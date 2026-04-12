@@ -4,6 +4,59 @@ Timestamped record of major changes, bug postmortems, and architectural decision
 
 ---
 
+## 2026-04-12 — Gate-1 Throughput-Rebalance Observability
+
+### Summary
+Ships the observability half of the throughput-vs-safety rebalance plan
+(`.claude/plans/imperative-splashing-gizmo.md`). Adds a per-stage pipeline
+decision ledger, a funnel endpoint, a `TradeDecision` projection, a new
+Observability UI tab, UI wiring for incident-ack and no-new-risk-clear, a
+replay harness, and a single-source-of-truth blocking-policy doc. **No
+behaviour change** — this is observability only; the Gate-2 hard→soft
+reclassification is gated on reading the resulting funnel.
+
+### Measurement (from backfill over 241 live cycles)
+`Stage-5 HELD + Stage-4A HARD + Stage-7 RiskGate = 67 % ≥ 60 %` → over-blocking hypothesis **confirmed**. Conviction is the dominant choke point (100 % held-rate over 89 signals that reached Stage 5). See `docs/references/throughput-rebalance-report.md`.
+
+### Added — backend
+- `db/models/pipeline.py::PipelineStageDecision` — new append-only per-stage ledger.
+- `db/migrations/versions/003_pipeline_stage_decisions.py` — alembic migration + indexes.
+- `pipeline/types.py::TradeDecision` + `build_trade_decision()` — read-only projection of `PipelineResult` capturing outcome, reject stage, raw/adjusted confidence, per-source penalties, size multiplier, AI verdict, execution status, latency, and full journey.
+- `trading/loop.py::_log_pipeline_decision` — now writes one stage row per `CandidateJourneyStage` and serialises the `TradeDecision` into the existing `pipeline_decisions.tool_results["trade_decision"]`.
+- `webui/routes/pipeline.py` (new) — `GET /api/pipeline/funnel`, `GET /api/pipeline/decisions/latest`, `GET /api/pipeline/stages/heatmap`, `GET /api/pipeline/modes/compare`.
+- `webui/routes/controls.py::get_guards_status` — new `GET /api/controls/guards-status` reading persisted drawdown-pause state from `app_settings["risk_guard_state"]` and recent circuit-breaker `operational_events`.
+- `webui/app.py` — registers the pipeline router.
+
+### Added — UI
+- `webui/static/js/components/observability.js` (new) — 🔍 Observability tab with guards status, pipeline funnel, mode compare, stage heatmap and decision cards (full journey + penalty list).
+- `webui/static/js/components/risk_dashboard.js` — new "Incidents & Risk Lock" card wiring existing `/api/controls/incidents/{id}/ack` and `/api/controls/no-new-risk/clear` endpoints with confirm-first UX.
+- `webui/static/js/app.js` + `static/index.html` — new `observability` route + sidebar entry under "Risk & Monitoring".
+- `webui/static/css/app.css` — theme-aware CSS for funnel, decision cards, heatmap, compare table, guards cards.
+
+### Added — tooling + docs + tests
+- `scripts/replay_pipeline.py` (new) — `--source backfill` re-projects legacy `pipeline_decisions.tool_results.journey` JSON into per-stage rows; `--source backtest` writes a pinned JSON baseline from `run_vectorbt_backtest`.
+- `docs/references/blocking-policy.md` (new) — authoritative hard/soft table keyed by `file:line`.
+- `docs/references/pipeline-funnel.md` (new) — ledger schema, endpoint shapes, replay harness usage.
+- `docs/references/trade-decision.md` (new) — `TradeDecision` contract.
+- `docs/references/observability.md` (new) — 60-second blocked-trade debug flow.
+- `docs/references/webui-audit.md` (new) — per-setting live-sync audit and Gate-2 action list.
+- `docs/references/throughput-rebalance-report.md` (new) — Gate-1 report with the measured funnel and the Gate-2 go/no-go decision rule.
+- `docs/claude/claude-pipelines.md` — fixed the stale "two-mode" text to match the three modes (`algo_only`, `algo_ai`, `ai_signal`).
+- `tests/unit/test_trade_decision.py` (new) — 6 unit tests for `build_trade_decision()`.
+- `tests/integration/test_pipeline_funnel.py` (new) — 5 integration tests for funnel / heatmap / mode-compare / latest-decisions endpoints using in-memory SQLite through the ASGI transport.
+
+### Safety invariants preserved
+SL/TP direction sanity, kill switch on daily loss, signal hash dedup, feed desync guard, drawdown pause, risk filter `severity=block`, AI validator reject in `ai_signal` — all untouched. Ledger writes are inside the existing fire-and-forget `try/except` in `_log_pipeline_decision`, so any DB failure never blocks a trade.
+
+### Verification
+- `pytest tests/unit/test_trade_decision.py tests/integration/test_pipeline_funnel.py -v` → **11 passed**.
+- End-to-end preview run on port 8090 with real backfill data rendered the funnel, guards card, decision panel, and heatmap correctly.
+
+### Gate-2 (deferred, requires operator approval)
+Reclassification of quality floors, near-dedup distance, concurrent-trade cap, stale-bar tolerance, spread ratio, confidence-variance threshold, per-setup R:R, validator mode authority, and dedup of duplicate filters is **unlocked** by the measured funnel.
+
+---
+
 ## 2026-04-05 — v3 Validation Path Deleted
 
 ### Summary
