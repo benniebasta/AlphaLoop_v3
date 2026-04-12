@@ -22,6 +22,20 @@ _PLUGINS_DIR = Path(__file__).parent / "plugins"
 # Maps each pipeline stage to the tool plugin names that belong there.
 # Used by TradingLoop._get_stage_tools() to inject the right plugins into
 # each stage constructor rather than passing all tools everywhere.
+#
+# Stage 4B ("quality") note: this stage runs ``extract_features()`` on every
+# tool it receives and aggregates results by scoring group (trend, momentum,
+# structure, volume, volatility — see ``scoring/weights.py::SCORING_GROUPS``).
+# If a group has zero tools, ``GroupScorer.score_group()`` returns the
+# neutral default of 50.0 and that group never contributes real information
+# to conviction. Gate-1 observability measurements (2026-04-12) showed that
+# three of five groups (structure, volatility, momentum) were sitting at
+# exactly 50.0 for 89/89 held cycles because the old "quality" list only
+# mapped trend + volume + one disabled momentum tool. A tool may legitimately
+# appear in multiple stages — its ``extract_features()`` is cheap and
+# side-effect-free, so listing ``bos_guard`` here (for scoring) does not
+# interfere with its role at "construction" (for SL derivation). See
+# ``docs/references/throughput-rebalance-report.md`` for the measurement.
 STAGE_TOOL_MAP: dict[str, list[str]] = {
     "market_gate":  ["session_filter", "news_filter", "volatility_filter"],
     "regime":       ["adx_filter", "choppiness_index", "trendilo"],
@@ -29,8 +43,16 @@ STAGE_TOOL_MAP: dict[str, list[str]] = {
     "construction": ["swing_structure", "fvg_guard", "bos_guard"],
     "invalidation": ["liq_vacuum_guard", "vwap_guard"],
     "quality":      [
-        "ema200_filter", "alma_filter", "bollinger_filter",
-        "volume_filter", "dxy_filter", "sentiment_filter",
+        # trend
+        "ema200_filter", "alma_filter", "dxy_filter", "ema_crossover",
+        # momentum
+        "macd_filter", "adx_filter", "rsi_feature", "bollinger_filter", "fast_fingers",
+        # structure (dual-purpose — also drive SL derivation at "construction")
+        "bos_guard", "fvg_guard", "swing_structure",
+        # volume
+        "volume_filter", "sentiment_filter",
+        # volatility
+        "choppiness_index", "news_filter", "volatility_filter", "liq_vacuum_guard",
     ],
     "risk_gate":    ["risk_filter", "correlation_guard"],
     "exec_guard":   ["tick_jump_guard"],
