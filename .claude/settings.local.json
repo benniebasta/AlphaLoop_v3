@@ -219,7 +219,8 @@
       "Bash(curl -s \"http://localhost:8090/api/pipeline/decisions/latest?limit=50\")",
       "Bash(curl -s \"http://localhost:8090/api/pipeline/funnel?hours=1&source=historical_replay\")",
       "Bash(curl -s http://localhost:8090/api/strategies)",
-      "Bash(curl -s \"http://localhost:8090/api/strategies/phantom-knight-BTCUSD_ai/v1\")"
+      "Bash(curl -s \"http://localhost:8090/api/strategies/phantom-knight-BTCUSD_ai/v1\")",
+      "Bash(wc -l docs/planning/*.md docs/claude/*.md docs/references/*.md)"
     ]
   }
 }
