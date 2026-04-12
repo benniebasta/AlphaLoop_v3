@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from alphaloop.backtester.vbt_engine import (
     VBTBacktestResult,
+    _build_backtest_strategy_payload,
     _configured_signal_logic,
     _configured_signal_rules,
     _resolve_backtest_setup_tag,
@@ -47,6 +48,36 @@ def _make_ohlcv(n=200, base_price=2700.0, trend_strength=0.5):
 
 
 class TestVBTBacktestBasic:
+    def test_build_backtest_strategy_payload_keeps_flat_numeric_params_and_resolves_spec_first_rules(self):
+        params = {
+            "ema_fast": 13,
+            "ema_slow": 34,
+            "signal_rules": [{"source": "ema_crossover"}],
+            "signal_logic": "AND",
+            "setup_family": "pullback_continuation",
+            "source": "legacy_flat",
+            "strategy_spec": {
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "entry_model": {
+                    "signal_rule_sources": ["macd_crossover"],
+                    "signal_logic": "OR",
+                },
+                "metadata": {
+                    "source": "ui_ai_signal_card",
+                },
+            },
+        }
+
+        payload = _build_backtest_strategy_payload(params)
+
+        assert payload["params"]["ema_fast"] == 13
+        assert payload["params"]["ema_slow"] == 34
+        assert payload["params"]["signal_rules"] == [{"source": "macd_crossover"}]
+        assert payload["params"]["signal_logic"] == "OR"
+        assert payload["strategy_spec"]["setup_family"] == "discretionary_ai"
+        assert payload["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
     def test_backtest_rule_loader_defaults_missing_rules_for_backward_compat(self):
         assert _configured_signal_rules({"signal_rules": None}) == [{"source": "ema_crossover"}]
         assert _configured_signal_logic({"signal_logic": None}) == "AND"

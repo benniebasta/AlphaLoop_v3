@@ -108,7 +108,6 @@ const SCHEMA = [
           { key: 'MT5_SERVER',    label: 'Server',        type: 'text',     desc: 'MT5 broker server (e.g. Exness-MT5Trial7).' },
           { key: 'MT5_LOGIN',     label: 'Login',         type: 'number',   desc: 'MT5 account number.' },
           { key: 'MT5_PASSWORD',  label: 'Password',      type: 'password', desc: 'MT5 account password.' },
-          { key: 'MT5_SYMBOL',    label: 'Symbol',        type: 'text',     desc: 'Default trading instrument (e.g. XAUUSDm, BTCUSDm).' },
           { key: 'MT5_TERMINAL_PATH', label: 'Terminal Path', type: 'text', desc: 'Full path to terminal64.exe. Leave blank to auto-detect.' },
         ],
       },
@@ -263,6 +262,9 @@ const SCHEMA = [
         fields: [
           { key: 'tool_enabled_session_filter',     label: 'Session Filter',     type: 'toggle', desc: 'Block trades outside active sessions (London/NY). Order: 1.' },
           { key: 'MIN_SESSION_SCORE',               label: 'Min Session Score',  type: 'number', desc: 'Min session quality score (0.0–1.0). Default: 0.55' },
+          { key: 'SESSION_SCORE_NOTE', label: 'Session Score — Asset Defaults', type: 'readonly',
+            default: 'Crypto & Asia pairs use 0.40; metals & major forex use 0.70.',
+            desc: 'BTCUSD/ETHUSD: 0.40 | USDJPY: 0.40 | AUDUSD: 0.40 | XAUUSD/XAGUSD/EURUSD/GBPUSD/US30/NAS100: 0.70. Override per strategy card → Tune tab or edit AssetConfig.min_session_score.' },
           { key: 'tool_enabled_news_filter',        label: 'News Filter',        type: 'toggle', desc: 'Block trades around high-impact news events. Order: 2.' },
           { key: 'NEWS_PRE_MINUTES',                label: 'Pre-News Window (min)', type: 'number', desc: 'Minutes before news to block. Default: 30' },
           { key: 'NEWS_POST_MINUTES',               label: 'Post-News Window (min)', type: 'number', desc: 'Minutes after news to block. Default: 15' },
@@ -304,6 +306,9 @@ const SCHEMA = [
           { key: 'USE_VOLUME_FILTER',   label: 'Volume Filter',          type: 'toggle', desc: 'Block if volume below average.' },
           { key: 'VOLUME_MA_PERIOD',    label: 'Volume MA Period',       type: 'number', desc: 'Volume moving average bars. Default: 20' },
           { key: 'USE_SWING_STRUCTURE', label: 'Swing Structure',        type: 'toggle', desc: 'Require HH/HL for BUY, LH/LL for SELL.' },
+          { key: 'GUARD_RSI_NOTE', label: 'RSI Thresholds — Asset Notes', type: 'readonly',
+            default: 'RSI OB/OS are uniform (70/30) across all assets by default.',
+            desc: 'Crypto (BTC/ETH) benefits from wider bands: OB=75, OS=25. Metals/FX can stay at 70/30. ATR-relative guards (BOS, FVG, VWAP, TickJump) are already asset-normalised — no per-symbol tuning needed. Edit AssetConfig.rsi_overbought/rsi_oversold for per-symbol extremes.' },
         ],
       },
       {
@@ -323,6 +328,9 @@ const SCHEMA = [
           { key: 'CORRELATION_THRESHOLD_BLOCK',     label: 'Correlation — Block Threshold',   type: 'number', desc: 'Block if correlation ≥ this. Default: 0.90' },
           { key: 'CORRELATION_THRESHOLD_REDUCE',    label: 'Correlation — Reduce Threshold',  type: 'number', desc: 'Reduce size if correlation ≥ this. Default: 0.75' },
           { key: 'GUARD_NEAR_DEDUP_ATR',            label: 'Near-Position Dedup (ATR)',       type: 'number', desc: 'Skip signal if open trade within N ATR. Default: 1.0' },
+          { key: 'STATEFUL_NOTE', label: 'Stateful Guards — Asset Notes', type: 'readonly',
+            default: 'All stateful guards are system-wide — no per-symbol customisation needed.',
+            desc: 'Spread regime uses N× rolling median (already relative to each symbol\'s normal spread). Near-dedup uses ATR units (already normalised). Equity curve & drawdown pause apply account-wide across all open bots.' },
         ],
       },
       {
@@ -336,6 +344,7 @@ const SCHEMA = [
           { key: 'REPOSITIONER_VOLUME_SPIKE_MULT',    label: 'Volume Spike Multiplier',     type: 'number', desc: 'M15 volume must be ≥ N× 20-bar avg. Default: 2.5' },
           { key: 'REPOSITIONER_VOLATILITY_SPIKE',     label: 'Volatility Spike — Trail SL', type: 'toggle', desc: 'Move SL to breakeven on ATR spike if in profit.' },
           { key: 'REPOSITIONER_VOLATILITY_SPIKE_MULT', label: 'ATR Spike Multiplier',       type: 'number', desc: 'H1 ATR must be ≥ N× baseline. Default: 1.8' },
+          { key: 'TRAIL_NOTE',             label: 'Trailing SL Defaults',        type: 'readonly', default: 'Per-symbol defaults live in AssetConfig (assets.py). Override per strategy card → Tune tab.', desc: 'XAUUSD: ATR×1.5, 200 pips, 1.0R act. | BTCUSD: ATR×2.0, 1500 pips, 1.5R act. | NAS100: ATR×2.0, 400 pips. Enable per strategy in Tools tab → Exit Management.' },
         ],
       },
       {
@@ -447,10 +456,13 @@ export async function render(container) {
     _modelCatalog = modelData.models || [];
     _usageData = usageResp.usage || {};
   } catch (err) {
-    document.getElementById('settings-panel').innerHTML =
-      `<div class="settings-error">⚠️ ${err.message}</div>`;
+    const errPanel = document.getElementById('settings-panel');
+    if (errPanel) errPanel.innerHTML = `<div class="settings-error">⚠️ ${err.message}</div>`;
     return;
   }
+
+  // Guard: if user navigated away while data was loading, the container is gone
+  if (!document.getElementById('save-settings')) return;
 
   /* ── Sounds panel (localStorage-only) ───────────────────────────────── */
   function renderSoundsPanel() {
@@ -922,7 +934,7 @@ export async function render(container) {
 
   /* ── Field renderer ──────────────────────────────────────────────────── */
   function renderField(f) {
-    const val = allSettings[f.key] ?? '';
+    const val = allSettings[f.key] ?? f.default ?? '';
     const sensitive = isSensitive(f.key);
     const configured = sensitive && val;
     const desc = f.desc ? `<div class="field-desc">${f.desc}</div>` : '';
@@ -952,6 +964,16 @@ export async function render(container) {
           <span class="toggle-label">${isTrue(val) ? 'Enabled' : 'Disabled'}</span>
         </label>`;
       // Update label on change
+    } else if (f.type === 'readonly') {
+      const text = f.default ?? '';
+      return `
+      <div class="field-row field-row--info">
+        <div class="field-label">${f.label}</div>
+        <div class="field-control">
+          <div class="field-info-box">${text}</div>
+          ${desc}
+        </div>
+      </div>`;
     } else if (f.type === 'select') {
       const opts = (f.options || []).map(o => {
         const v = typeof o === 'object' ? o.value : o;
@@ -988,7 +1010,9 @@ export async function render(container) {
   }
 
   /* ── Save ────────────────────────────────────────────────────────────── */
-  document.getElementById('save-settings').addEventListener('click', async () => {
+  const saveBtn = document.getElementById('save-settings');
+  if (!saveBtn) return; // navigated away before async data loaded
+  saveBtn.addEventListener('click', async () => {
     // Strip masked values (***...xxxx) — these are server-side redactions and must
     // not be written back, otherwise they overwrite the real secrets in the DB.
     const toSend = Object.fromEntries(

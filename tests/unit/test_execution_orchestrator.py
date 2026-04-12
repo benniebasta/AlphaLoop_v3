@@ -8,6 +8,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from alphaloop.core.events import EventBus, TradeOpened
+from alphaloop.trading.runtime_utils import (
+    current_account_balance,
+    current_strategy_reference,
+    safe_json_payload,
+    session_name_from_context,
+)
 from alphaloop.trading.execution_orchestrator import ExecutionOrchestrator, ExecutionOutcome
 
 
@@ -133,33 +139,54 @@ def test_execution_outcome_defaults():
 # ---------------------------------------------------------------------------
 
 def test_safe_json_payload_dict():
-    result = ExecutionOrchestrator._safe_json_payload({"a": 1})
+    result = safe_json_payload({"a": 1})
     assert result == {"a": 1}
 
 
 def test_safe_json_payload_none():
-    assert ExecutionOrchestrator._safe_json_payload(None) is None
+    assert safe_json_payload(None) is None
 
 
 def test_safe_json_payload_plain_value():
-    result = ExecutionOrchestrator._safe_json_payload("hello")
+    result = safe_json_payload("hello")
     assert result == {"value": "hello"}
 
 
 def test_session_name_from_context_dict():
     ctx = {"session": {"name": "london_session"}}
-    assert ExecutionOrchestrator._session_name_from_context(ctx) == "london_session"
+    assert session_name_from_context(ctx) == "london_session"
 
 
 def test_session_name_from_context_object():
     ctx = MagicMock()
     ctx.session = MagicMock()
     ctx.session.name = "ny_session"
-    assert ExecutionOrchestrator._session_name_from_context(ctx) == "ny_session"
+    assert session_name_from_context(ctx) == "ny_session"
 
 
 def test_session_name_from_context_empty():
-    assert ExecutionOrchestrator._session_name_from_context({}) == ""
+    assert session_name_from_context({}) == ""
+
+
+def test_current_account_balance_prefers_risk_monitor():
+    risk_monitor = SimpleNamespace(account_balance=12_500.0)
+    sizer = SimpleNamespace(account_balance=10_000.0)
+
+    assert current_account_balance(risk_monitor=risk_monitor, sizer=sizer) == 12_500.0
+
+
+def test_current_account_balance_falls_back_to_sizer():
+    risk_monitor = SimpleNamespace(account_balance=0.0)
+    sizer = SimpleNamespace(account_balance=10_000.0)
+
+    assert current_account_balance(risk_monitor=risk_monitor, sizer=sizer) == 10_000.0
+
+
+def test_current_account_balance_returns_zero_when_missing():
+    risk_monitor = SimpleNamespace(account_balance=0.0)
+    sizer = SimpleNamespace(account_balance=0.0)
+
+    assert current_account_balance(risk_monitor=risk_monitor, sizer=sizer) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -170,15 +197,16 @@ def test_update_state_sets_active_strategy():
     orch = _make_orchestrator()
     new_strat = MagicMock()
     new_strat.version = 9
-    orch.update_state(active_strategy=new_strat, canary_allocation=0.5)
+    orch.update_state(active_strategy=new_strat, runtime_strategy={"version": 9}, canary_allocation=0.5)
     assert orch._active_strategy is new_strat
+    assert orch._runtime_strategy == {"version": 9}
     assert orch._canary_allocation == 0.5
 
 
 def test_update_state_sizer_kwarg():
     orch = _make_orchestrator()
     new_sizer = MagicMock()
-    orch.update_state(active_strategy=orch._active_strategy, canary_allocation=None, sizer=new_sizer)
+    orch.update_state(active_strategy=orch._active_strategy, runtime_strategy={"version": 5}, canary_allocation=None, sizer=new_sizer)
     assert orch._sizer is new_sizer
 
 
@@ -401,6 +429,31 @@ async def test_execute_combined_scalar_reduces_lots():
     assert captured_sizing[0] == pytest.approx(0.08, abs=0.01)
 
 
+@pytest.mark.asyncio
+async def test_execute_prefers_cached_runtime_strategy_snapshot_for_submission_metadata():
+    captured = {}
+
+    async def _mock_execute_market_order(**kwargs):
+        captured.update(kwargs)
+        return _make_exec_report(status="FILLED", broker_ticket=99, fill_price=2353.0)
+
+    exec_svc = MagicMock()
+    exec_svc.execute_market_order = _mock_execute_market_order
+    orch = _make_orchestrator(execution_service=exec_svc)
+    stale_strategy = MagicMock()
+    stale_strategy.version = "legacy"
+    orch.update_state(
+        active_strategy=stale_strategy,
+        runtime_strategy={"version": 11, "symbol": "XAUUSD"},
+        canary_allocation=None,
+    )
+
+    await orch.execute(_make_result(), {})
+
+    assert captured["strategy_id"] == "XAUUSD.v11"
+    assert captured["strategy_version"] == "11"
+
+
 # ---------------------------------------------------------------------------
 # execute — notifier error is non-fatal
 # ---------------------------------------------------------------------------
@@ -420,28 +473,40 @@ async def test_execute_notifier_exception_does_not_abort():
 
 
 # ---------------------------------------------------------------------------
-# active_strategy_id helper
+# current strategy reference helper
 # ---------------------------------------------------------------------------
 
-def test_active_strategy_id_with_strategy():
+def test_current_strategy_reference_with_strategy():
     orch = _make_orchestrator()
     orch._active_strategy.version = 7
-    assert orch._active_strategy_id() == "XAUUSD.v7"
+    assert current_strategy_reference(
+        symbol=orch.symbol,
+        runtime_strategy=orch._runtime_strategy,
+        active_strategy=orch._active_strategy,
+    )["strategy_id"] == "XAUUSD.v7"
 
 
-def test_active_strategy_id_no_strategy():
+def test_current_strategy_reference_no_strategy():
     orch = _make_orchestrator()
     orch._active_strategy = None
-    assert orch._active_strategy_id() == "XAUUSD"
+    assert current_strategy_reference(
+        symbol=orch.symbol,
+        runtime_strategy=orch._runtime_strategy,
+        active_strategy=orch._active_strategy,
+    )["strategy_id"] == "XAUUSD"
 
 
-def test_active_strategy_id_prefers_spec_first_runtime_context():
+def test_current_strategy_reference_prefers_spec_first_runtime_context():
     orch = _make_orchestrator()
     orch._active_strategy = SimpleNamespace(
         version="legacy",
         strategy_spec=SimpleNamespace(spec_version="v1"),
     )
-    assert orch._active_strategy_id() == "XAUUSD"
+    assert current_strategy_reference(
+        symbol=orch.symbol,
+        runtime_strategy=orch._runtime_strategy,
+        active_strategy=orch._active_strategy,
+    )["strategy_id"] == "XAUUSD"
 
 
 @pytest.mark.asyncio
@@ -468,5 +533,5 @@ async def test_submit_prefers_spec_first_runtime_version_for_execution_metadata(
 
     await orch.execute(_make_result(), {})
 
-    assert captured["strategy_id"] == "XAUUSD"
-    assert captured["strategy_version"] == ""
+    assert captured["strategy_id"] == "XAUUSD.v9"
+    assert captured["strategy_version"] == "9"

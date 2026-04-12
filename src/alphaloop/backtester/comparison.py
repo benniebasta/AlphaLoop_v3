@@ -35,6 +35,7 @@ from alphaloop.pipeline.conviction import ConvictionScorer
 from alphaloop.pipeline.execution_guard import ExecutionGuardRunner
 from alphaloop.pipeline.risk_gate import RiskGateRunner
 from alphaloop.trading.strategy_loader import (
+    build_algorithmic_params,
     build_strategy_resolution_input,
     resolve_strategy_setup_family,
 )
@@ -81,6 +82,37 @@ def _resolve_comparison_setup_type(params: BacktestParams, setup_label: str | No
     if family:
         return normalize_pipeline_setup_type(family)
     return normalize_pipeline_setup_type(raw_label)
+
+
+def _resolve_comparison_signal_sources(params: BacktestParams, setup_label: str | None) -> list[str]:
+    """Resolve canonical signal sources for comparison telemetry."""
+    raw_label = str(setup_label or "").strip().lower()
+    if raw_label in {
+        "ema_crossover",
+        "macd_crossover",
+        "rsi_reversal",
+        "bollinger_breakout",
+        "adx_trend",
+        "bos_confirm",
+    }:
+        return [raw_label]
+
+    strategy_like = build_strategy_resolution_input(params, tools=params.tools)
+    resolved_params = build_algorithmic_params(strategy_like)
+    sources = [
+        str(item.get("source") or "").strip().lower()
+        for item in (resolved_params.get("signal_rules") or [])
+        if isinstance(item, dict) and str(item.get("source") or "").strip()
+    ]
+    if sources:
+        return sources
+
+    family = resolve_strategy_setup_family(strategy_like)
+    if family:
+        return [family]
+    if raw_label:
+        return [raw_label]
+    return ["backtest"]
 
 
 # ---------------------------------------------------------------------------
@@ -323,15 +355,16 @@ def make_v4_signal_fn(
         # Build a signal generator that returns the v3 signal as a CandidateSignal
         async def gen_signal(context, regime):
             rr = abs(tp1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+            resolved_setup_type = _resolve_comparison_setup_type(params, setup_type)
             return CandidateSignal(
                 direction="BUY" if direction == TradeDirection.BUY else "SELL",
-                setup_type=_resolve_comparison_setup_type(params, setup_type),
+                setup_type=resolved_setup_type,
                 entry_zone=(entry - 0.5, entry + 0.5),
                 stop_loss=sl,
                 take_profit=[tp1] + ([tp2] if tp2 else []),
                 raw_confidence=conf,
                 rr_ratio=rr,
-                signal_sources=[setup_type or "backtest"],
+                signal_sources=_resolve_comparison_signal_sources(params, setup_type),
                 reasoning="backtest signal",
                 regime_at_generation=regime.regime,
             )

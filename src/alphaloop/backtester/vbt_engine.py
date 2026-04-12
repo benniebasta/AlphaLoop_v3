@@ -35,9 +35,12 @@ from alphaloop.pipeline.construction import TradeConstructor
 from alphaloop.pipeline.types import DirectionHypothesis
 from alphaloop.signals.algorithmic import compute_direction
 from alphaloop.trading.strategy_loader import (
+    build_algorithmic_params,
+    build_strategy_resolution_input,
     resolve_algorithmic_setup_tag,
     resolve_strategy_signal_logic,
     resolve_strategy_signal_rules,
+    serialize_strategy_spec,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,34 +78,35 @@ class VBTBacktestResult:
     error: str | None = None
 
 
+def _build_backtest_strategy_payload(params: dict[str, Any]) -> dict[str, Any]:
+    """Build one canonical strategy payload for the vectorbt path."""
+    payload = build_strategy_resolution_input(
+        {
+            "signal_mode": params.get("signal_mode"),
+            "setup_family": params.get("setup_family"),
+            "strategy_spec": params.get("strategy_spec"),
+            "source": params.get("source"),
+            "tools": params.get("tools"),
+            "params": dict(params),
+        }
+    )
+    payload["params"] = build_algorithmic_params(payload)
+    payload["strategy_spec"] = serialize_strategy_spec(payload)
+    return payload
+
+
 def _resolve_backtest_setup_tag(params: dict[str, Any]) -> str:
     """Resolve the backtest hypothesis setup tag through the shared strategy contract."""
-    raw_tools = params.get("tools")
-    if isinstance(raw_tools, dict):
-        tool_flags = dict(raw_tools)
-    elif isinstance(raw_tools, (list, tuple, set)):
-        tool_flags = {str(name): True for name in raw_tools}
-    else:
-        tool_flags = {}
-
-    strategy_like = {
-        "signal_mode": params.get("signal_mode"),
-        "setup_family": params.get("setup_family"),
-        "strategy_spec": params.get("strategy_spec"),
-        "source": params.get("source"),
-        "params": dict(params),
-        "tools": tool_flags,
-    }
-    return resolve_algorithmic_setup_tag(strategy_like)
+    return resolve_algorithmic_setup_tag(_build_backtest_strategy_payload(params))
 
 
 def _configured_signal_rules(params: dict[str, Any]) -> list[dict]:
     """Resolve signal rules through the shared strategy contract."""
-    return resolve_strategy_signal_rules(params, default_to_ema=True)
+    return resolve_strategy_signal_rules(_build_backtest_strategy_payload(params), default_to_ema=True)
 
 
 def _configured_signal_logic(params: dict[str, Any]) -> str:
-    return resolve_strategy_signal_logic(params)
+    return resolve_strategy_signal_logic(_build_backtest_strategy_payload(params))
 
 
 def run_vectorbt_backtest(
@@ -145,26 +149,29 @@ def run_vectorbt_backtest(
     if len(ohlcv_df) < 60:
         return VBTBacktestResult(error=f"Insufficient data: {len(ohlcv_df)} bars (need 60+)")
 
+    strategy_payload = _build_backtest_strategy_payload(params)
+    resolved_params = strategy_payload["params"]
+
     # --- Build TradeConstructor ---
     tc = TradeConstructor(
         pip_size=asset_config.pip_size,
-        sl_min_pts=float(params.get("sl_min_points", asset_config.sl_min_points)),
-        sl_max_pts=float(params.get("sl_max_points", asset_config.sl_max_points)),
-        tp1_rr=float(params.get("tp1_rr", asset_config.tp1_rr)),
-        tp2_rr=float(params.get("tp2_rr", asset_config.tp2_rr)),
-        entry_zone_atr_mult=float(params.get("entry_zone_atr_mult", asset_config.entry_zone_atr_mult)),
-        sl_buffer_atr=float(params.get("sl_buffer_atr", 0.15)),
-        sl_atr_mult=float(params.get("sl_atr_mult", asset_config.sl_atr_mult)),
+        sl_min_pts=float(resolved_params.get("sl_min_points", asset_config.sl_min_points)),
+        sl_max_pts=float(resolved_params.get("sl_max_points", asset_config.sl_max_points)),
+        tp1_rr=float(resolved_params.get("tp1_rr", asset_config.tp1_rr)),
+        tp2_rr=float(resolved_params.get("tp2_rr", asset_config.tp2_rr)),
+        entry_zone_atr_mult=float(resolved_params.get("entry_zone_atr_mult", asset_config.entry_zone_atr_mult)),
+        sl_buffer_atr=float(resolved_params.get("sl_buffer_atr", 0.15)),
+        sl_atr_mult=float(resolved_params.get("sl_atr_mult", asset_config.sl_atr_mult)),
     )
 
     # --- Compute indicators ---
     close = ohlcv_df["close"]
-    ema_fast_period = int(params.get("ema_fast", 21))
-    ema_slow_period = int(params.get("ema_slow", 55))
+    ema_fast_period = int(resolved_params.get("ema_fast", 21))
+    ema_slow_period = int(resolved_params.get("ema_slow", 55))
 
     ema_fast_s = ema(close, ema_fast_period)
     ema_slow_s = ema(close, ema_slow_period)
-    rsi_s = compute_rsi(close, int(params.get("rsi_period", 14)))
+    rsi_s = compute_rsi(close, int(resolved_params.get("rsi_period", 14)))
     atr_s = compute_atr(ohlcv_df, 14)
     macd_data = compute_macd(close)
     macd_hist_s = macd_data["histogram"]
@@ -172,11 +179,11 @@ def run_vectorbt_backtest(
     bb_pctb_s = bb_data.get("pct_b_series")  # May not exist in all versions
     adx_data = compute_adx(ohlcv_df)
 
-    signal_rules = _configured_signal_rules(params)
-    signal_logic = _configured_signal_logic(params)
-    rsi_ob = float(params.get("rsi_ob", 70.0))
-    rsi_os = float(params.get("rsi_os", 30.0))
-    setup_tag = _resolve_backtest_setup_tag(params)
+    signal_rules = resolve_strategy_signal_rules(strategy_payload, default_to_ema=True)
+    signal_logic = resolve_strategy_signal_logic(strategy_payload)
+    rsi_ob = float(resolved_params.get("rsi_ob", 70.0))
+    rsi_os = float(resolved_params.get("rsi_os", 30.0))
+    setup_tag = resolve_algorithmic_setup_tag(strategy_payload)
 
     # --- Bar-by-bar simulation ---
     n = len(ohlcv_df)

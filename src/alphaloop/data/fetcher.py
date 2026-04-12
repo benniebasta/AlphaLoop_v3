@@ -65,7 +65,13 @@ class OHLCVFetcher:
         mt5_login: int | None = None,
         mt5_password: str | None = None,
     ) -> None:
-        self.symbol = symbol
+        # Resolve to broker-specific MT5 symbol (e.g. BTCUSD → BTCUSDm on Exness).
+        # The yfinance fallback strips trailing 'm' so it handles both forms correctly.
+        try:
+            from alphaloop.config.assets import get_asset_config
+            self.symbol = get_asset_config(symbol).mt5_symbol
+        except Exception:
+            self.symbol = symbol
         self.use_mt5 = use_mt5
         self._mt5_server = mt5_server
         self._mt5_login = mt5_login

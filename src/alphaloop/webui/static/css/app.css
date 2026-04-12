@@ -682,6 +682,17 @@ body {
   line-height: 1.4;
 }
 
+.field-row--info { background: var(--hover); border-radius: 6px; }
+.field-info-box {
+  font-size: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, transparent);
+  border-radius: 6px;
+  padding: 7px 10px;
+  line-height: 1.5;
+}
+
 /* Inputs */
 .field-input {
   width: 100%;

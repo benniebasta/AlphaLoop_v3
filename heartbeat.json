@@ -1,13 +1,13 @@
 {
-  "timestamp": 1775570954.8308089,
+  "timestamp": 1775944840.907155,
   "alive": true,
   "symbol": "BTCUSD",
-  "cycle": 1,
+  "cycle": 16,
   "circuit_breaker": {
-    "consecutive_failures": 0,
-    "is_open": false,
+    "consecutive_failures": 6,
+    "is_open": true,
     "should_kill": false,
-    "open_until": 0.0
+    "open_until": 1775944936.260394
   },
   "risk": {
     "daily_pnl": 0,

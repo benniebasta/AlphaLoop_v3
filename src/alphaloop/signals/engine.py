@@ -107,27 +107,148 @@ def build_signal_system_prompt(asset: AssetConfig, prompt_instructions: str = ""
     return f"{base}\n\nStrategy instructions:\n{extra}"
 
 
-def _build_hypothesis_system_prompt(asset: AssetConfig) -> str:
+def _build_hypothesis_system_prompt(
+    asset: AssetConfig,
+    active_tools: dict | None = None,
+) -> str:
     """Build a direction-only system prompt (no SL/TP instructions).
+
+    Rules are injected based on which tools the user has toggled ON in the
+    strategy card. A tool that is OFF contributes no rule — the AI is not
+    asked to gate on that dimension.
 
     Used by :meth:`MultiAssetSignalEngine.generate_hypothesis` in the
     constraint-first pipeline where SL/TP are derived from market
     structure downstream by the TradeConstructor.
     """
-    return f"""You are a professional {asset.display_name} ({asset.symbol}) trader with 15 years of experience specialising in {asset.asset_class} markets.
+    tools = active_tools or {}
 
-Best trading sessions: {', '.join(asset.best_sessions)}
+    # ── Always-on rules (not controlled by any tool toggle) ────────────────
+    fixed_rules = [
+        "1. Prefer pullback setups over breakout chasing",
+        "2. If no clear setup exists, return neutral and always explain WHY in the reasoning field",
+        f"3. Minimum confidence to signal: {asset.min_confidence}",
+    ]
+
+    # ── Tool-conditional rules (each enabled tool contributes one rule) ─────
+    # Default True = tool is ON unless explicitly set False.
+    tool_rules: list[str] = []
+
+    if tools.get("session_filter", True):
+        tool_rules.append(
+            f"- SESSION: Only signal during appropriate sessions ({', '.join(asset.best_sessions)}). "
+            "Return neutral if session quality is low or outside these windows."
+        )
+    if tools.get("news_filter", True):
+        tool_rules.append(
+            "- NEWS: Avoid signalling when high-impact news is imminent (within 30 min). "
+            "Down-weight confidence if news is present."
+        )
+    if tools.get("volatility_filter", True):
+        tool_rules.append(
+            "- VOLATILITY: Only signal when volatility is within normal bounds. "
+            "Avoid entries during abnormal volatility spikes."
+        )
+    if tools.get("ema200_filter", True):
+        tool_rules.append(
+            "- EMA200: Prefer trades aligned with the EMA200 trend direction. "
+            "Penalise counter-trend signals."
+        )
+    if tools.get("bos_guard", True):
+        tool_rules.append(
+            "- BOS: Require a Break of Structure confirmation — "
+            "price must have closed above a swing high (BUY) or below a swing low (SELL)."
+        )
+    if tools.get("fvg_guard", True):
+        tool_rules.append(
+            "- FVG: Look for a Fair Value Gap (3-candle imbalance zone) in the trade direction as entry confluence."
+        )
+    if tools.get("vwap_guard", True):
+        tool_rules.append(
+            "- VWAP: Avoid entries when price is overextended from session VWAP. "
+            "Favour entries near VWAP for better risk/reward."
+        )
+    if tools.get("dxy_filter", True):
+        tool_rules.append(
+            "- DXY: Consider USD strength. For gold/commodity assets, "
+            "avoid BUY when USD is strongly bullish and SELL when USD is strongly bearish."
+        )
+    if tools.get("sentiment_filter", True):
+        tool_rules.append(
+            "- SENTIMENT: Factor macro sentiment alignment. "
+            "Down-weight confidence when sentiment conflicts with trade direction."
+        )
+    if tools.get("macd_filter", True):
+        tool_rules.append(
+            "- MACD: Require MACD histogram to agree with trade direction "
+            "(positive histogram for BUY, negative for SELL)."
+        )
+    if tools.get("bollinger_filter", True):
+        tool_rules.append(
+            "- BOLLINGER: Avoid BUY when price %B is above 0.7 (near upper band) "
+            "and SELL when %B is below 0.3 (near lower band)."
+        )
+    if tools.get("adx_filter", True):
+        tool_rules.append(
+            "- ADX: Only signal when ADX indicates sufficient trend strength (>20). "
+            "Return neutral in ranging/choppy conditions."
+        )
+    if tools.get("volume_filter", True):
+        tool_rules.append(
+            "- VOLUME: Require above-average volume to confirm market participation. "
+            "Down-weight confidence on low-volume bars."
+        )
+    if tools.get("swing_structure", True):
+        tool_rules.append(
+            "- SWING: Respect M15 swing structure — bullish structure required for BUY, "
+            "bearish for SELL. Avoid all directional entries in ranging structure."
+        )
+    if tools.get("ema_crossover", True):
+        tool_rules.append(
+            "- EMA CROSS: Require EMA alignment — fast EMA above slow EMA for BUY, "
+            "fast EMA below slow EMA for SELL."
+        )
+    if tools.get("rsi_feature", True):
+        tool_rules.append(
+            f"- RSI: Avoid BUY when RSI >{asset.rsi_extreme_ob} (overbought) "
+            f"and SELL when RSI <{asset.rsi_extreme_os} (oversold)."
+        )
+    if tools.get("trendilo", True):
+        tool_rules.append(
+            "- TRENDILO: Require Trendilo slope alignment with trade direction. "
+            "Do not signal against the smoothed trend."
+        )
+    if tools.get("choppiness_index", True):
+        tool_rules.append(
+            "- CHOPPINESS: Avoid signals when Choppiness Index >61.8 (choppy/consolidating market)."
+        )
+    if tools.get("alma_filter", True):
+        tool_rules.append(
+            "- ALMA: Prefer entries aligned with ALMA direction "
+            "(price above ALMA = bullish bias, below = bearish bias)."
+        )
+    if tools.get("fast_fingers", True):
+        tool_rules.append(
+            "- MOMENTUM: Avoid entries when momentum is exhausted — "
+            "do not chase moves where Rate of Change is at an extreme."
+        )
+
+    tool_section = (
+        "\n\nACTIVE FILTER RULES (enforced by enabled tools — follow these exactly):\n"
+        + "\n".join(tool_rules)
+        if tool_rules
+        else "\n\nNo filter tools are active — apply your own judgement on sessions, indicators, and structure."
+    )
+
+    return f"""You are a professional {asset.display_name} ({asset.symbol}) trader with 15 years of experience specialising in {asset.asset_class} markets.
 
 {asset.ai_context}
 
 Your task: analyse the provided market data and output a directional view.
 
-CRITICAL RULES:
-1. Prefer pullback setups over breakout chasing
-2. Only signal during appropriate sessions for this asset
-3. Never signal when RSI is extreme (>{asset.rsi_extreme_ob} overbought or <{asset.rsi_extreme_os} oversold)
-4. If no clear setup exists, return neutral and always explain WHY in the reasoning field (e.g. "EMA not crossed, RSI at 51, no directional confluence")
-5. Minimum confidence to signal: {asset.min_confidence}
+CORE RULES (always apply):
+{chr(10).join(fixed_rules)}
+{tool_section}
 
 IMPORTANT: Do NOT output stop_loss, take_profit, or entry_zone. Those are derived automatically from market structure. You only output direction and confidence.
 
@@ -630,6 +751,7 @@ class MultiAssetSignalEngine:
         model_id: str = "",
         tool_results: list[dict] | None = None,
         prompt_instructions: str = "",
+        active_tools: dict | None = None,
     ) -> DirectionHypothesis | None:
         """Generate a direction hypothesis without SL/TP.
 
@@ -654,8 +776,9 @@ class MultiAssetSignalEngine:
             return None
 
         self.last_error = None
+        self._last_model_id = model_id
 
-        system_prompt = _build_hypothesis_system_prompt(self.asset)
+        system_prompt = _build_hypothesis_system_prompt(self.asset, active_tools=active_tools)
         if prompt_instructions:
             system_prompt += f"\n\nStrategy instructions:\n{prompt_instructions.strip()}"
 
@@ -761,6 +884,12 @@ class MultiAssetSignalEngine:
             setup_tag=setup_tag,
             reasoning=reasoning,
             source_names="ai_signal",
+            source_detail={
+                "mode": "ai_signal",
+                "model_id": getattr(self, "_last_model_id", None),
+                "ai_confidence_raw": round(confidence, 3),
+                "setup_raw": data.get("setup"),
+            },
             generated_at=datetime.now(timezone.utc),
         )
 

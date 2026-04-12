@@ -42,9 +42,11 @@ from alphaloop.trading.strategy_loader import (
     resolve_signal_instruction,
     resolve_strategy_ai_models,
     resolve_strategy_signal_mode,
+    resolve_strategy_spec_version,
     resolve_strategy_source,
     resolve_strategy_setup_family,
     resolve_validator_instruction,
+    save_strategy_record,
     serialize_strategy_spec,
 )
 
@@ -73,7 +75,7 @@ def _generate_card_name(symbol: str, signal_mode: str) -> str:
     """Generate a friendly card name when the user leaves it blank."""
     adj = random.choice(_ADJECTIVES)
     noun = random.choice(_NOUNS)
-    suffix = "ai" if signal_mode == "ai_signal" else signal_mode
+    suffix = {"ai_signal": "ai", "algo_ai": "algo_ai", "algo_only": "algo"}.get(signal_mode, signal_mode)
     return f"{adj}-{noun}-{symbol}_{suffix}"
 
 
@@ -131,10 +133,14 @@ def _serialize_best_params(params: BacktestParams) -> dict[str, Any]:
     resolved_algo_params = build_algorithmic_params(strategy_payload)
     payload = dict(raw)
     payload.update({
+        "spec_version": resolve_strategy_spec_version(strategy_payload) or "v1",
         "signal_mode": resolve_strategy_signal_mode(strategy_payload),
         "setup_family": resolve_strategy_setup_family(strategy_payload),
         "source": resolve_strategy_source(strategy_payload),
         "tools": normalize_strategy_tools(getattr(params, "tools", raw.get("tools", {}))),
+        "ai_models": resolve_strategy_ai_models(strategy_payload),
+        "signal_instruction": resolve_signal_instruction(strategy_payload),
+        "validator_instruction": resolve_validator_instruction(strategy_payload),
         "strategy_spec": serialize_strategy_spec(strategy_payload),
         "signal_rules": list(resolved_algo_params.get("signal_rules") or []),
         "signal_logic": resolved_algo_params.get("signal_logic") or "AND",
@@ -142,11 +148,11 @@ def _serialize_best_params(params: BacktestParams) -> dict[str, Any]:
     return payload
 
 
-def _next_version(symbol: str) -> int:
-    """Determine the next version number for a symbol by scanning existing files."""
+def _next_version(name: str) -> int:
+    """Determine the next version number for a named strategy lineage by scanning existing files."""
     STRATEGY_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
     versions = []
-    for f in STRATEGY_VERSIONS_DIR.glob(f"{symbol}_v*.json"):
+    for f in STRATEGY_VERSIONS_DIR.glob(f"{name}_v*.json"):
         try:
             v = int(f.stem.split("_v")[-1])
             versions.append(v)
@@ -155,13 +161,13 @@ def _next_version(symbol: str) -> int:
     return max(versions, default=0) + 1
 
 
-def _reserve_strategy_version_path(symbol: str) -> tuple[int, Path, Path]:
+def _reserve_strategy_version_path(name: str) -> tuple[int, Path, Path]:
     """Reserve a unique version path using a lock file to avoid concurrent collisions."""
     STRATEGY_VERSIONS_DIR.mkdir(parents=True, exist_ok=True)
     for _ in range(1000):
-        version = _next_version(symbol)
-        path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
-        lock = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.lock"
+        version = _next_version(name)
+        path = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"
+        lock = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.lock"
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
@@ -171,7 +177,7 @@ def _reserve_strategy_version_path(symbol: str) -> tuple[int, Path, Path]:
             lock.unlink(missing_ok=True)
             continue
         return version, path, lock
-    raise RuntimeError(f"Could not reserve strategy version path for {symbol}")
+    raise RuntimeError(f"Could not reserve strategy version path for '{name}'")
 
 
 def create_strategy_version(
@@ -196,7 +202,6 @@ def create_strategy_version(
 
     Returns the version dict including the file path.
     """
-    version, path, lock_path = _reserve_strategy_version_path(symbol)
     params_strategy_spec = getattr(params, "strategy_spec", {}) or {}
     flat_signal_mode = (
         (getattr(params, "signal_mode", None) or signal_mode)
@@ -235,8 +240,11 @@ def create_strategy_version(
         if not has_explicit_entry_rules:
             resolved_signal_rules = []
 
+    # Generate display name before writing the file.
     if not name:
-        name = _generate_card_name(symbol, normalized_mode) if normalized_mode == "ai_signal" else f"{symbol}_v{version}"
+        name = _generate_card_name(symbol, normalized_mode)
+
+    version, path, lock_path = _reserve_strategy_version_path(name)
 
     # Build tool toggles
     all_tools = [
@@ -320,7 +328,7 @@ def create_strategy_version(
             "research":      "gemini-2.5-pro",           # deep degradation analysis
             "param_suggest": "deepseek-reasoner",        # parameter change reasoning
             "regime":        "gemini-2.5-flash-lite",    # hourly regime classification
-            "fallback":      "grok-3-mini",              # provider-down fallback
+            "fallback":      "gemini-2.5-flash-lite",     # provider-down fallback
         },
         "signal_mode": normalized_mode,
         "signal_instruction": signal_instruction,
@@ -344,13 +352,9 @@ def create_strategy_version(
         version_data["signal_instruction"], version_data["validator_instruction"],
     )
 
-    # Write atomically
-    tmp = path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
     try:
-        tmp.write_text(json.dumps(version_data, indent=2))
-        os.replace(tmp, path)
+        version_data = save_strategy_record(path, version_data)
     finally:
-        tmp.unlink(missing_ok=True)
         lock_path.unlink(missing_ok=True)
 
     logger.info(
@@ -360,7 +364,6 @@ def create_strategy_version(
         version_data["summary"]["win_rate"] * 100,
     )
 
-    version_data["_path"] = str(path)
     version_data["_version"] = version
     return version_data
 
@@ -427,6 +430,7 @@ async def train_from_card(
     resolved_signal_mode = resolve_strategy_signal_mode(card_strategy_payload)
     resolved_setup_family = resolve_strategy_setup_family(card_strategy_payload)
     resolved_source = resolve_strategy_source(card_strategy_payload)
+    resolved_strategy_spec = serialize_strategy_spec(card_strategy_payload)
 
     # Build base params from card (full extraction including per-source params)
     base_params = BacktestParams(
@@ -451,7 +455,7 @@ async def train_from_card(
         signal_logic=resolved_algo_params.get("signal_logic") or "AND",
         signal_mode=resolved_signal_mode,
         setup_family=resolved_setup_family,
-        strategy_spec=card_dict.get("strategy_spec", {}) or {},
+        strategy_spec=resolved_strategy_spec,
         tools={name: True for name in filters},
         source=resolved_source,
     )
@@ -595,11 +599,19 @@ async def train_from_card(
             f"Walk-forward gate: {'PASSED' if wf_passed else 'FAILED'} — {wf_reason}"
         )
     except Exception as _wf_exc:
-        _log_fn(f"Walk-forward gate skipped (error): {_wf_exc}")
-        logger.warning("[asset_trainer] Walk-forward gate error: %s", _wf_exc)
-        # Fail-open: let candidate through if walk-forward itself errors
-        wf_passed = True
-        wf_reason = f"gate skipped (error): {_wf_exc}"
+        _log_fn(f"Walk-forward gate ERROR — failing closed: {_wf_exc}")
+        logger.error(
+            "[asset_trainer] Walk-forward gate raised an exception — "
+            "failing CLOSED to prevent promotion of unvalidated strategy. "
+            "Fix the walk-forward module before retrying. Error: %s",
+            _wf_exc,
+            exc_info=True,
+        )
+        # Fail-CLOSED: a broken gate is worse than no gate. An exception in the
+        # walk-forward engine must never silently promote a strategy. The operator
+        # must fix the underlying issue and re-run training.
+        wf_passed = False
+        wf_reason = f"gate errored (fail-closed): {_wf_exc}"
 
     # Gate status: passed → "candidate", failed → "wf_rejected"
     version_status = "candidate" if wf_passed else "wf_rejected"

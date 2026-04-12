@@ -213,53 +213,53 @@ export async function render(container) {
         </div>
       </div>
 
-      <!-- Signal Rules Builder (full-width below the form row) -->
-      <div class="bt-signal-rules-section" style="margin-top:12px">
-        <div class="bt-tools-header" id="bt-rules-toggle" style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:6px 0">
-          <span>Signal Rules</span>
-          <span class="bt-rules-arrow" style="font-size:0.8em;color:var(--muted)">▶</span>
+      <!-- Entry Signal — what triggers a trade -->
+      <div class="bt-tools-section">
+        <div class="bt-tools-header" id="bt-rules-toggle">
+          <span>Entry Signal</span>
+          <span class="bt-rules-arrow">▶</span>
         </div>
-        <div id="bt-rules-body" style="display:none;padding:8px 0 4px">
-          <div id="bt-signal-rules-list" style="display:flex;flex-direction:column;gap:6px"></div>
-          <div style="display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap">
-            <button id="bt-add-rule" class="btn btn-sm">+ Add Rule</button>
-            <label style="display:flex;align-items:center;gap:6px;font-size:0.82rem">
-              Combine:
-              <select id="bt-signal-logic" class="field-input" style="padding:3px 6px;font-size:0.82rem">
-                <option value="AND" selected>AND — all must fire</option>
-                <option value="OR">OR — any fires</option>
-                <option value="MAJORITY">MAJORITY — &gt;50%</option>
-              </select>
-            </label>
-            <label style="display:flex;align-items:center;gap:5px;font-size:0.82rem">
-              <input type="checkbox" id="bt-signal-auto">
-              Let Optuna auto-pick sources
-            </label>
+        <div class="bt-tools-body" id="bt-rules-body" style="display:none">
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px">What pattern triggers a trade attempt?</div>
+          <div class="bt-tools-grid">
+            <label class="bt-tool-item"><input type="checkbox" id="bt-rule-ema" checked> <span>EMA Crossover</span> <em>Short-term trend crosses long-term</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-rule-macd"> <span>MACD</span> <em>Momentum shifts direction</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-rule-rsi"> <span>RSI Reversal</span> <em>Overbought or oversold bounce</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-rule-boll"> <span>Bollinger Breakout</span> <em>Price breaks outside normal range</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-rule-adx"> <span>ADX Trend</span> <em>Only fire when trend is strong</em></label>
+          </div>
+          <div style="margin-top:8px;font-size:0.82rem;color:var(--muted);display:flex;align-items:center;gap:6px">
+            If multiple selected:
+            <select id="bt-signal-logic" class="field-input" style="padding:3px 6px;font-size:0.82rem">
+              <option value="AND" selected>All must agree</option>
+              <option value="OR">Any one fires</option>
+              <option value="MAJORITY">Majority wins</option>
+            </select>
           </div>
         </div>
       </div>
 
       <div id="bt-data-hint" style="font-size:0.72rem;color:var(--amber);padding:4px 0 0;min-height:1em"></div>
+
+      <!-- Safety Filters — what blocks a bad trade -->
       <div class="bt-tools-section">
         <div class="bt-tools-header" id="bt-tools-toggle">
-          <span>Signal Tools (backtest-compatible)</span>
+          <span>Safety Filters</span>
           <span class="bt-tools-arrow">▶</span>
         </div>
         <div class="bt-tools-body" id="bt-tools-body" style="display:none">
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:6px">Extra conditions that must be true before a trade is allowed.</div>
           <div class="bt-tools-grid">
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-session" checked> <span>Session Filter</span> <em>Block outside London/NY hours</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-volatility" checked> <span>Volatility Filter</span> <em>Block extreme/dead ATR%</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-ema200" checked> <span>EMA200 Trend Filter</span> <em>Block against EMA200 direction</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-bos"> <span>BOS Structure Guard</span> <em>Require Break of Structure</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-fvg"> <span>FVG Structure Guard</span> <em>Require Fair Value Gap entry</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-tick-jump"> <span>Tick Jump Guard</span> <em>Reject 2-bar spikes</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-liq-vacuum"> <span>Liquidity Vacuum Guard</span> <em>Reject thin-body candles</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-vwap"> <span>VWAP Guard</span> <em>Block overextended entries</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-macd"> <span>MACD Filter</span> <em>Block if histogram disagrees</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-bollinger"> <span>Bollinger Filter</span> <em>Block outside band zone</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-adx"> <span>ADX Filter</span> <em>Block if ADX &lt; 20 (no trend)</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-volume"> <span>Volume Filter</span> <em>Block if volume below avg</em></label>
-            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-swing"> <span>Swing Structure</span> <em>Require HH/HL or LH/LL</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-volatility" checked> <span>Volatility Guard</span> <em>Skip dead or chaotic markets</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-ema200" checked> <span>EMA200 Trend Guard</span> <em>Only trade with the major trend</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-session"> <span>Session Guard</span> <em>London &amp; New York hours only</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-bos"> <span>BOS Guard</span> <em>Require a market structure break first</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-fvg"> <span>FVG Guard</span> <em>Require a Fair Value Gap entry</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-vwap"> <span>VWAP Guard</span> <em>Skip when price is overextended</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-volume"> <span>Volume Guard</span> <em>Skip low-volume bars</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-swing"> <span>Swing Structure</span> <em>Require higher-highs or lower-lows</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-tick-jump"> <span>Spike Reject</span> <em>Ignore sudden 2-bar price spikes</em></label>
+            <label class="bt-tool-item"><input type="checkbox" id="bt-tool-liq-vacuum"> <span>Thin Candle Reject</span> <em>Ignore low-body candles</em></label>
           </div>
         </div>
       </div>
@@ -356,113 +356,31 @@ export async function render(container) {
     arrow.textContent = visible ? '▶' : '▼';
   });
 
-  // ── Signal Rules Builder ────────────────────────────────────────────────────
+  // ── Signal Rules ─────────────────────────────────────────────────────────────
 
-  const SIGNAL_SOURCES = [
-    { value: 'ema_crossover',     label: 'EMA Crossover' },
-    { value: 'macd_crossover',    label: 'MACD Crossover' },
-    { value: 'rsi_reversal',      label: 'RSI Reversal' },
-    { value: 'bollinger_breakout',label: 'Bollinger Breakout' },
-    { value: 'adx_trend',         label: 'ADX Trend' },
-    { value: 'bos_confirm',       label: 'BOS Confirm' },
+  const _RULE_MAP = [
+    { id: 'bt-rule-ema',  source: 'ema_crossover' },
+    { id: 'bt-rule-macd', source: 'macd_crossover' },
+    { id: 'bt-rule-rsi',  source: 'rsi_reversal' },
+    { id: 'bt-rule-boll', source: 'bollinger_breakout' },
+    { id: 'bt-rule-adx',  source: 'adx_trend' },
   ];
 
-  const SOURCE_PARAMS = {
-    ema_crossover:     [{ id: 'ema_fast',  label: 'Fast',   def: 21, min: 3  }, { id: 'ema_slow', label: 'Slow', def: 55, min: 5 }],
-    macd_crossover:    [{ id: 'macd_fast', label: 'Fast',   def: 12, min: 2  }, { id: 'macd_slow', label: 'Slow', def: 26, min: 5 }, { id: 'macd_signal', label: 'Signal', def: 9, min: 2 }],
-    rsi_reversal:      [{ id: 'rsi_ob',    label: 'OB',     def: 70, min: 55, max: 90 }, { id: 'rsi_os', label: 'OS', def: 30, min: 10, max: 45 }],
-    bollinger_breakout:[{ id: 'bb_period', label: 'Period', def: 20, min: 5  }, { id: 'bb_std_dev', label: 'Std Dev', def: 2.0, min: 0.5, step: 0.1, float: true }],
-    adx_trend:         [{ id: 'adx_period',label: 'Period', def: 14, min: 5  }, { id: 'adx_min_threshold', label: 'Min ADX', def: 20, min: 5, max: 60 }],
-    bos_confirm:       [],
-  };
-
-  function buildRuleRow(src) {
-    const params = SOURCE_PARAMS[src] || [];
-    const paramHtml = params.map(p => `
-      <label class="rule-param" style="font-size:0.8rem;display:flex;align-items:center;gap:4px">
-        ${p.label}
-        <input type="${p.float ? 'number' : 'number'}" class="field-input rule-param-input"
-          data-param="${p.id}"
-          value="${p.def}"
-          min="${p.min ?? ''}"
-          ${p.max ? `max="${p.max}"` : ''}
-          ${p.step ? `step="${p.step}"` : ''}
-          style="width:60px;padding:3px 5px;font-size:0.8rem">
-      </label>`).join('');
-    const sourceOptions = SIGNAL_SOURCES.map(s =>
-      `<option value="${s.value}"${s.value === src ? ' selected' : ''}>${s.label}</option>`
-    ).join('');
-    return `
-      <div class="rule-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--card-bg);border-radius:6px;padding:6px 8px">
-        <select class="rule-source field-input" style="padding:3px 6px;font-size:0.82rem;width:auto">${sourceOptions}</select>
-        <span class="rule-params" style="display:flex;gap:8px;flex-wrap:wrap">${paramHtml}</span>
-        <button class="rule-remove btn btn-sm" style="margin-left:auto;padding:2px 8px;font-size:0.8rem">✕</button>
-      </div>`;
-  }
-
-  function renderRuleRows() {
-    const list = document.getElementById('bt-signal-rules-list');
-    if (!list) return;
-    if (list.children.length === 0) {
-      list.innerHTML = buildRuleRow('ema_crossover');
-      wireRuleRow(list.children[0]);
-    }
-  }
-
-  function wireRuleRow(row) {
-    row.querySelector('.rule-remove').addEventListener('click', () => {
-      row.remove();
-      if (document.getElementById('bt-signal-rules-list').children.length === 0) {
-        renderRuleRows(); // always keep at least one
-      }
-    });
-    row.querySelector('.rule-source').addEventListener('change', (e) => {
-      const newSrc = e.target.value;
-      const params = SOURCE_PARAMS[newSrc] || [];
-      const paramHtml = params.map(p => `
-        <label class="rule-param" style="font-size:0.8rem;display:flex;align-items:center;gap:4px">
-          ${p.label}
-          <input type="number" class="field-input rule-param-input"
-            data-param="${p.id}"
-            value="${p.def}"
-            min="${p.min ?? ''}"
-            ${p.max ? `max="${p.max}"` : ''}
-            ${p.step ? `step="${p.step}"` : ''}
-            style="width:60px;padding:3px 5px;font-size:0.8rem">
-        </label>`).join('');
-      row.querySelector('.rule-params').innerHTML = paramHtml;
-    });
-  }
-
   function collectRules() {
-    const rows = document.querySelectorAll('#bt-signal-rules-list .rule-row');
-    return Array.from(rows).map(row => {
-      const src = row.querySelector('.rule-source').value;
-      const rule = { source: src };
-      row.querySelectorAll('.rule-param-input').forEach(inp => {
-        rule[inp.dataset.param] = parseFloat(inp.value) || parseInt(inp.value) || 0;
-      });
-      return rule;
-    });
+    const checked = _RULE_MAP.filter(r => document.getElementById(r.id)?.checked);
+    // Always return at least EMA crossover so backtest has something to trade on
+    return checked.length > 0
+      ? checked.map(r => ({ source: r.source }))
+      : [{ source: 'ema_crossover' }];
   }
 
-  // Signal Rules toggle
+  // Signal Rules toggle (same pattern as Signal Tools)
   document.getElementById('bt-rules-toggle').addEventListener('click', () => {
     const body = document.getElementById('bt-rules-body');
     const arrow = document.querySelector('.bt-rules-arrow');
     const visible = body.style.display !== 'none';
     body.style.display = visible ? 'none' : 'block';
     arrow.textContent = visible ? '▶' : '▼';
-    if (!visible) renderRuleRows(); // lazy init
-  });
-
-  document.getElementById('bt-add-rule').addEventListener('click', () => {
-    const list = document.getElementById('bt-signal-rules-list');
-    const div = document.createElement('div');
-    div.innerHTML = buildRuleRow('ema_crossover');
-    const row = div.children[0];
-    list.appendChild(row);
-    wireRuleRow(row);
   });
 
   // ── Asset tool preset cache (shared via window to survive Settings saves) ──
@@ -670,7 +588,7 @@ export async function render(container) {
         signal_mode:         document.getElementById('bt-signal-mode').value,
         signal_rules:        collectRules(),
         signal_logic:        document.getElementById('bt-signal-logic').value,
-        signal_auto:         document.getElementById('bt-signal-auto').checked,
+        signal_auto:         false,
         use_session_filter:  document.getElementById('bt-tool-session').checked,
         use_volatility_filter: document.getElementById('bt-tool-volatility').checked,
         use_ema200_filter:   document.getElementById('bt-tool-ema200').checked,
@@ -679,9 +597,9 @@ export async function render(container) {
         use_tick_jump_guard: document.getElementById('bt-tool-tick-jump').checked,
         use_liq_vacuum_guard: document.getElementById('bt-tool-liq-vacuum').checked,
         use_vwap_guard:      document.getElementById('bt-tool-vwap').checked,
-        use_macd_filter:     document.getElementById('bt-tool-macd').checked,
-        use_bollinger_filter: document.getElementById('bt-tool-bollinger').checked,
-        use_adx_filter:      document.getElementById('bt-tool-adx').checked,
+        use_macd_filter:     false,
+        use_bollinger_filter: false,
+        use_adx_filter:      false,
         use_volume_filter:   document.getElementById('bt-tool-volume').checked,
         use_swing_structure: document.getElementById('bt-tool-swing').checked,
       });

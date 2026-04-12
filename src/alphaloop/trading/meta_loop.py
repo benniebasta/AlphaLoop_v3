@@ -22,6 +22,9 @@ from alphaloop.core.events import EventBus
 from alphaloop.trading.strategy_loader import (
     build_algorithmic_params,
     build_active_strategy_payload,
+    bind_active_strategy_symbol,
+    build_strategy_version_tag,
+    find_strategy_record,
     normalize_strategy_summary,
     resolve_strategy_ai_models,
     resolve_signal_instruction,
@@ -29,8 +32,11 @@ from alphaloop.trading.strategy_loader import (
     resolve_strategy_signal_mode,
     resolve_strategy_spec_version,
     resolve_strategy_source,
+    resolve_strategy_version,
     resolve_validator_instruction,
+    save_strategy_record,
     serialize_strategy_spec,
+    store_active_strategy_bindings,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +50,6 @@ def _normalize_tool_overrides(value) -> dict[str, bool] | None:
     if isinstance(value, (list, tuple, set)):
         return {str(name): True for name in value}
     return None
-
 
 def _apply_strategy_overrides(payload: dict, overrides: dict | None) -> dict:
     if not isinstance(overrides, dict):
@@ -170,9 +175,8 @@ def _strategy_version_payload(
     params: dict,
     overrides: dict | None = None,
 ) -> dict:
-    payload = build_active_strategy_payload(active)
+    payload = bind_active_strategy_symbol(active, symbol)
     payload.update({
-        "symbol": symbol,
         "version": version,
         "spec_version": resolve_strategy_spec_version(payload) or "v1",
         "status": status,
@@ -191,9 +195,8 @@ def _strategy_version_payload(
 
 def _walk_forward_candidate_payload(symbol: str, active, improved_params: dict) -> dict:
     """Build the temporary strategy payload used by walk-forward evaluation."""
-    payload = build_active_strategy_payload(active)
+    payload = bind_active_strategy_symbol(active, symbol)
     payload.update({
-        "symbol": symbol,
         "version": int(payload.get("version", 0) or 0) + 1,
         "params": improved_params.get("params", payload.get("params", {})),
         "tools": payload.get("tools", {}),
@@ -381,7 +384,7 @@ class MetaLoop:
             tool_decay_text = self._build_tool_decay_report()
             report = await analyzer.run(
                 symbol=self._symbol,
-                strategy_version=f"v{active.version}",
+                strategy_version=build_strategy_version_tag(active),
                 lookback_days=30,
                 extra_context=tool_decay_text,
             )
@@ -615,14 +618,22 @@ class MetaLoop:
         Persist a new strategy version JSON with source="autolearn".
         Returns the new version number, or None on failure.
         """
-        import json
-        import os
-        import time
-
-        from alphaloop.backtester.asset_trainer import _reserve_strategy_version_path
+        from alphaloop.backtester.asset_trainer import (
+            _generate_card_name,
+            _reserve_strategy_version_path,
+        )
 
         try:
-            new_version, out_path, lock_path = _reserve_strategy_version_path(self._symbol)
+            # Use the active strategy's name so the evolved file stays in the same lineage
+            active_signal_mode = str(
+                (active or {}).get("signal_mode") if isinstance(active, dict)
+                else getattr(active, "signal_mode", "algo_ai")
+            ) or "algo_ai"
+            active_name = (
+                (active.get("name") if isinstance(active, dict) else getattr(active, "name", None))
+                or _generate_card_name(self._symbol, active_signal_mode)
+            )
+            new_version, out_path, lock_path = _reserve_strategy_version_path(active_name)
 
             version_data = _strategy_version_payload(
                 self._symbol,
@@ -630,7 +641,7 @@ class MetaLoop:
                 "candidate",
                 "autolearn",
                 active,
-                improved_params.get("params", getattr(active, "params", {})),
+                improved_params.get("params", dict(build_active_strategy_payload(active).get("params") or {})),
                 overrides=improved_params,
             )
             version_data["autolearn_meta"] = {
@@ -639,12 +650,9 @@ class MetaLoop:
                 "regime_at_creation": self._current_regime,
             }
 
-            tmp_path = out_path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
             try:
-                tmp_path.write_text(json.dumps(version_data, indent=2))
-                os.replace(tmp_path, out_path)
+                version_data = save_strategy_record(out_path, version_data)
             finally:
-                tmp_path.unlink(missing_ok=True)
                 lock_path.unlink(missing_ok=True)
 
             from alphaloop.core.events import StrategyVersionCreated
@@ -668,7 +676,6 @@ class MetaLoop:
         self, active, new_version: int, improved_params: dict
     ) -> None:
         """Store new version as active and initialise RollbackTracker."""
-        import json
         import numpy as np
 
         try:
@@ -685,22 +692,21 @@ class MetaLoop:
                 "active",
                 "autolearn",
                 active,
-                improved_params.get("params", getattr(active, "params", {})),
+                improved_params.get("params", dict(build_active_strategy_payload(active).get("params") or {})),
                 overrides=improved_params,
             )
-            strategy_json = json.dumps(version_data)
-
-            if self._instance_id:
-                await self._settings_service.set(
-                    f"active_strategy_{self._instance_id}", strategy_json,
-                )
-            await self._settings_service.set(
-                f"active_strategy_{self._symbol}", strategy_json,
+            await store_active_strategy_bindings(
+                self._settings_service,
+                version_data,
+                symbol=self._symbol,
+                instance_id=self._instance_id,
+                write_symbol_key=True,
+                write_instance_key=bool(self._instance_id),
             )
 
             # Initialise rollback tracker to monitor new version performance
             self._rollback_tracker = RollbackTracker(
-                previous_version=getattr(active, "version", 0),
+                previous_version=resolve_strategy_version(active),
                 previous_sharpe=baseline_sharpe,
                 rollback_window=self._rollback_window,
             )
@@ -739,42 +745,39 @@ class MetaLoop:
             return
 
         prev_ver = self._rollback_tracker.previous_version
+        from alphaloop.trading.strategy_loader import load_active_strategy
+        current_active = await load_active_strategy(
+            self._settings_service,
+            self._symbol,
+            self._instance_id,
+        )
+        current_ver = resolve_strategy_version(current_active) if current_active else 0
         logger.warning(
             "[meta-loop] Rolling back %s to v%d (underperformance detected)",
             self._symbol, prev_ver,
         )
 
         # Re-activate the previous version
-        from alphaloop.trading.strategy_loader import load_active_strategy
         # The previous version JSON still exists on disk — just re-activate it
-        import json
-        prev_data = None
-        for f in STRATEGY_VERSIONS_DIR.glob(f"{self._symbol}_v*.json"):
-            try:
-                data = json.loads(f.read_text())
-                if data.get("version") == prev_ver:
-                    prev_data = data
-                    break
-            except (json.JSONDecodeError, OSError):
-                continue
+        prev_data = find_strategy_record(self._symbol, prev_ver, STRATEGY_VERSIONS_DIR)
 
         if prev_data:
-            rollback_payload = build_active_strategy_payload(prev_data)
-            strategy_json = json.dumps(rollback_payload)
+            rollback_payload = bind_active_strategy_symbol(prev_data, self._symbol)
             # Write to per-instance key (primary) + symbol key (legacy fallback)
-            if self._instance_id:
-                await self._settings_service.set(
-                    f"active_strategy_{self._instance_id}", strategy_json,
-                )
-            await self._settings_service.set(
-                f"active_strategy_{self._symbol}", strategy_json,
+            await store_active_strategy_bindings(
+                self._settings_service,
+                rollback_payload,
+                symbol=self._symbol,
+                instance_id=self._instance_id,
+                write_symbol_key=True,
+                write_instance_key=bool(self._instance_id),
             )
 
         from alphaloop.core.events import StrategyRolledBack
         await self._event_bus.publish(StrategyRolledBack(
             symbol=self._symbol,
             instance_id=self._instance_id,
-            from_version=0,  # current version unknown here
+            from_version=current_ver,
             to_version=prev_ver,
             reason="R-multiple Sharpe below 70% of previous version",
         ))

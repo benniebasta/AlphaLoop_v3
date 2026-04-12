@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from alphaloop.trading.strategy_loader import (
+    build_active_strategy_payload,
+    build_strategy_reference,
+)
 from alphaloop.trading.meta_loop import (
     MetaLoop,
     _strategy_version_payload,
@@ -34,6 +39,47 @@ def test_strategy_version_payload_includes_strategy_spec_from_active_strategy():
     assert payload["strategy_spec"]["spec_version"] == "v1"
     assert payload["strategy_spec"]["signal_mode"] == "ai_signal"
     assert payload["strategy_spec"]["prompt_bundle"]["signal_instruction"] == "Use only strong trends"
+
+
+def test_active_reference_prefers_canonical_version_string():
+    active = SimpleNamespace(
+        symbol="XAUUSD",
+        version="legacy",
+        tools={},
+        validation={},
+        ai_models={},
+        signal_instruction="signal",
+        validator_instruction="validator",
+        strategy_spec=SimpleNamespace(
+            signal_mode="ai_signal",
+            spec_version="v1",
+            setup_family="discretionary_ai",
+            direction_model="ai_hypothesis",
+            enabled_preconditions=[],
+            entry_model={},
+            invalidation_model={},
+            exit_policy={},
+            risk_policy={},
+            prompt_bundle={},
+            metadata={"version": 17},
+        ),
+    )
+
+    assert build_strategy_reference(
+        build_active_strategy_payload(active),
+        fallback_symbol="XAUUSD",
+    ) == {
+        "symbol": "XAUUSD",
+        "strategy_id": "XAUUSD.v17",
+        "strategy_version": "17",
+    }
+
+    assert int(
+        build_strategy_reference(
+            build_active_strategy_payload(active),
+            fallback_symbol="XAUUSD",
+        )["strategy_version"]
+    ) == 17
 
 
 def test_strategy_version_payload_prefers_strategy_spec_validator_prompt_bundle():
@@ -397,7 +443,36 @@ def test_walk_forward_candidate_payload_rebuilds_params_from_spec_entry_model():
 
     assert payload["params"]["risk_pct"] == 0.02
     assert payload["params"]["signal_rules"] == [{"source": "macd_crossover"}]
-    assert payload["params"]["signal_logic"] == "OR"
+
+
+def test_active_helpers_prefer_canonical_active_payload():
+    active = SimpleNamespace(
+        version="legacy",
+        params={"risk_pct": 9.99, "signal_rules": [{"source": "ema_crossover"}], "signal_logic": "AND"},
+        signal_mode="algo_ai",
+        strategy_spec=SimpleNamespace(
+            spec_version="v1",
+            signal_mode="algo_ai",
+            setup_family="momentum_expansion",
+            metadata={"version": 17},
+            entry_model={
+                "signal_rule_sources": ["macd_crossover"],
+                "signal_logic": "OR",
+            },
+        ),
+    )
+
+    assert int(
+        build_strategy_reference(
+            build_active_strategy_payload(active),
+            fallback_symbol="XAUUSD",
+        )["strategy_version"]
+    ) == 17
+    assert dict(build_active_strategy_payload(active).get("params") or {}) == {
+        "risk_pct": 9.99,
+        "signal_rules": [{"source": "macd_crossover"}],
+        "signal_logic": "OR",
+    }
 
 
 def test_strategy_version_payload_applies_overrides_before_serializing_spec():
@@ -496,7 +571,8 @@ async def test_meta_loop_create_strategy_version_uses_reserved_next_version(tmp_
     import alphaloop.backtester.asset_trainer as asset_trainer
 
     monkeypatch.setattr(asset_trainer, "STRATEGY_VERSIONS_DIR", Path(tmp_path))
-    existing = tmp_path / "XAUUSD_v2.json"
+    active_name = "silver-hawk-XAUUSD_ai"
+    existing = tmp_path / f"{active_name}_v2.json"
     existing.write_text(json.dumps({"symbol": "XAUUSD", "version": 2}))
 
     event_bus = SimpleNamespace(publish=AsyncMock())
@@ -508,7 +584,9 @@ async def test_meta_loop_create_strategy_version_uses_reserved_next_version(tmp_
     )
 
     active = SimpleNamespace(
-        version=1,
+        name=active_name,
+        version="legacy",
+        params={"risk_pct": 0.01},
         tools={},
         validation={},
         ai_models={},
@@ -527,7 +605,7 @@ async def test_meta_loop_create_strategy_version_uses_reserved_next_version(tmp_
             exit_policy={},
             risk_policy={},
             prompt_bundle={},
-            metadata={},
+            metadata={"version": 1},
         ),
     )
 
@@ -535,22 +613,78 @@ async def test_meta_loop_create_strategy_version_uses_reserved_next_version(tmp_
 
     assert new_version == 3
     assert json.loads(existing.read_text()) == {"symbol": "XAUUSD", "version": 2}
-    written = json.loads((tmp_path / "XAUUSD_v3.json").read_text())
+    written = json.loads((tmp_path / f"{active_name}_v3.json").read_text())
     assert written["version"] == 3
     assert written["source"] == "autolearn"
     event_bus.publish.assert_awaited()
 
 
+async def test_meta_loop_activate_version_uses_canonical_previous_version(monkeypatch):
+    settings_service = SimpleNamespace(
+        set=AsyncMock(),
+        get=AsyncMock(return_value=json.dumps({
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "signal_mode": "algo_only",
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {},
+                "metadata": {"version": 5},
+            },
+        })),
+    )
+    loop = MetaLoop(
+        symbol="XAUUSD",
+        instance_id="inst-1",
+        session_factory=None,
+        event_bus=SimpleNamespace(publish=AsyncMock()),
+        settings_service=settings_service,
+    )
+    loop._baseline_r_multiples = [1.0] * 40
+
+    active = SimpleNamespace(
+        version="legacy",
+        params={"risk_pct": 0.01},
+        tools={},
+        validation={},
+        ai_models={},
+        scoring_weights={},
+        confidence_thresholds={},
+        signal_instruction="legacy signal",
+        validator_instruction="legacy validator",
+        strategy_spec=SimpleNamespace(
+            signal_mode="algo_ai",
+            spec_version="v1",
+            setup_family="pullback_continuation",
+            direction_model="algorithmic_rules",
+            enabled_preconditions=[],
+            entry_model={},
+            invalidation_model={},
+            exit_policy={},
+            risk_policy={},
+            prompt_bundle={},
+            metadata={"version": 6},
+        ),
+    )
+
+    await loop._activate_version(active, 7, {"params": {"risk_pct": 0.02}})
+
+    assert loop._rollback_tracker is not None
+    assert loop._rollback_tracker.previous_version == 6
+
+
 async def test_meta_loop_execute_rollback_uses_canonical_active_strategy_payload(tmp_path, monkeypatch):
-    import json
     from pathlib import Path
 
     import alphaloop.trading.meta_loop as meta_loop
 
     monkeypatch.setattr(meta_loop, "STRATEGY_VERSIONS_DIR", Path(tmp_path))
-    (tmp_path / "XAUUSD_v4.json").write_text(json.dumps({
+    (tmp_path / "silver-hawk-XAUUSD_ai_v4.json").write_text(json.dumps({
         "symbol": "XAUUSD",
         "version": 4,
+        "name": "silver-hawk-XAUUSD_ai",
         "status": "dry_run",
         "signal_mode": "algo_only",
         "summary": {"sharpe_ratio": 1.3},
@@ -562,11 +696,25 @@ async def test_meta_loop_execute_rollback_uses_canonical_active_strategy_payload
                 "signal_instruction": "spec signal",
                 "validator_instruction": "spec validator",
             },
-            "metadata": {"source": "ui_ai_signal_card"},
+            "metadata": {"source": "ui_ai_signal_card", "symbol": "XAUUSD", "version": 4},
         },
     }))
 
-    settings_service = SimpleNamespace(set=AsyncMock())
+    settings_service = SimpleNamespace(
+        set=AsyncMock(),
+        get=AsyncMock(return_value=json.dumps({
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "signal_mode": "algo_only",
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {},
+                "metadata": {"version": 5},
+            },
+        })),
+    )
     event_bus = SimpleNamespace(publish=AsyncMock())
     loop = MetaLoop(
         symbol="XAUUSD",
@@ -581,12 +729,16 @@ async def test_meta_loop_execute_rollback_uses_canonical_active_strategy_payload
 
     assert settings_service.set.await_count == 2
     instance_payload = json.loads(settings_service.set.await_args_list[0].args[1])
+    assert instance_payload["symbol"] == "XAUUSD"
     assert instance_payload["signal_mode"] == "ai_signal"
     assert instance_payload["signal_instruction"] == "spec signal"
     assert instance_payload["validator_instruction"] == "spec validator"
     assert instance_payload["summary"]["sharpe"] == 1.3
     assert instance_payload["strategy_spec"]["signal_mode"] == "ai_signal"
     assert instance_payload["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+    rollback_event = event_bus.publish.await_args_list[-1].args[0]
+    assert rollback_event.from_version == 5
+    assert rollback_event.to_version == 4
     assert loop._rollback_tracker is None
 
 

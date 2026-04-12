@@ -426,7 +426,6 @@ async def test_ollama(
                     payload=result,
                 )
                 return result
-                return {"success": True, "message": f"Ollama OK — {len(models)} models: {', '.join(models[:5])}"}
             result = {"success": False, "message": f"Ollama responded {resp.status_code}"}
             await _record_operator_audit(
                 session,
@@ -565,13 +564,10 @@ async def test_news(
                 events = data["economicCalendar"]
                 high = sum(1 for e in events if (e.get("impact") or "").lower() == "high")
                 return await _audit({"success": True, "message": f"Finnhub OK - {len(events)} events next 7 days ({high} HIGH impact)"})
-                return {"success": True, "message": f"Finnhub OK — {len(events)} events next 7 days ({high} HIGH impact)"}
             err = data.get("error", str(data)[:80]) if isinstance(data, dict) else str(data)[:80]
             return await _audit({"success": False, "message": f"Finnhub: {err} - falling back to ForexFactory"})
-            return {"success": False, "message": f"Finnhub: {err} — falling back to ForexFactory"}
         except Exception as e:
             return await _audit({"success": False, "message": f"Finnhub failed: {e} - falling back to ForexFactory"})
-            return {"success": False, "message": f"Finnhub failed: {e} — falling back to ForexFactory"}
 
     elif provider == "fmp":
         if not fmp_key:
@@ -589,13 +585,10 @@ async def test_news(
             if isinstance(data, list):
                 high = sum(1 for e in data if (e.get("impact") or "").upper() == "HIGH")
                 return await _audit({"success": True, "message": f"FMP OK - {len(data)} events next 7 days ({high} HIGH impact)"})
-                return {"success": True, "message": f"FMP OK — {len(data)} events next 7 days ({high} HIGH impact)"}
             err = data.get("Error Message") or data.get("message") or str(data)[:80]
             return await _audit({"success": False, "message": f"FMP: {err} - falling back to ForexFactory"})
-            return {"success": False, "message": f"FMP: {err} — falling back to ForexFactory"}
         except Exception as e:
             return await _audit({"success": False, "message": f"FMP failed: {e} - falling back to ForexFactory"})
-            return {"success": False, "message": f"FMP failed: {e} — falling back to ForexFactory"}
 
     # ForexFactory (default)
     try:
@@ -607,7 +600,6 @@ async def test_news(
             return await _audit({"success": False, "message": f"Unexpected FF response: {str(events)[:80]}"})
         high = sum(1 for e in events if (e.get("impact") or "").lower() == "high")
         return await _audit({"success": True, "message": f"ForexFactory OK - {len(events)} events this week ({high} HIGH impact)"})
-        return {"success": True, "message": f"ForexFactory OK — {len(events)} events this week ({high} HIGH impact)"}
     except Exception as e:
         return await _audit({"success": False, "message": f"ForexFactory feed failed: {e}"})
 
@@ -679,6 +671,144 @@ async def test_ai(
             session,
             request=request,
             target=f"ai:{provider}",
+            payload=result,
+        )
+        return result
+
+
+@router.post("/trade")
+async def test_trade(
+    body: dict,
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Place a real market order on MT5 as a connection/execution test.
+
+    Expects JSON: {"symbol": "BTCUSD", "lots": 0.01, "direction": "BUY"}
+    Uses stored MT5 credentials. No dry_run — sends a live order.
+    """
+    _require_operator_auth(authorization)
+    settings = await _load_mt5_settings(session)
+    server = settings["server"]
+    login = settings["login"]
+    password = settings["password"]
+    terminal_path = settings["terminal_path"]
+
+    if not server or not login:
+        return {"success": False, "message": "MT5 server and login not configured"}
+
+    raw_symbol = (body.get("symbol") or "BTCUSD").strip().upper()
+    # Resolve to the broker-specific MT5 symbol (e.g. BTCUSD → BTCUSDm on Exness)
+    try:
+        from alphaloop.config.assets import get_asset_config
+        mt5_symbol = get_asset_config(raw_symbol).mt5_symbol
+    except Exception:
+        mt5_symbol = raw_symbol
+    symbol = mt5_symbol
+    lots = float(body.get("lots") or 0.01)
+    direction = (body.get("direction") or "BUY").strip().upper()
+
+    def _place():
+        try:
+            import MetaTrader5 as mt5
+        except ImportError:
+            return {"success": False, "message": "MetaTrader5 package not installed"}
+
+        from alphaloop.utils.crypto import decrypt_value
+
+        kwargs: dict = {"server": server}
+        try:
+            kwargs["login"] = int(login)
+        except (TypeError, ValueError):
+            return {"success": False, "message": "MT5 login is not a valid number"}
+
+        plain_pw = decrypt_value(password) if password else ""
+        if plain_pw:
+            kwargs["password"] = plain_pw
+        if terminal_path:
+            kwargs["path"] = terminal_path
+
+        if not mt5.initialize(**kwargs):
+            return {"success": False, "message": f"MT5 init failed: {mt5.last_error()}"}
+
+        try:
+            info = mt5.account_info()
+            if info is None:
+                return {"success": False, "message": "Connected but cannot read account info"}
+
+            # Ensure symbol is visible/tradeable
+            sym_info = mt5.symbol_info(symbol)
+            if sym_info is None:
+                mt5.symbol_select(symbol, True)
+                sym_info = mt5.symbol_info(symbol)
+            if sym_info is None:
+                return {"success": False, "message": f"Symbol '{symbol}' not found on MT5"}
+
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                return {"success": False, "message": f"No tick data for '{symbol}'"}
+
+            price = tick.ask if direction == "BUY" else tick.bid
+            order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+            path_lower = (getattr(sym_info, "path", "") or "").lower()
+            deviation = 50 if "crypto" in path_lower else 20
+
+            request_dict = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": lots,
+                "type": order_type,
+                "price": price,
+                "sl": 0.0,
+                "tp": 0.0,
+                "deviation": deviation,
+                "magic": 999999,
+                "comment": "alphaloop_test",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+
+            order_result = mt5.order_send(request_dict)
+            if order_result is None or order_result.retcode != mt5.TRADE_RETCODE_DONE:
+                code = order_result.retcode if order_result else -1
+                comment_txt = getattr(order_result, "comment", "") if order_result else ""
+                return {
+                    "success": False,
+                    "message": f"Order rejected: retcode={code} {comment_txt}".strip(),
+                }
+
+            return {
+                "success": True,
+                "ticket": order_result.order,
+                "fill_price": order_result.price,
+                "volume": order_result.volume,
+                "message": (
+                    f"{direction} {lots} lot {symbol} @ {order_result.price:.5f} "
+                    f"— ticket #{order_result.order} | account {info.login} on {info.server}"
+                ),
+            }
+        finally:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+
+    try:
+        result = await asyncio.to_thread(_place)
+        await _record_operator_audit(
+            session,
+            request=request,
+            target=f"test_trade:{symbol}",
+            payload=result,
+        )
+        return result
+    except Exception as e:
+        result = {"success": False, "message": str(e)}
+        await _record_operator_audit(
+            session,
+            request=request,
+            target=f"test_trade:{symbol}",
             payload=result,
         )
         return result

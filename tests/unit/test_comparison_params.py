@@ -1,5 +1,6 @@
 from alphaloop.backtester.comparison import (
     _comparison_backtest_params,
+    _resolve_comparison_signal_sources,
     _resolve_comparison_setup_type,
 )
 from alphaloop.backtester.params import BacktestParams
@@ -51,3 +52,29 @@ def test_resolve_comparison_setup_type_falls_back_to_source_mapping():
     setup_type = _resolve_comparison_setup_type(params, "bos_confirm")
 
     assert setup_type == "breakout"
+
+
+def test_resolve_comparison_signal_sources_prefers_spec_first_rule_sources():
+    params = BacktestParams(
+        signal_mode="algo_ai",
+        signal_rules=[{"source": "ema_crossover"}],
+        strategy_spec={
+            "signal_mode": "algo_ai",
+            "entry_model": {
+                "signal_rule_sources": ["macd_crossover"],
+                "signal_logic": "OR",
+            },
+        },
+    )
+
+    signal_sources = _resolve_comparison_signal_sources(params, "ema_crossover_macd_crossover")
+
+    assert signal_sources == ["macd_crossover"]
+
+
+def test_resolve_comparison_signal_sources_keeps_exact_source_label_when_available():
+    params = BacktestParams(signal_mode="algo_ai")
+
+    signal_sources = _resolve_comparison_signal_sources(params, "bos_confirm")
+
+    assert signal_sources == ["bos_confirm"]

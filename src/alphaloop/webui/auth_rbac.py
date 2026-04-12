@@ -8,11 +8,21 @@ Roles:
 
 Uses bearer tokens mapped to roles via app_settings table:
   rbac_token_{hash} = role
+
+Usage in routes:
+  from alphaloop.webui.auth_rbac import require_role, Role
+
+  @router.post("/start")
+  async def start(..., _rbac: None = require_role(Role.ADMIN)):
+      ...
 """
 
 import hashlib
 import logging
 from enum import StrEnum
+from typing import Callable
+
+from fastapi import Depends, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
@@ -87,3 +97,34 @@ async def resolve_role(
     except ValueError:
         logger.warning("[rbac] Unknown role '%s' for token hash %s", role_str, token_hash[:8])
         return None
+
+
+def require_role(min_role: Role) -> Callable:
+    """FastAPI dependency factory that enforces a minimum role for a route.
+
+    The role is read from ``request.state.role`` which is set by
+    ``BearerAuthMiddleware._attach_identity()`` after the bearer token is
+    validated. When RBAC is disabled (single-token mode), the middleware
+    assigns Role.ADMIN to every authenticated request, so all routes pass.
+
+    Usage::
+
+        @router.post("/start")
+        async def start_agent(..., _rbac: None = require_role(Role.ADMIN)):
+            ...
+    """
+    async def _check(request: Request) -> None:
+        role: Role | None = getattr(request.state, "role", None)
+        if role is None:
+            # Middleware did not attach a role — RBAC not active or dev mode.
+            # Grant access rather than blocking, to preserve existing behaviour
+            # when RBAC_ENABLED=False (single-token mode = full admin access).
+            return
+        if not has_permission(role, min_role):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions — requires '{min_role}' role, "
+                       f"token has '{role}' role.",
+            )
+
+    return Depends(_check)

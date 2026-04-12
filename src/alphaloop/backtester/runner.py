@@ -190,9 +190,10 @@ def _save_checkpoint(
             "max_param_change_pct": best_params.max_param_change_pct,
             "signal_mode": resolve_strategy_signal_mode(strategy_payload),
             "setup_family": resolve_strategy_setup_family(strategy_payload),
+            "spec_version": str(serialize_strategy_spec(strategy_payload).get("spec_version") or "v1"),
             "strategy_spec": serialize_strategy_spec(strategy_payload),
             "tools": normalize_strategy_tools(best_params.tools),
-            "source": resolve_strategy_source(best_params),
+            "source": resolve_strategy_source(strategy_payload),
         },
     }
     tmp = cp_path.with_suffix(".tmp")
@@ -259,7 +260,7 @@ def _load_checkpoint(
             setup_family=resolve_strategy_setup_family(strategy_payload),
             strategy_spec=serialize_strategy_spec(strategy_payload),
             tools=normalize_strategy_tools(p.get("tools", {}) or {}),
-            source=resolve_strategy_source(p),
+            source=resolve_strategy_source(strategy_payload),
         )
         gen = payload.get("generation", 0)
         sharpe = payload.get("best_sharpe", -999.0)
@@ -309,13 +310,6 @@ def _rsi(closes: np.ndarray, period: int = 14) -> np.ndarray:
             out[i + 1] = 100.0 - (100.0 / (1.0 + rs))
     return out
 
-
-def _ema200(arr: np.ndarray) -> float | None:
-    """Get current EMA200 value or None if insufficient data."""
-    if len(arr) < 200:
-        return None
-    e = _ema(arr, 200)
-    return float(e[-1]) if not np.isnan(e[-1]) else None
 
 
 def _detect_bos_simple(highs: np.ndarray, lows: np.ndarray, lookback: int = 20) -> str:
@@ -740,10 +734,6 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
     return signal_fn
 
 
-async def _run_engine_in_thread(**kwargs):
-    """Legacy stub — kept to avoid NameError if referenced elsewhere."""
-    raise NotImplementedError("_run_engine_in_thread removed; use _run_vbt via asyncio.to_thread")
-
 
 def _run_vbt(
     symbol: str,
@@ -807,16 +797,27 @@ def _strategy_version_write_kwargs(
 ) -> dict[str, Any]:
     """Build spec-first kwargs for create_strategy_version from final best params."""
     normalized_tools = normalize_strategy_tools(getattr(params, "tools", tools) or tools or {})
+    strategy_payload = build_strategy_resolution_input(
+        {
+            "signal_mode": getattr(params, "signal_mode", None),
+            "setup_family": getattr(params, "setup_family", None),
+            "strategy_spec": dict(getattr(params, "strategy_spec", {}) or {}),
+            "source": resolve_strategy_source(params) or str(source or ""),
+            "tools": normalized_tools,
+        },
+        signal_rules=getattr(params, "signal_rules", None),
+        signal_logic=getattr(params, "signal_logic", None),
+    )
     return {
         "params": params,
         "metrics": metrics,
         "tools": [tool for tool, enabled in normalized_tools.items() if enabled],
-        "source": resolve_strategy_source(params) or str(source or ""),
+        "source": resolve_strategy_source(strategy_payload) or str(source or ""),
         "name": name,
         "timeframe": timeframe,
         "days": days,
         "initial_capital": initial_capital,
-        "signal_mode": resolve_strategy_signal_mode(params),
+        "signal_mode": resolve_strategy_signal_mode(strategy_payload),
     }
 
 
@@ -964,7 +965,7 @@ async def _run_backtest(
             result = await asyncio.to_thread(_run_vbt, symbol=symbol, opens=opens, highs=highs,
                 lows=lows, closes=closes, timestamps=timestamps, balance=balance, params=base_params)
             elapsed = time.time() - t0
-            baseline_sharpe = result.sharpe or -999.0
+            baseline_sharpe = result.sharpe if result.sharpe is not None else -999.0
             best_sharpe = baseline_sharpe
             best_result = result
             _log(run_id, f"Baseline: {result.trade_count} trades, WR={result.win_rate:.1%}, "

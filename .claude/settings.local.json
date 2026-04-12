@@ -199,7 +199,27 @@
       "Bash(powershell \"Get-Process -Id 28492 | Select-Object Name,Id,CommandLine\")",
       "Bash(powershell \"Stop-Process -Id 28492 -Force\")",
       "Bash(powershell \"Get-Content C:\\\\Users\\\\benz-\\\\Documents\\\\alphaloop_v3\\\\.env 2>$null; Get-Content C:\\\\Users\\\\benz-\\\\Documents\\\\alphaloop_v3\\\\alphaloop.env 2>$null\")",
-      "Bash(powershell \"if \\(Test-Path ''C:/Users/benz-/Documents/alphaloop_v3/.env''\\) { Get-Content ''C:/Users/benz-/Documents/alphaloop_v3/.env'' | Select-String ''AUTH_TOKEN'' }\")"
+      "Bash(powershell \"if \\(Test-Path ''C:/Users/benz-/Documents/alphaloop_v3/.env''\\) { Get-Content ''C:/Users/benz-/Documents/alphaloop_v3/.env'' | Select-String ''AUTH_TOKEN'' }\")",
+      "Bash(grep -n \"symbol.*_v.*version\\\\|f\\\\\"{symbol}_v\\\\|symbol: str, version\" \"C:\\\\Users\\\\benz-\\\\Documents\\\\alphaloop_v3\\\\src\\\\alphaloop\\\\webui\\\\routes\\\\strategies.py\")",
+      "Bash(grep -n \"data-symbol\\\\|dataset\\\\.symbol\\\\|btn\\\\.dataset\\\\.symbol\\\\|/api/strategies/\\\\${sym}\\\\|sym = btn\\\\|const sym\\\\|data-sym=\" \"C:\\\\Users\\\\benz-\\\\Documents\\\\alphaloop_v3\\\\src\\\\alphaloop\\\\webui\\\\static\\\\js\\\\components\\\\strategies.js\")",
+      "Bash(grep -n \"openStrategyDetail\\\\|function.*strategyDetail\\\\|/api/strategies/\\\\$\" \"C:\\\\Users\\\\benz-\\\\Documents\\\\alphaloop_v3\\\\src\\\\alphaloop\\\\webui\\\\static\\\\js\\\\components\\\\strategies.js\")",
+      "Bash(taskkill /PID 9296 /F)",
+      "Bash(cmd /c \"taskkill /PID 9296 /F\")",
+      "Bash(cmd /c \"taskkill /F /IM python.exe /FI \\\\\"MEMUSAGE gt 50000\\\\\"\")",
+      "Bash(git:*)",
+      "Bash(findstr \":8090\")",
+      "Bash(taskkill /F /PID 30732)",
+      "Bash(taskkill //F //PID 30732)",
+      "Bash(taskkill //F //PID 29428)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8090/api/pipeline/funnel?hours=1)",
+      "Bash(taskkill //F //PID 32360)",
+      "Bash(curl -s http://localhost:8090/api/pipeline/funnel?hours=24)",
+      "Bash(curl -s http://localhost:8090/api/controls/guards-status)",
+      "Bash(curl -s \"http://localhost:8090/api/pipeline/funnel?hours=168\")",
+      "Bash(curl -s \"http://localhost:8090/api/pipeline/decisions/latest?limit=50\")",
+      "Bash(curl -s \"http://localhost:8090/api/pipeline/funnel?hours=1&source=historical_replay\")",
+      "Bash(curl -s http://localhost:8090/api/strategies)",
+      "Bash(curl -s \"http://localhost:8090/api/strategies/phantom-knight-BTCUSD_ai/v1\")"
     ]
   }
 }

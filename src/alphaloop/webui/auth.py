@@ -13,6 +13,18 @@ from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
+
+def get_operator_id(request: Request) -> str:
+    """Return a stable, non-spoofable operator identifier derived from the
+    bearer token (set by BearerAuthMiddleware). Never use a client-supplied
+    body field as operator identity — this function is the canonical source.
+
+    Returns a short hash prefix like ``op-a3f2c1b8`` that is unique per token
+    but does not expose the token value. Operators can configure a human-readable
+    alias by setting ``operator_alias_<hash>`` in app_settings.
+    """
+    return getattr(request.state, "operator_id", "op-anonymous")
+
 # Paths that bypass auth completely (health probes, static assets, auth login)
 _PUBLIC_PREFIXES = ("/health", "/static", "/favicon", "/api/auth", "/api/events/ingest")
 
@@ -127,7 +139,34 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 status_code=401,
             )
 
+        # Token is valid — resolve RBAC role and operator identity, store on
+        # request.state so routes and dependencies can read them without
+        # re-checking the token or accepting client-supplied identity claims.
+        await self._attach_identity(request, provided)
+
         return await call_next(request)
+
+    @staticmethod
+    async def _attach_identity(request: Request, token: str) -> None:
+        """Resolve RBAC role and stable operator ID from the validated token and
+        store both on ``request.state`` so all downstream handlers can read them
+        without re-examining the Authorization header or trusting client-supplied
+        identity fields."""
+        from alphaloop.webui.auth_rbac import Role, hash_token, resolve_role
+
+        token_hash = hash_token(token)
+        # Stable non-spoofable operator identifier (hash prefix, not the token)
+        request.state.operator_id = f"op-{token_hash[:8]}"
+
+        container = getattr(request.app.state, "container", None)
+        settings_svc = getattr(container, "settings_service", None) if container else None
+
+        try:
+            role = await resolve_role(token, settings_svc)
+            request.state.role = role if role is not None else Role.VIEWER
+        except Exception:
+            # Fail-safe: if role resolution errors, treat as least-privileged
+            request.state.role = Role.VIEWER
 
     @staticmethod
     async def _resolve_token(request: Request) -> str:

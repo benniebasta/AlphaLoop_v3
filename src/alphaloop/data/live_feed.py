@@ -141,10 +141,16 @@ class LiveFeed:
         """Try to get tick from MT5."""
         try:
             import MetaTrader5 as mt5
-            tick = await asyncio.to_thread(mt5.symbol_info_tick, symbol)
+            # Resolve to broker-specific symbol (e.g. BTCUSD → BTCUSDm on Exness)
+            try:
+                from alphaloop.config.assets import get_asset_config
+                mt5_sym = get_asset_config(symbol).mt5_symbol
+            except Exception:
+                mt5_sym = symbol
+            tick = await asyncio.to_thread(mt5.symbol_info_tick, mt5_sym)
             if tick:
                 return TickData(
-                    symbol=symbol,
+                    symbol=symbol,  # keep raw symbol as cache key
                     bid=tick.bid,
                     ask=tick.ask,
                     spread=tick.ask - tick.bid,

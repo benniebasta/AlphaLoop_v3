@@ -1609,6 +1609,73 @@ async def test_strategy_update_preserves_spec_first_ai_models_on_non_model_edit(
 
 
 @pytest.mark.asyncio
+async def test_get_strategy_returns_spec_first_prompt_fields(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", tmp_path)
+    version_file = tmp_path / "XAUUSD_v13.json"
+    version_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": 13,
+        "status": "candidate",
+        "source": "ui_ai_signal_card",
+        "signal_mode": "ai_signal",
+        "signal_instruction": "legacy signal",
+        "validator_instruction": "legacy validator",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {
+                "signal_instruction": "spec signal",
+                "validator_instruction": "spec validator",
+            },
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+    }, indent=2))
+
+    resp = await client.get("/api/strategies/XAUUSD/v13")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["signal_instruction"] == "spec signal"
+    assert body["validator_instruction"] == "spec validator"
+    assert body["strategy_spec"]["prompt_bundle"]["signal_instruction"] == "spec signal"
+    assert body["strategy_spec"]["prompt_bundle"]["validator_instruction"] == "spec validator"
+
+
+@pytest.mark.asyncio
+async def test_get_strategy_returns_spec_first_family_source_and_version(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", tmp_path)
+    version_file = tmp_path / "XAUUSD_v16.json"
+    version_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": 16,
+        "status": "candidate",
+        "spec_version": "legacy-v0",
+        "setup_family": "pullback_continuation",
+        "source": "",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+    }, indent=2))
+
+    resp = await client.get("/api/strategies/XAUUSD/v16")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["spec_version"] == "v1"
+    assert body["setup_family"] == "discretionary_ai"
+    assert body["source"] == "ui_ai_signal_card"
+    assert body["strategy_spec"]["spec_version"] == "v1"
+    assert body["strategy_spec"]["setup_family"] == "discretionary_ai"
+    assert body["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
+
+@pytest.mark.asyncio
 async def test_strategy_promote_writes_operator_audit(client, container, monkeypatch):
     create_resp = await client.post(
         "/api/strategies/ai-signal",
@@ -1686,6 +1753,53 @@ async def test_strategy_canary_start_writes_operator_audit(client, container, mo
         )).scalars())
     assert len(audit_rows) >= 1
     assert any(row.target == f"{created['symbol']}_v{created['version']}" for row in audit_rows)
+
+
+@pytest.mark.asyncio
+async def test_strategy_canary_start_uses_canonical_strategy_version_tag(
+    client, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", tmp_path)
+    version_file = tmp_path / "XAUUSD_v7.json"
+    version_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "status": "candidate",
+        "signal_mode": "algo_only",
+        "summary": {},
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card", "version": 12},
+        },
+    }, indent=2))
+
+    import alphaloop.backtester.deployment_pipeline as deployment_pipeline_module
+
+    captured: dict = {}
+
+    async def _fake_start_canary(self, *, symbol, strategy_version, allocation_pct, duration_hours):
+        captured["symbol"] = symbol
+        captured["strategy_version"] = strategy_version
+        captured["allocation_pct"] = allocation_pct
+        captured["duration_hours"] = duration_hours
+        return {"status": "ok", "canary_id": "canary_XAUUSD_12"}
+
+    monkeypatch.setattr(
+        deployment_pipeline_module.DeploymentPipeline,
+        "start_canary",
+        _fake_start_canary,
+    )
+
+    resp = await client.post(
+        "/api/strategies/XAUUSD/v7/canary/start",
+        json={"allocation_pct": 12.5, "duration_hours": 8},
+    )
+
+    assert resp.status_code == 200
+    assert captured["strategy_version"] == "v12"
 
 
 @pytest.mark.asyncio
@@ -1857,6 +1971,65 @@ async def test_delete_strategy_writes_operator_audit(client, container):
 
 
 @pytest.mark.asyncio
+async def test_delete_strategy_rejects_instance_bound_active_strategy_with_spec_first_version(
+    client, container, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", tmp_path)
+    version_file = tmp_path / "XAUUSD_v18.json"
+    version_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "status": "candidate",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card", "version": 18},
+        },
+    }, indent=2))
+
+    async with container.db_session_factory() as session:
+        session.add(
+            RunningInstance(
+                symbol="XAUUSD",
+                instance_id="inst-delete-bound",
+                pid=4242,
+                strategy_version="v18",
+            )
+        )
+        await session.commit()
+
+    from alphaloop.db.repositories.settings_repo import SettingsRepository
+
+    async with container.db_session_factory() as session:
+        repo = SettingsRepository(session)
+        await repo.set(
+            "active_strategy_inst-delete-bound",
+            json.dumps({
+                "symbol": "XAUUSD",
+                "version": "legacy",
+                "signal_mode": "algo_only",
+                "strategy_spec": {
+                    "spec_version": "v1",
+                    "signal_mode": "ai_signal",
+                    "setup_family": "discretionary_ai",
+                    "prompt_bundle": {},
+                    "metadata": {"source": "ui_ai_signal_card", "version": 18},
+                },
+            }),
+        )
+        await session.commit()
+
+    resp = await client.delete("/api/strategies/XAUUSD/v18")
+
+    assert resp.status_code == 400
+    assert "active instance inst-delete-bound" in resp.json()["detail"]
+    assert version_file.exists()
+
+
+@pytest.mark.asyncio
 async def test_activate_strategy_requires_operator_auth(client):
     create_resp = await client.post(
         "/api/strategies/ai-signal",
@@ -1904,6 +2077,63 @@ async def test_bots(client):
     data = resp.json()
     assert "bots" in data
     assert isinstance(data["bots"], list)
+
+
+@pytest.mark.asyncio
+async def test_bots_list_prefers_canonical_bound_strategy_version_for_overlay(
+    client, container
+):
+    async with container.db_session_factory() as session:
+        session.add(
+            RunningInstance(
+                symbol="XAUUSD",
+                instance_id="bot-canonical-bound",
+                pid=1,
+                strategy_version=None,
+            )
+        )
+        await session.commit()
+
+    import alphaloop.webui.routes.bots as bots_route_local
+
+    original_pid_alive = bots_route_local._pid_alive
+    bots_route_local._pid_alive = lambda pid: True
+    try:
+        from alphaloop.config.settings_service import SettingsService
+
+        settings_svc = SettingsService(container.db_session_factory)
+        await settings_svc.set(
+            "active_strategy_bot-canonical-bound",
+            json.dumps({
+                "symbol": "XAUUSD",
+                "version": "legacy",
+                "status": "dry_run",
+                "signal_mode": "algo_only",
+                "strategy_spec": {
+                    "spec_version": "v1",
+                    "signal_mode": "ai_signal",
+                    "setup_family": "discretionary_ai",
+                    "prompt_bundle": {},
+                    "metadata": {"source": "ui_ai_signal_card", "version": 21},
+                },
+            }),
+        )
+        await settings_svc.set(
+            "dry_run_overlay_XAUUSD_v21",
+            json.dumps({"extra_tools": ["tick_jump_guard"]}),
+        )
+
+        resp = await client.get("/api/bots")
+    finally:
+        bots_route_local._pid_alive = original_pid_alive
+
+    assert resp.status_code == 200
+    bots = resp.json()["bots"]
+    target = next(bot for bot in bots if bot["instance_id"] == "bot-canonical-bound")
+    assert target["strategy_version"] == "v21"
+    assert target["strategy"]["version"] == 21
+    assert target["strategy"]["signal_mode"] == "ai_signal"
+    assert target["strategy"]["overlay"] == ["tick_jump_guard"]
 
 
 @pytest.mark.asyncio
@@ -2050,6 +2280,15 @@ async def test_start_bot_binds_strategy_from_shared_versions_dir(client, contain
 
     monkeypatch.setattr(bots_route, "STRATEGY_VERSIONS_DIR", tmp_path)
     monkeypatch.setattr(bots_route.subprocess, "Popen", lambda *args, **kwargs: _FakeProc())
+
+    strategy_path = tmp_path / "XAUUSD_v7.json"
+    strategy_payload = json.loads(strategy_path.read_text())
+    strategy_payload["version"] = "legacy"
+    strategy_payload["strategy_spec"]["metadata"] = {
+        "source": "ui_ai_signal_card",
+        "version": 7,
+    }
+    strategy_path.write_text(json.dumps(strategy_payload, indent=2))
 
     resp = await client.post(
         "/api/bots/start",

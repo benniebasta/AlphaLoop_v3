@@ -5,7 +5,7 @@
  *  - Expandable row → shows P&L attribution panel (entry skill, exit skill, slippage, commission)
  *  - TCA panel at top with execution quality score progress bar
  */
-import { apiGet, apiPost } from '../api.js';
+import { apiGet, apiPost, apiDelete } from '../api.js';
 
 function outcomeBadge(outcome) {
   const map = {
@@ -78,14 +78,18 @@ function renderRow(t) {
       <td>${t.direction || '—'}</td>
       <td>${t.setup_type || '—'}</td>
       <td>${t.entry_price?.toFixed(2) ?? '—'}</td>
+      <td>${t.close_price ? t.close_price.toFixed(2) : '<span style="color:var(--muted)">—</span>'}</td>
       <td>${t.lot_size?.toFixed(2) ?? '—'}</td>
       <td>${outcomeBadge(t.outcome)}</td>
       <td>${pnlCell(t.pnl_usd)}</td>
       <td>${t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}</td>
-      <td style="font-size:0.7rem;color:var(--muted)">▶</td>
+      <td style="white-space:nowrap;text-align:right">
+        <span class="expand-arrow" style="font-size:0.7rem;color:var(--muted)">▶</span>
+        <button class="btn-del-trade" data-id="${t.id}" title="Delete trade" style="background:none;border:none;cursor:pointer;color:var(--red);font-size:0.8rem;padding:0 4px;opacity:0.6" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">🗑</button>
+      </td>
     </tr>
     <tr id="${rowId}" style="display:none">
-      <td colspan="10" style="background:var(--surface-raised,rgba(255,255,255,0.03));padding:8px 16px">
+      <td colspan="11" style="background:var(--surface-raised,rgba(255,255,255,0.03));padding:8px 16px">
         <div style="font-size:0.78rem;color:var(--muted);margin-bottom:4px">
           ⚡ P&L Attribution breakdown for trade #${t.id}
         </div>
@@ -139,9 +143,9 @@ export async function render(container) {
       <table class="data-table" id="trades-table">
         <thead><tr>
           <th>ID</th><th>Symbol</th><th>Dir</th><th>Setup</th>
-          <th>Entry</th><th>Lots</th><th>Outcome</th><th>P&L</th><th>Opened</th><th></th>
+          <th>Entry</th><th>Close</th><th>Lots</th><th>Outcome</th><th>P&L</th><th>Opened</th><th></th>
         </tr></thead>
-        <tbody id="trades-body"><tr><td colspan="10">Loading...</td></tr></tbody>
+        <tbody id="trades-body"><tr><td colspan="11">Loading...</td></tr></tbody>
       </table>
     </div>
   `;
@@ -157,26 +161,46 @@ export async function render(container) {
     try {
       const data = await apiGet(`/api/trades?status=${status}&limit=200`);
       if (data.trades.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No trades found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11" class="empty-state">No trades found</td></tr>';
       } else {
         tbody.innerHTML = data.trades.map(renderRow).join('');
 
         // Wire expand/collapse on trade rows
         document.querySelectorAll('.trade-row').forEach(row => {
-          row.addEventListener('click', () => {
+          row.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-del-trade')) return; // let delete handle it
             const id = row.dataset.id;
             const detail = document.getElementById(`trade-detail-${id}`);
             if (detail) {
               const isOpen = detail.style.display !== 'none';
               detail.style.display = isOpen ? 'none' : 'table-row';
-              const arrow = row.querySelector('td:last-child');
+              const arrow = row.querySelector('.expand-arrow');
               if (arrow) arrow.textContent = isOpen ? '▶' : '▼';
+            }
+          });
+        });
+
+        // Wire delete buttons
+        document.querySelectorAll('.btn-del-trade').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.id;
+            if (!confirm(`Delete trade #${id}? This cannot be undone.`)) return;
+            try {
+              await apiDelete(`/api/trades/${id}`);
+              const row = document.querySelector(`.trade-row[data-id="${id}"]`);
+              const detail = document.getElementById(`trade-detail-${id}`);
+              row?.remove();
+              detail?.remove();
+              if (window.showToast) window.showToast(`Trade #${id} deleted`);
+            } catch (err) {
+              if (window.showToast) window.showToast(err.message, 'error');
             }
           });
         });
       }
     } catch (err) {
-      tbody.innerHTML = `<tr><td colspan="10" style="color:var(--red)">${err.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="11" style="color:var(--red)">${err.message}</td></tr>`;
     }
   }
 

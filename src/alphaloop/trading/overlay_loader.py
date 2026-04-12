@@ -24,6 +24,19 @@ class DryRunOverlayConfig:
     extra_tools: list[str] = field(default_factory=list)
 
 
+def normalize_overlay_tools(extra_tools: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Normalize overlay tool names into a stable, deduplicated string list."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for tool in extra_tools or []:
+        name = str(tool or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return normalized
+
+
 async def load_overlay_config(
     settings_service: SettingsService,
     symbol: str,
@@ -49,4 +62,19 @@ async def load_overlay_config(
     if not extra:
         return None
 
-    return DryRunOverlayConfig(extra_tools=extra)
+    return DryRunOverlayConfig(extra_tools=normalize_overlay_tools(extra))
+
+
+async def save_overlay_config(
+    settings_service: SettingsService,
+    symbol: str,
+    version: int,
+    extra_tools: list[str] | tuple[str, ...] | None,
+) -> DryRunOverlayConfig:
+    """Persist a canonical dry-run overlay config and return the normalized value."""
+    config = DryRunOverlayConfig(extra_tools=normalize_overlay_tools(extra_tools))
+    await settings_service.set(
+        f"dry_run_overlay_{symbol}_v{version}",
+        json.dumps({"extra_tools": config.extra_tools}),
+    )
+    return config

@@ -5,10 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from alphaloop.db.models.instance import RunningInstance
-from alphaloop.webui.routes.bots import _bot_to_dict, _bound_active_strategy_payload
+from alphaloop.trading.strategy_loader import (
+    build_active_strategy_payload,
+    bind_active_strategy_symbol,
+    load_strategy_json,
+)
+from alphaloop.webui.routes.bots import _bot_to_dict
 import alphaloop.webui.routes.strategies as strategies_route
 from alphaloop.webui.routes.strategies import (
-    _active_strategy_payload,
     _effective_signal_mode,
     _normalized_summary,
     _save_version,
@@ -17,7 +21,7 @@ from alphaloop.webui.routes.strategies import (
 
 
 def test_active_strategy_payload_prefers_spec_prompt_bundle():
-    payload = _active_strategy_payload(
+    payload = build_active_strategy_payload(
         {
             "symbol": "XAUUSD",
             "version": 11,
@@ -42,7 +46,7 @@ def test_active_strategy_payload_prefers_spec_prompt_bundle():
 
 
 def test_active_strategy_payload_prefers_spec_signal_mode():
-    payload = _active_strategy_payload(
+    payload = build_active_strategy_payload(
         {
             "symbol": "XAUUSD",
             "version": 13,
@@ -59,8 +63,29 @@ def test_active_strategy_payload_prefers_spec_signal_mode():
     assert payload["signal_mode"] == "ai_signal"
 
 
+def test_load_active_strategy_record_prefers_spec_first_version_and_source():
+    payload = load_strategy_json(json.dumps({
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "signal_mode": "algo_only",
+        "source": "",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card", "version": 7},
+        },
+    }))
+
+    assert payload is not None
+    assert payload["version"] == 7
+    assert payload["signal_mode"] == "ai_signal"
+    assert payload["source"] == "ui_ai_signal_card"
+
+
 def test_active_strategy_payload_prefers_spec_version():
-    payload = _active_strategy_payload(
+    payload = build_active_strategy_payload(
         {
             "symbol": "XAUUSD",
             "version": 14,
@@ -93,7 +118,7 @@ def test_effective_signal_mode_prefers_strategy_spec():
 
 
 def test_active_strategy_payload_preserves_conviction_tuning_fields():
-    payload = _active_strategy_payload(
+    payload = build_active_strategy_payload(
         {
             "symbol": "XAUUSD",
             "version": 12,
@@ -256,8 +281,7 @@ def test_bot_to_dict_prefers_sharpe_ratio_and_total_pnl_usd_aliases():
 
 
 def test_bound_active_strategy_payload_prefers_spec_version():
-    payload = _bound_active_strategy_payload(
-        "XAUUSD",
+    payload = bind_active_strategy_symbol(
         {
             "symbol": "XAUUSD",
             "version": 8,
@@ -271,15 +295,43 @@ def test_bound_active_strategy_payload_prefers_spec_version():
                 "prompt_bundle": {},
             },
         },
+        "XAUUSD",
     )
 
     assert payload["spec_version"] == "v1"
     assert payload["strategy_spec"]["spec_version"] == "v1"
 
 
+def test_bot_to_dict_prefers_canonical_bound_strategy_version():
+    bot = RunningInstance(
+        id=1,
+        symbol="XAUUSD",
+        instance_id="bot-1",
+        pid=1234,
+        strategy_version=None,
+        started_at=datetime.now(timezone.utc),
+    )
+    bound = {
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"version": 9},
+        },
+    }
+
+    payload = _bot_to_dict(bot, bound)
+
+    assert payload["strategy_version"] == "v9"
+    assert payload["strategy"]["version"] == 9
+
+
 def test_bound_active_strategy_payload_normalizes_summary_aliases():
-    payload = _bound_active_strategy_payload(
-        "XAUUSD",
+    payload = bind_active_strategy_symbol(
         {
             "symbol": "XAUUSD",
             "version": 9,
@@ -297,6 +349,7 @@ def test_bound_active_strategy_payload_normalizes_summary_aliases():
                 "prompt_bundle": {},
             },
         },
+        "XAUUSD",
     )
 
     assert payload["summary"]["sharpe"] == 0.9
@@ -323,6 +376,60 @@ def test_load_version_prefers_spec_signal_mode(tmp_path, monkeypatch):
 
     assert loaded is not None
     assert loaded["signal_mode"] == "ai_signal"
+
+
+def test_load_version_prefers_spec_prompt_bundle_fields(tmp_path, monkeypatch):
+    strategy_file = Path(tmp_path) / "XAUUSD_v2.json"
+    strategy_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": 2,
+        "signal_mode": "ai_signal",
+        "signal_instruction": "legacy signal",
+        "validator_instruction": "legacy validator",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {
+                "signal_instruction": "spec signal",
+                "validator_instruction": "spec validator",
+            },
+        },
+    }))
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", Path(tmp_path))
+
+    loaded = strategies_route._load_version("XAUUSD", 2)
+
+    assert loaded is not None
+    assert loaded["signal_instruction"] == "spec signal"
+    assert loaded["validator_instruction"] == "spec validator"
+
+
+def test_load_version_prefers_spec_family_source_and_version(tmp_path, monkeypatch):
+    strategy_file = Path(tmp_path) / "XAUUSD_v14.json"
+    strategy_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": 14,
+        "spec_version": "legacy-v0",
+        "setup_family": "pullback_continuation",
+        "source": "",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+    }))
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", Path(tmp_path))
+
+    loaded = strategies_route._load_version("XAUUSD", 14)
+
+    assert loaded is not None
+    assert loaded["spec_version"] == "v1"
+    assert loaded["setup_family"] == "discretionary_ai"
+    assert loaded["source"] == "ui_ai_signal_card"
 
 
 def test_load_version_normalizes_summary_metric_aliases(tmp_path, monkeypatch):
@@ -398,6 +505,33 @@ def test_load_all_versions_prefers_spec_signal_mode(tmp_path, monkeypatch):
 
     assert len(loaded) == 1
     assert loaded[0]["signal_mode"] == "ai_signal"
+
+
+def test_load_all_versions_prefers_spec_prompt_bundle_fields(tmp_path, monkeypatch):
+    strategy_file = Path(tmp_path) / "XAUUSD_v8.json"
+    strategy_file.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": 8,
+        "signal_mode": "ai_signal",
+        "signal_instruction": "legacy signal",
+        "validator_instruction": "legacy validator",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {
+                "signal_instruction": "spec signal",
+                "validator_instruction": "spec validator",
+            },
+        },
+    }))
+    monkeypatch.setattr(strategies_route, "STRATEGY_VERSIONS_DIR", Path(tmp_path))
+
+    loaded = strategies_route._load_all_versions()
+
+    assert len(loaded) == 1
+    assert loaded[0]["signal_instruction"] == "spec signal"
+    assert loaded[0]["validator_instruction"] == "spec validator"
 
 
 def test_sync_strategy_spec_write_fields_updates_prompt_bundle_and_mode():
@@ -500,6 +634,28 @@ def test_sync_strategy_spec_write_fields_preserves_effective_metadata_source_whe
     _sync_strategy_spec_write_fields(data, {"source"})
 
     assert data["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
+
+def test_sync_strategy_spec_write_fields_prefers_spec_first_metadata_version():
+    data = {
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "source": "ui_ai_signal_card",
+        "signal_mode": "ai_signal",
+        "signal_instruction": "signal prompt",
+        "validator_instruction": "validator prompt",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card", "version": 6},
+        },
+    }
+
+    _sync_strategy_spec_write_fields(data)
+
+    assert data["strategy_spec"]["metadata"]["version"] == 6
 
 
 def test_sync_strategy_spec_write_fields_allows_explicit_prompt_clear():
@@ -629,3 +785,32 @@ def test_save_version_preserves_spec_first_ai_models_on_non_model_save(tmp_path)
         "signal": "spec-signal",
         "validator": "spec-validator",
     }
+
+
+def test_save_version_preserves_spec_first_family_source_and_version(tmp_path):
+    path = Path(tmp_path) / "XAUUSD_v15.json"
+    path.write_text("{}")
+    data = {
+        "_path": str(path),
+        "symbol": "XAUUSD",
+        "version": 15,
+        "status": "candidate",
+        "spec_version": "legacy-v0",
+        "setup_family": "pullback_continuation",
+        "source": "",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+    }
+
+    _save_version(data)
+
+    saved = json.loads(path.read_text())
+    assert saved["spec_version"] == "v1"
+    assert saved["setup_family"] == "discretionary_ai"
+    assert saved["source"] == "ui_ai_signal_card"

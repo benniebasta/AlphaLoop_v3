@@ -17,7 +17,6 @@ Responsibilities:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -27,7 +26,13 @@ from alphaloop.core.types import ValidationStatus, SetupType, TrendDirection
 from alphaloop.execution.service import ExecutionService
 from alphaloop.risk.guard_persistence import save_guard_state
 from alphaloop.signals.schema import TradeSignal, ValidatedSignal
-from alphaloop.trading.strategy_loader import build_runtime_strategy_context
+from alphaloop.trading.runtime_utils import (
+    current_account_balance,
+    current_runtime_strategy,
+    current_strategy_reference,
+    safe_json_payload,
+    session_name_from_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +86,7 @@ class ExecutionOrchestrator:
 
         # Mutable — updated by TradingLoop after strategy reload / canary load
         self._active_strategy: Any = None
+        self._runtime_strategy: dict[str, Any] = {}
         self._canary_allocation: float | None = None
 
     # ── State updates ────────────────────────────────────────────────────────
@@ -89,6 +95,7 @@ class ExecutionOrchestrator:
         self,
         *,
         active_strategy: Any,
+        runtime_strategy: dict[str, Any] | None = None,
         canary_allocation: float | None,
         sizer: Any = None,
         risk_monitor: Any = None,
@@ -96,6 +103,7 @@ class ExecutionOrchestrator:
     ) -> None:
         """Refresh mutable references after a strategy reload or canary change."""
         self._active_strategy = active_strategy
+        self._runtime_strategy = dict(runtime_strategy or {})
         self._canary_allocation = canary_allocation
         if sizer is not None:
             self._sizer = sizer
@@ -279,26 +287,37 @@ class ExecutionOrchestrator:
         execution_sizing = dict(sizing)
         if "risk_amount_usd" not in execution_sizing and "risk_usd" in execution_sizing:
             execution_sizing["risk_amount_usd"] = execution_sizing.get("risk_usd")
-        runtime_strategy = self._active_strategy_runtime()
+        runtime_strategy = (
+            dict(self._runtime_strategy)
+            if self._runtime_strategy
+            else current_runtime_strategy(active_strategy=self._active_strategy)
+        )
+        strategy_ref = current_strategy_reference(
+            symbol=self.symbol,
+            runtime_strategy=runtime_strategy,
+        )
 
         return await self._execution_service.execute_market_order(
             symbol=self.symbol,
             instance_id=self.instance_id,
-            account_balance=self._current_account_balance(),
+            account_balance=current_account_balance(
+                risk_monitor=self._risk_monitor,
+                sizer=self._sizer,
+            ),
             signal=signal,
             sizing=execution_sizing,
             stop_loss=stop_loss,
             take_profit=take_profit,
             take_profit_2=take_profit_2,
             comment=comment,
-            strategy_id=self._active_strategy_id(),
-            strategy_version=str(runtime_strategy.get("version", "") or ""),
-            signal_payload=self._safe_json_payload(signal),
-            validation_payload=self._safe_json_payload(validated),
-            market_context_snapshot=self._safe_json_payload(
-                {"symbol": self.symbol, "session": self._session_name_from_context(context)}
+            strategy_id=strategy_ref["strategy_id"],
+            strategy_version=strategy_ref["strategy_version"],
+            signal_payload=safe_json_payload(signal),
+            validation_payload=safe_json_payload(validated),
+            market_context_snapshot=safe_json_payload(
+                {"symbol": self.symbol, "session": session_name_from_context(context)}
             ),
-            session_name=self._session_name_from_context(context),
+            session_name=session_name_from_context(context),
             is_dry_run=self._dry_run,
         )
 
@@ -336,10 +355,7 @@ class ExecutionOrchestrator:
         # Telegram / notification alert
         if self._notifier:
             try:
-                session_name = ""
-                if isinstance(context, dict):
-                    sess = context.get("session", {})
-                    session_name = sess.get("name", "") if isinstance(sess, dict) else str(getattr(sess, "name", ""))
+                current_session_name = session_name_from_context(context)
                 await self._notifier.alert_trade_opened(
                     direction=signal.direction,
                     symbol=self.symbol,
@@ -351,7 +367,7 @@ class ExecutionOrchestrator:
                     lots=lot_size["lots"],
                     confidence=signal.raw_confidence,
                     setup=signal.setup_type,
-                    session=session_name,
+                    session=current_session_name,
                 )
             except Exception as e:
                 logger.warning("[v4-orch] Notifier alert failed: %s", e)
@@ -369,61 +385,3 @@ class ExecutionOrchestrator:
                 )
             except Exception as e:
                 logger.warning("[v4-orch] save_guard_state failed: %s", e)
-
-    def _current_account_balance(self) -> float:
-        if self._risk_monitor is not None:
-            balance = float(getattr(self._risk_monitor, "account_balance", 0.0) or 0.0)
-            if balance > 0:
-                return balance
-        if self._sizer is not None:
-            balance = float(getattr(self._sizer, "account_balance", 0.0) or 0.0)
-            if balance > 0:
-                return balance
-        return 0.0
-
-    def _active_strategy_runtime(self) -> dict[str, Any]:
-        if self._active_strategy is None:
-            return {}
-        return build_runtime_strategy_context(self._active_strategy)
-
-    def _active_strategy_id(self) -> str:
-        runtime = self._active_strategy_runtime()
-        version = int(runtime.get("version", 0) or 0)
-        if version > 0:
-            return f"{self.symbol}.v{version}"
-        return self.symbol
-
-    @staticmethod
-    def _safe_json_payload(value: Any, _depth: int = 0) -> dict | None:
-        if value is None:
-            return None
-        if _depth > 4:
-            return {"value": str(value)}
-        if isinstance(value, dict):
-            try:
-                json.dumps(value, default=str)
-                return value
-            except Exception:
-                return {"value": str(value)}
-        try:
-            from pydantic import BaseModel
-            if isinstance(value, BaseModel):
-                return ExecutionOrchestrator._safe_json_payload(value.model_dump(), _depth + 1)
-        except ImportError:
-            pass
-        if hasattr(value, "__dict__") and not callable(value):
-            raw = {k: v for k, v in vars(value).items() if not k.startswith("_")}
-            return ExecutionOrchestrator._safe_json_payload(raw, _depth + 1)
-        return {"value": str(value)}
-
-    @staticmethod
-    def _session_name_from_context(context: Any) -> str:
-        if isinstance(context, dict):
-            session = context.get("session", {})
-            if isinstance(session, dict):
-                return str(session.get("name", ""))
-            return str(getattr(session, "name", "") or "")
-        session = getattr(context, "session", None)
-        if isinstance(session, dict):
-            return str(session.get("name", ""))
-        return str(getattr(session, "name", "") or "")

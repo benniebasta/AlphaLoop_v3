@@ -230,7 +230,7 @@ def optimize(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(
             n_startup_trials=N_STARTUP_TRIALS,
-            seed=42,
+            seed=None,
         ),
     )
 
@@ -362,7 +362,7 @@ def optimize_construction(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(
             n_startup_trials=N_STARTUP_TRIALS,
-            seed=42,
+            seed=None,
         ),
     )
 

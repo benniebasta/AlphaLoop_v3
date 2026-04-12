@@ -20,6 +20,25 @@ class RiskMonitor:
     """
     Tracks daily loss, consecutive losses, and enforces the kill switch.
     Async-compatible — uses asyncio.Lock instead of threading.
+
+    MULTI-INSTANCE SCOPE LIMITATION
+    --------------------------------
+    ``asyncio.Lock`` is process-local. ``_open_trades`` and ``_open_risk_usd``
+    counters are maintained in this process's memory only. When multiple bot
+    processes run (e.g. XAUUSD + BTCUSD simultaneously), each instance has its
+    own independent RiskMonitor and they do NOT see each other's positions.
+
+    MITIGATION: The ``ControlPlane`` in ``execution/control_plane.py`` calls
+    ``CrossInstanceRiskAggregator.can_open_trade()`` (a DB-backed cross-process
+    check) before allowing execution. To prevent multi-instance over-exposure:
+      1. Always instantiate ``CrossInstanceRiskAggregator`` with a ``trade_repo``
+         and wire it into ``ControlPlane`` via the ``cross_risk`` constructor arg.
+      2. Keep ``fail_open=False`` (the default) on ``CrossInstanceRiskAggregator``
+         so that DB failures block new trades rather than allow them through.
+
+    If ``CrossInstanceRiskAggregator`` is not configured, the system operates
+    with per-instance limits only — which is sufficient for single-symbol
+    deployments but insufficient for multi-symbol multi-process deployments.
     """
 
     def __init__(
@@ -204,6 +223,12 @@ class RiskMonitor:
         register_open() separately — the two-step pattern has a race window
         where two concurrent callers can both pass the check before either
         increments the counter.
+
+        PROCESS-LOCAL ONLY: The atomicity guarantee is within this process.
+        Cross-process (multi-instance) concurrency is enforced by the DB-backed
+        ``CrossInstanceRiskAggregator`` in ``execution/control_plane.py``. If
+        that aggregator is not configured, multi-symbol deployments may exceed
+        the ``max_concurrent_trades`` limit across instances.
 
         Returns (True, "") on success (slot reserved).
         Returns (False, reason) if the trade should not proceed.

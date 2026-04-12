@@ -55,7 +55,10 @@ _PORTFOLIO_BUDGET_MAX_PENALTY = 20.0
 _PORTFOLIO_PENALTY_CAP = 25.0
 
 # Quality floors
-_QUALITY_FLOOR_OVERALL = 35.0
+# Raised from 35 → 55: a signal with < 55 overall quality has most quality
+# checks failing and should not be traded. Institutional practice requires
+# meaningful quality confirmation before capital is deployed.
+_QUALITY_FLOOR_OVERALL = 55.0
 _QUALITY_FLOOR_CONTRADICTION_COUNT = 3
 _QUALITY_FLOOR_CONTRADICTION_THRESHOLD = 25.0
 _QUALITY_FLOOR_MAX_SCORE_MIN = 60.0
@@ -85,6 +88,13 @@ class ConvictionScorer:
         # Load base weights and thresholds
         self._base_weights = load_weights(strategy_params)
         self._base_thresholds = load_thresholds(strategy_params)
+
+        # Load quality floors from strategy params (fall back to module defaults)
+        raw_floors = (strategy_params or {}).get("quality_floors") or {}
+        self._floor_overall = float(raw_floors.get("floor_overall", _QUALITY_FLOOR_OVERALL))
+        self._floor_max_score_min = float(raw_floors.get("floor_max_score_min", _QUALITY_FLOOR_MAX_SCORE_MIN))
+        self._floor_contradiction_threshold = float(raw_floors.get("floor_contradiction_threshold", _QUALITY_FLOOR_CONTRADICTION_THRESHOLD))
+        self._floor_contradiction_count = int(raw_floors.get("floor_contradiction_count", _QUALITY_FLOOR_CONTRADICTION_COUNT))
 
     def score(
         self,
@@ -180,22 +190,22 @@ class ConvictionScorer:
         hold_reason = None
         has_tool_scores = bool(quality.tool_scores)
 
-        if has_tool_scores and quality.overall_score < _QUALITY_FLOOR_OVERALL:
+        if has_tool_scores and quality.overall_score < self._floor_overall:
             floor_triggered = True
             hold_reason = (
                 f"Overall structural score {quality.overall_score:.1f} "
-                f"< floor {_QUALITY_FLOOR_OVERALL}"
+                f"< floor {self._floor_overall}"
             )
-        elif has_tool_scores and quality.low_score_count >= _QUALITY_FLOOR_CONTRADICTION_COUNT:
+        elif has_tool_scores and quality.low_score_count >= self._floor_contradiction_count:
             floor_triggered = True
             hold_reason = (
                 f"{quality.low_score_count} tools scored < "
-                f"{_QUALITY_FLOOR_CONTRADICTION_THRESHOLD} (max {_QUALITY_FLOOR_CONTRADICTION_COUNT})"
+                f"{self._floor_contradiction_threshold} (max {self._floor_contradiction_count})"
             )
-        elif has_tool_scores and quality.max_score < _QUALITY_FLOOR_MAX_SCORE_MIN:
+        elif has_tool_scores and quality.max_score < self._floor_max_score_min:
             floor_triggered = True
             hold_reason = (
-                f"No tool scored above {_QUALITY_FLOOR_MAX_SCORE_MIN} "
+                f"No tool scored above {self._floor_max_score_min} "
                 f"(max was {quality.max_score:.1f})"
             )
 

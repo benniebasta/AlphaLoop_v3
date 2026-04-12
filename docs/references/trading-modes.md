@@ -9,7 +9,7 @@ at Stage 3 (direction hypothesis) and whether AI validation runs at Stage 6.
 
 ```
 Stage 1  → Market Gate        (spread, hours, news)
-Stage 2  → Regime Classifier  (trending / ranging / volatile / dead)
+Stage 2  → Regime Classifier  (trending / ranging / volatile / neutral)
 Stage 3  → Direction Engine   ← MODE SPLITS HERE
 Stage 3B → Trade Constructor  (structure-derived SL/TP)
 Stage 4A → Structural Invalidation (hard safety-net)
@@ -177,7 +177,7 @@ MarketGate → Regime → MultiAssetSignalEngine (LLM call #1)
 
 Everything from Stage 3B onward shares the exact same code:
 
-- **TradeConstructor** — SL from swing low/high or FVG bottom/top. TP from `SL distance × tp1_rr / tp2_rr`. Bounds checked. No ATR fallback. If no valid structure exists, no trade is emitted.
+- **TradeConstructor** — SL derived in priority order: swing low/high → FVG bottom/top → ATR fallback (1.5× ATR, lowest priority). TP from `SL distance × tp1_rr / tp2_rr`. Bounds checked. ATR fallback fires only when no structure-derived SL exists.
 - **Structural Invalidation** — hard checks: SL direction, minimum R:R, distance bounds, regime compatibility
 - **Risk Gate** — position sizing, portfolio correlation, equity curve gate
 - **Execution Guard** — tick jump detection, deduplication, DELAY / EXECUTE / BLOCK decision

@@ -85,6 +85,7 @@ CATALOG: dict[str, list[tuple[str, str, str]]] = {
         ("^HSI",    "Hang Seng",                 "HK50"),
         ("^STOXX50E","Euro Stoxx 50",            "EU50"),
         ("^AXJO",   "ASX 200",                   "AUS200"),
+        ("DX-Y.NYB","US Dollar Index",           "DXY"),
     ],
     "Index Futures": [
         ("ES=F",    "S&P 500 E-mini Futures",    "US500"),

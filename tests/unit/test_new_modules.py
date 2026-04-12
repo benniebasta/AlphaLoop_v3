@@ -277,6 +277,8 @@ class TestStrategyVersionCreation:
                 at.STRATEGY_VERSIONS_DIR = original
 
     def test_increments_version(self):
+        # Each call generates a unique name → each starts at v1 (independent lineage).
+        # To get v2, pass the same name explicitly (autolearn scenario).
         from alphaloop.backtester.asset_trainer import create_strategy_version
         from alphaloop.backtester.params import BacktestParams
         import alphaloop.backtester.asset_trainer as at
@@ -287,7 +289,12 @@ class TestStrategyVersionCreation:
             try:
                 r1 = create_strategy_version("SYM", BacktestParams(), {}, [])
                 r2 = create_strategy_version("SYM", BacktestParams(), {}, [])
+                # Two fresh cards → different generated names → both v1
                 assert r1["version"] == 1
-                assert r2["version"] == 2
+                assert r2["version"] == 1
+                assert r1["name"] != r2["name"]
+                # Evolving same lineage (autolearn): pass the existing name → v2
+                r3 = create_strategy_version("SYM", BacktestParams(), {}, [], name=r1["name"])
+                assert r3["version"] == 2
             finally:
                 at.STRATEGY_VERSIONS_DIR = original

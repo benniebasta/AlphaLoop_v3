@@ -49,6 +49,14 @@ class TickAggregator:
         poll_interval_ms: int = 100,
     ) -> None:
         self._symbols = list(symbols)
+        # Build raw → MT5 broker symbol mapping (e.g. BTCUSD → BTCUSDm on Exness)
+        try:
+            from alphaloop.config.assets import get_asset_config
+            self._mt5_symbol_map: dict[str, str] = {
+                s: get_asset_config(s).mt5_symbol for s in self._symbols
+            }
+        except Exception:
+            self._mt5_symbol_map = {s: s for s in self._symbols}
         self._poll_interval = poll_interval_ms / 1000.0
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
         self._stop_event = threading.Event()
@@ -144,10 +152,11 @@ class TickAggregator:
         while not stop_event.is_set():
             for symbol in self._symbols:
                 try:
-                    tick = mt5.symbol_info_tick(symbol)
+                    mt5_sym = self._mt5_symbol_map.get(symbol, symbol)
+                    tick = mt5.symbol_info_tick(mt5_sym)
                     if tick:
                         td = TickData(
-                            symbol=symbol,
+                            symbol=symbol,  # keep raw symbol as cache key
                             bid=tick.bid,
                             ask=tick.ask,
                             spread=tick.ask - tick.bid,

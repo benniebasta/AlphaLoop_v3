@@ -76,6 +76,21 @@ async def get_trade(
     return _trade_to_dict(trade)
 
 
+@router.delete("/{trade_id}")
+async def delete_trade(
+    trade_id: int,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Permanently delete a trade record."""
+    repo = TradeRepository(session)
+    trade = await repo.get_by_id(trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    await session.delete(trade)
+    await session.commit()
+    return {"status": "ok", "deleted": trade_id}
+
+
 @router.get("/stats/summary")
 async def trade_stats(
     session: AsyncSession = Depends(get_db_session),

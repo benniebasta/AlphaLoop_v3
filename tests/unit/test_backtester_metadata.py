@@ -86,6 +86,45 @@ def test_suggest_params_prefers_strategy_spec_entry_model_rules_and_logic():
     assert params.signal_logic == "OR"
 
 
+def test_serialize_best_params_prefers_spec_first_identity_prompts_and_models():
+    params = BacktestParams(
+        signal_mode="algo_only",
+        setup_family="pullback_continuation",
+        strategy_spec={
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {
+                "signal_instruction": "spec signal",
+                "validator_instruction": "spec validator",
+            },
+            "ai_models": {
+                "signal": "spec-signal-model",
+                "validator": "spec-validator-model",
+            },
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+        signal_rules=[{"source": "ema_crossover"}],
+        signal_logic="AND",
+        tools={"fast_fingers": True},
+        source="legacy_source",
+    )
+
+    serialized = asset_trainer._serialize_best_params(params)
+
+    assert serialized["spec_version"] == "v1"
+    assert serialized["signal_mode"] == "ai_signal"
+    assert serialized["setup_family"] == "discretionary_ai"
+    assert serialized["source"] == "ui_ai_signal_card"
+    assert serialized["signal_instruction"] == "spec signal"
+    assert serialized["validator_instruction"] == "spec validator"
+    assert serialized["ai_models"] == {
+        "signal": "spec-signal-model",
+        "validator": "spec-validator-model",
+    }
+    assert serialized["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
+
 def test_checkpoint_round_trip_preserves_strategy_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "alphaloop.backtester.runner._CHECKPOINT_DIR",
@@ -277,6 +316,31 @@ def test_checkpoint_round_trip_prefers_strategy_spec_metadata_source(tmp_path, m
     assert restored.strategy_spec["metadata"]["source"] == "ui_ai_signal_card"
 
 
+def test_save_checkpoint_persists_canonical_spec_version_and_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "alphaloop.backtester.runner._CHECKPOINT_DIR",
+        tmp_path,
+    )
+    params = BacktestParams(
+        signal_mode="algo_only",
+        setup_family="pullback_continuation",
+        strategy_spec={
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "metadata": {"source": "ui_ai_signal_card"},
+        },
+        source="legacy_flat_source",
+    )
+
+    _save_checkpoint("run-spec-source", 2, params, 0.75, "specsrc123")
+
+    payload = json.loads((tmp_path / "run-spec-source.json").read_text())
+    assert payload["best_params"]["spec_version"] == "v1"
+    assert payload["best_params"]["source"] == "ui_ai_signal_card"
+    assert payload["best_params"]["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
+
 def test_checkpoint_round_trip_infers_family_from_tools_when_flat_family_is_stale(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "alphaloop.backtester.runner._CHECKPOINT_DIR",
@@ -431,12 +495,14 @@ async def test_train_from_card_prefers_strategy_spec_signal_mode_and_family(monk
     def _fake_run_vbt(symbol, opens, highs, lows, closes, timestamps, balance, params):
         captured["baseline_signal_mode"] = params.signal_mode
         captured["baseline_setup_family"] = params.setup_family
+        captured["baseline_strategy_spec"] = params.strategy_spec
         return _Result()
 
     def _fake_create_strategy_version(**kwargs):
         captured["version_signal_mode"] = kwargs["signal_mode"]
         captured["version_params_signal_mode"] = kwargs["params"].signal_mode
         captured["version_params_setup_family"] = kwargs["params"].setup_family
+        captured["version_params_strategy_spec"] = kwargs["params"].strategy_spec
         return {"_version": 1}
 
     monkeypatch.setattr(asset_trainer, "_fetch_data", _fake_fetch_data)
@@ -467,9 +533,12 @@ async def test_train_from_card_prefers_strategy_spec_signal_mode_and_family(monk
     assert result["success"] is True
     assert captured["baseline_signal_mode"] == "ai_signal"
     assert captured["baseline_setup_family"] == "discretionary_ai"
+    assert captured["baseline_strategy_spec"]["signal_mode"] == "ai_signal"
+    assert captured["baseline_strategy_spec"]["setup_family"] == "discretionary_ai"
     assert captured["version_signal_mode"] == "ai_signal"
     assert captured["version_params_signal_mode"] == "ai_signal"
     assert captured["version_params_setup_family"] == "discretionary_ai"
+    assert captured["version_params_strategy_spec"]["signal_mode"] == "ai_signal"
     assert result["best_params"]["signal_mode"] == "ai_signal"
     assert result["best_params"]["setup_family"] == "discretionary_ai"
     assert result["best_params"]["strategy_spec"]["signal_mode"] == "ai_signal"

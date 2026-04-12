@@ -29,6 +29,7 @@ const TOOL_LABELS = {
 
 // Per-instance loop state, populated by WebSocket events
 const loopStates = {};
+const manualTradeDir = {};   // instance_id → 'BUY' | 'SELL' | null
 
 
 function timeAgo(ts) {
@@ -45,9 +46,8 @@ function stratBaseName(name) {
   return (name || 'Strategy').replace(/_v\d+$/i, '');
 }
 
-function stratVersionBadge(name) {
-  const match = (name || '').match(/_v(\d+)$/i);
-  const ver = match ? match[1] : '?';
+function stratVersionBadge(version) {
+  const ver = (version != null && version !== '') ? version : '?';
   return `<span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;background:var(--bg3);color:var(--text);border:1px solid var(--border)">V${ver}</span>`;
 }
 
@@ -193,7 +193,7 @@ function agentCard(b, symbolCounts) {
         <div class="bot-live-dot"></div>
         <div class="bot-symbol" style="display:flex;align-items:center;gap:6px">
           ${strat ? stratBaseName(strat.name) : b.symbol}
-          ${strat ? stratVersionBadge(strat.name) : ''}
+          ${strat ? stratVersionBadge(strat.version) : ''}
         </div>
         <span class="badge badge-green">Active</span>
         ${multiBadge}
@@ -219,8 +219,36 @@ function agentCard(b, symbolCounts) {
       <div id="evo-badge-${b.instance_id}" style="display:none;margin-top:4px"></div>
       <div class="bot-actions">
         <button class="btn btn-sm raw-log-btn" data-symbol="${b.symbol}" data-instance="${b.instance_id}" style="flex:1">📋 Raw Log</button>
+        <button class="btn btn-sm manual-trade-toggle" data-instance="${b.instance_id}" title="Open/close manual trade">⚡ Trade</button>
         <button class="btn btn-danger btn-sm" data-stop="${b.instance_id}" title="Stop agent">Stop</button>
         <button class="btn btn-danger btn-sm" data-remove="${b.instance_id}" title="Remove record">Remove</button>
+      </div>
+      <div id="manual-trade-panel-${b.instance_id}" style="display:none;margin-top:8px;border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--bg2)">
+        <div style="font-size:11px;font-weight:700;margin-bottom:8px;color:var(--gold)">Manual Trade <span style="font-weight:400;color:var(--muted)">(dry run)</span></div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button class="btn btn-sm manual-dir-btn" data-dir="BUY" data-instance="${b.instance_id}" style="flex:1;border:2px solid var(--green);color:var(--green);background:transparent;font-weight:700">BUY</button>
+          <button class="btn btn-sm manual-dir-btn" data-dir="SELL" data-instance="${b.instance_id}" style="flex:1;border:2px solid var(--red);color:var(--red);background:transparent;font-weight:700">SELL</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px">
+          <div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:2px">Lots</div>
+            <input type="number" class="manual-lots" data-instance="${b.instance_id}" value="0.01" step="0.01" min="0.01" style="width:100%;box-sizing:border-box;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:12px">
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:2px">Price (opt)</div>
+            <input type="number" class="manual-price" data-instance="${b.instance_id}" placeholder="auto" step="0.00001" style="width:100%;box-sizing:border-box;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:12px">
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:2px">SL (opt)</div>
+            <input type="number" class="manual-sl" data-instance="${b.instance_id}" placeholder="0.0" step="0.00001" style="width:100%;box-sizing:border-box;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:12px">
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:2px">TP (opt)</div>
+            <input type="number" class="manual-tp" data-instance="${b.instance_id}" placeholder="0.0" step="0.00001" style="width:100%;box-sizing:border-box;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--bg3);color:var(--text);font-size:12px">
+          </div>
+        </div>
+        <button class="btn btn-sm manual-open-btn" data-instance="${b.instance_id}" disabled style="width:100%;font-weight:600;opacity:0.5">Select BUY or SELL</button>
+        <div id="manual-trades-${b.instance_id}" style="margin-top:10px"></div>
       </div>
     </div>`;
 }
@@ -244,12 +272,12 @@ function strategyPickerHTML(strategies, activeVersion) {
     const statusColor = STATUS_COLORS[s.status] || 'var(--muted)';
     return `
       <label class="strategy-pick-card" style="display:flex;gap:10px;align-items:center;padding:8px 12px;border:1px solid var(--border);border-radius:6px;${isCandidate ? 'opacity:0.55;cursor:not-allowed' : 'cursor:pointer'};margin-bottom:4px;overflow:hidden${isActive ? ';border-color:var(--gold)' : ''}">
-        <input type="radio" name="pick-strategy" value="${s.version}" ${isActive ? 'checked' : ''} ${isCandidate ? 'disabled' : ''} style="accent-color:var(--gold);width:auto;flex-shrink:0">
+        <input type="radio" name="pick-strategy" value="${s.version}" data-name="${s.name}" ${isActive ? 'checked' : ''} ${isCandidate ? 'disabled' : ''} style="accent-color:var(--gold);width:auto;flex-shrink:0">
         <div style="flex:1;min-width:0">
           <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
             ${isActive ? '<span style="color:var(--gold);font-size:11px">&#9733; Active</span>' : ''}
             <span style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px">${stratBaseName(s.name)}</span>
-            ${stratVersionBadge(s.name)}
+            ${stratVersionBadge(s.version)}
             ${signalModePill(mode)}
             <span class="badge" style="background:${statusColor};color:#000;font-size:10px;padding:2px 6px">${s.status}</span>
             ${isCandidate ? '<span style="font-size:10px;color:var(--amber)">— promote to deploy</span>' : ''}
@@ -1037,10 +1065,12 @@ export async function render(container) {
     const pollInterval = parseFloat(document.getElementById('deploy-poll-interval').value) || 60;
     const pickedRadio = document.querySelector('input[name="pick-strategy"]:checked');
     const stratVer = pickedRadio ? parseInt(pickedRadio.value, 10) : null;
+    const stratName = pickedRadio ? (pickedRadio.dataset.name || '') : '';
 
     try {
       const payload = { symbol, dry_run: dryRun, risk_budget_pct: riskBudget, poll_interval_sec: pollInterval };
       if (stratVer !== null) payload.strategy_version = stratVer;
+      if (stratName) payload.strategy_name = stratName;
       await apiPost('/api/bots/start', payload);
       const modeLabel = dryRun ? 'Dry Run' : 'Live';
       const budgetLabel = riskBudget < 1 ? ` @ ${Math.round(riskBudget * 100)}% budget` : '';
@@ -1138,6 +1168,119 @@ export async function render(container) {
           }
         });
       });
+
+      // Manual trade panel toggle
+      el.querySelectorAll('.manual-trade-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.dataset.instance;
+          const panel = document.getElementById(`manual-trade-panel-${id}`);
+          if (!panel) return;
+          const open = panel.style.display !== 'none';
+          panel.style.display = open ? 'none' : 'block';
+          if (!open) _loadManualTrades(id);
+        });
+      });
+
+      // Direction BUY/SELL selection
+      el.querySelectorAll('.manual-dir-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.dataset.instance;
+          const dir = btn.dataset.dir;
+          manualTradeDir[id] = dir;
+          // Update button styles
+          el.querySelectorAll(`.manual-dir-btn[data-instance="${id}"]`).forEach(b => {
+            const active = b.dataset.dir === dir;
+            if (b.dataset.dir === 'BUY') {
+              b.style.background = active ? 'var(--green)' : 'transparent';
+              b.style.color = active ? '#000' : 'var(--green)';
+            } else {
+              b.style.background = active ? 'var(--red)' : 'transparent';
+              b.style.color = active ? '#fff' : 'var(--red)';
+            }
+          });
+          // Enable open button
+          const openBtn = el.querySelector(`.manual-open-btn[data-instance="${id}"]`);
+          if (openBtn) {
+            openBtn.disabled = false;
+            openBtn.style.opacity = '1';
+            openBtn.textContent = `Open ${dir}`;
+            openBtn.style.background = dir === 'BUY' ? 'var(--green)' : 'var(--red)';
+            openBtn.style.color = dir === 'BUY' ? '#000' : '#fff';
+          }
+        });
+      });
+
+      // Open trade button
+      el.querySelectorAll('.manual-open-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.instance;
+          const dir = manualTradeDir[id];
+          if (!dir) return;
+          const lots = parseFloat(el.querySelector(`.manual-lots[data-instance="${id}"]`)?.value || '0.01');
+          const price = parseFloat(el.querySelector(`.manual-price[data-instance="${id}"]`)?.value || '0') || null;
+          const sl = parseFloat(el.querySelector(`.manual-sl[data-instance="${id}"]`)?.value || '0') || null;
+          const tp = parseFloat(el.querySelector(`.manual-tp[data-instance="${id}"]`)?.value || '0') || null;
+          btn.disabled = true;
+          btn.textContent = 'Opening...';
+          try {
+            await apiPost(`/api/bots/${id}/trades/open`, { direction: dir, lots, sl, tp, entry_price: price });
+            window.showToast(`${dir} trade opened`);
+            await _loadManualTrades(id);
+          } catch (err) {
+            window.showToast(err.message, 'error');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = `Open ${dir}`;
+          }
+        });
+      });
+
+      async function _loadManualTrades(id) {
+        const container = document.getElementById(`manual-trades-${id}`);
+        if (!container) return;
+        try {
+          const data = await apiGet(`/api/bots/${id}/trades`);
+          const trades = data.trades || [];
+          if (trades.length === 0) {
+            container.innerHTML = `<div style="font-size:11px;color:var(--muted);text-align:center;padding:6px">No open trades</div>`;
+            return;
+          }
+          container.innerHTML = `<div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:6px">OPEN TRADES</div>` +
+            trades.map(t => `
+              <div style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px">
+                <span style="font-weight:700;color:${t.direction === 'BUY' ? 'var(--green)' : 'var(--red)'}">${t.direction}</span>
+                <span>${t.lot_size} lots</span>
+                <span style="color:var(--muted)">@ ${t.entry_price ?? '—'}</span>
+                <span style="color:var(--muted);margin-left:auto">#${t.order_ticket ?? t.id}</span>
+                <button class="btn btn-danger btn-sm manual-close-btn"
+                  data-instance="${id}" data-trade="${t.id}"
+                  style="padding:2px 8px;font-size:10px">Close</button>
+              </div>`).join('');
+          // Bind close buttons
+          container.querySelectorAll('.manual-close-btn').forEach(cb => {
+            cb.addEventListener('click', async () => {
+              const tid = parseInt(cb.dataset.trade);
+              cb.disabled = true;
+              cb.textContent = '...';
+              try {
+                const res = await apiPost(`/api/bots/${id}/trades/close`, { trade_id: tid });
+                const pnl = res.pnl_usd ?? 0;
+                const sign = pnl > 0 ? '+' : '';
+                const outcome = res.outcome || 'BE';
+                const color = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--amber)';
+                window.showToast(`Closed @ ${res.close_price?.toFixed(2) ?? '—'} · P&L: ${sign}$${pnl.toFixed(2)} (${outcome})`, pnl >= 0 ? 'success' : 'error');
+                await _loadManualTrades(id);
+              } catch (err) {
+                window.showToast(err.message, 'error');
+                cb.disabled = false;
+                cb.textContent = 'Close';
+              }
+            });
+          });
+        } catch (err) {
+          container.innerHTML = `<div style="font-size:11px;color:var(--red)">${err.message}</div>`;
+        }
+      }
     } catch (err) {
       el.innerHTML = `<div class="page-error">${err.message}</div>`;
     }

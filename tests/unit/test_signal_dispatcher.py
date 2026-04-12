@@ -287,6 +287,43 @@ async def test_dispatch_prefers_runtime_signal_model_over_cached_dispatcher_mode
 
 
 @pytest.mark.asyncio
+async def test_dispatch_prefers_explicit_runtime_strategy_snapshot_over_raw_active_strategy():
+    hyp = _make_hypothesis()
+    signal_engine = MagicMock()
+    signal_engine.generate_hypothesis = AsyncMock(return_value=hyp)
+    active_strategy = SimpleNamespace(
+        ai_models={"signal": "stale-model"},
+        signal_instruction="stale prompt",
+        strategy_spec=SimpleNamespace(
+            signal_mode="algo_only",
+            prompt_bundle={"signal_instruction": "stale spec prompt"},
+            ai_models={"signal": "stale-spec-model"},
+        ),
+    )
+    runtime_strategy = {
+        "signal_mode": "ai_signal",
+        "signal_instruction": "runtime prompt wins",
+        "ai_models": {"signal": "runtime-model"},
+    }
+
+    d = _make_dispatcher(signal_engine=signal_engine, ai_caller=MagicMock())
+    d.update_signal_model("cached-model")
+
+    result = await d.dispatch(
+        MagicMock(),
+        MagicMock(),
+        signal_mode="algo_only",
+        active_strategy=active_strategy,
+        runtime_strategy=runtime_strategy,
+    )
+
+    assert result is hyp
+    call_kwargs = signal_engine.generate_hypothesis.call_args
+    assert call_kwargs.kwargs["model_id"] == "runtime-model"
+    assert call_kwargs.kwargs["prompt_instructions"] == "runtime prompt wins"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_falls_back_to_cached_signal_model_when_runtime_has_none():
     hyp = _make_hypothesis()
     signal_engine = MagicMock()

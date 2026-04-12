@@ -103,6 +103,7 @@ class DirectionHypothesis:
     setup_tag: str          # pullback | breakout | reversal | …
     reasoning: str = ""
     source_names: str = ""  # e.g. "ema_crossover+macd_crossover (AND)"
+    source_detail: dict = field(default_factory=dict)  # attribution: mode, rules, regime, etc.
     generated_at: datetime = field(default_factory=_utcnow)
 
 

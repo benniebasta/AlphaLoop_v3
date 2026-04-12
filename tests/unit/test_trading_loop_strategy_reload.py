@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from alphaloop.trading.loop import TradingLoop
+from alphaloop.trading.runtime_utils import current_strategy_reference
 from alphaloop.trading.strategy_loader import ActiveStrategyConfig, StrategySpecV1
 
 
@@ -175,6 +176,7 @@ async def test_ensure_strategy_loaded_clears_dispatcher_and_models_when_no_strat
         tool_registry=SimpleNamespace(get_tool=lambda name: None),
     )
     loop._active_strategy = SimpleNamespace(version=7)
+    loop._runtime_strategy = {"version": 7, "spec_version": "v1"}
     loop._feature_pipeline = {"version": 7}
     loop._algo_engine = object()
     loop._strategy_runtime_sig = "stale-runtime"
@@ -190,6 +192,7 @@ async def test_ensure_strategy_loaded_clears_dispatcher_and_models_when_no_strat
     await loop._ensure_strategy_loaded()
 
     assert loop._active_strategy is None
+    assert loop._runtime_strategy == {}
     assert loop._feature_pipeline is None
     assert loop._algo_engine is None
     assert loop._strategy_runtime_sig == ""
@@ -275,15 +278,46 @@ async def test_ensure_strategy_loaded_builds_algo_engine_from_spec_first_entry_m
     ]
 
 
-def test_active_strategy_id_prefers_spec_first_runtime_context():
+def test_current_strategy_reference_prefers_spec_first_runtime_context():
     loop = TradingLoop(symbol="XAUUSD", instance_id="bot-1", dry_run=True)
     loop._active_strategy = SimpleNamespace(
         version="legacy",
         signal_mode="algo_only",
         strategy_spec=SimpleNamespace(spec_version="v1"),
     )
+    loop._runtime_strategy = {"version": 0, "spec_version": "v1"}
 
-    assert loop._active_strategy_id() == "XAUUSD"
+    assert current_strategy_reference(
+        symbol=loop.symbol,
+        runtime_strategy=loop._runtime_strategy,
+        active_strategy=loop._active_strategy,
+    )["strategy_id"] == "XAUUSD"
+
+
+def test_active_strategy_runtime_helpers_prefer_cached_runtime_snapshot():
+    loop = TradingLoop(symbol="XAUUSD", instance_id="bot-1", dry_run=True)
+    loop._active_strategy = SimpleNamespace(
+        version="legacy",
+        params={"risk_pct": 9.99, "signal_rules": [{"source": "ema_crossover"}], "signal_logic": "AND"},
+        signal_mode="algo_only",
+        strategy_spec=SimpleNamespace(spec_version="v1"),
+    )
+    loop._runtime_strategy = {
+        "version": 11,
+        "params": {"risk_pct": 0.01, "signal_rules": [{"source": "macd_crossover"}], "signal_logic": "OR"},
+        "spec_version": "v1",
+    }
+
+    assert current_strategy_reference(
+        symbol=loop.symbol,
+        runtime_strategy=loop._runtime_strategy,
+        active_strategy=loop._active_strategy,
+    )["strategy_id"] == "XAUUSD.v11"
+    assert dict(loop._active_strategy_runtime().get("params") or {}) == {
+        "risk_pct": 0.01,
+        "signal_rules": [{"source": "macd_crossover"}],
+        "signal_logic": "OR",
+    }
 
 
 @pytest.mark.asyncio
@@ -351,7 +385,7 @@ def test_active_strategy_params_prefers_spec_first_entry_model():
         ),
     )
 
-    params = loop._active_strategy_params()
+    params = dict(loop._active_strategy_runtime().get("params") or {})
 
     assert params["risk_pct"] == 0.01
     assert params["signal_rules"] == [{"source": "macd_crossover"}]

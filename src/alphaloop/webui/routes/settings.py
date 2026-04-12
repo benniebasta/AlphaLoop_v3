@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alphaloop.core.constants import RISK_HARD_CAPS
 from alphaloop.db.repositories.settings_repo import SettingsRepository
 from alphaloop.webui.deps import get_db_session
+from alphaloop.webui.auth_rbac import Role, require_role
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -115,6 +116,7 @@ async def update_settings(
     request: Request = None,
     authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
+    _rbac: None = require_role(Role.ADMIN),
 ) -> dict:
     """Update multiple settings at once."""
     _require_operator_auth(authorization)

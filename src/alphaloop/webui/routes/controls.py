@@ -12,6 +12,7 @@ from alphaloop.core.container import Container
 from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.risk.service import RiskService
 from alphaloop.supervision.service import SupervisionService
+from alphaloop.webui.auth import get_operator_id
 from alphaloop.webui.deps import get_container
 
 router = APIRouter(prefix="/api/controls", tags=["controls"])
@@ -168,10 +169,11 @@ async def acknowledge_incident(
     container: Container = Depends(get_container),
 ) -> dict:
     _require_operator_auth(authorization)
+    operator_id = str(request.operator or "").strip() or get_operator_id(http_request)
     service = getattr(container, "supervision_service", None) or SupervisionService(container.db_session_factory)
     incident = await service.acknowledge_incident(
         incident_id,
-        operator=request.operator,
+        operator=operator_id,
         note=request.note,
     )
     if incident is None:
@@ -180,7 +182,7 @@ async def acknowledge_incident(
     try:
         async with container.db_session_factory() as session:
             session.add(OperatorAuditLog(
-                operator=request.operator,
+                operator=operator_id,
                 action="incident_acknowledge",
                 target=str(incident.id),
                 old_value="OPEN",
@@ -369,16 +371,17 @@ async def clear_no_new_risk(
     for ids in risk_state["reason_incident_ids"].values():
         incident_ids.extend(ids)
     incident_ids = sorted(set(incident_ids))
+    operator_id = get_operator_id(http_request)
     resolved = await supervision.resolve_incidents(
         incident_ids,
-        operator=request.operator,
+        operator=operator_id,
         note=request.note,
     )
 
     try:
         async with container.db_session_factory() as session:
             session.add(OperatorAuditLog(
-                operator=request.operator,
+                operator=operator_id,
                 action="no_new_risk_clear",
                 target=",".join(risk_state["active_reasons"]),
                 old_value="ACTIVE",

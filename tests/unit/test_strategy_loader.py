@@ -10,11 +10,24 @@ import pytest
 from alphaloop.backtester import asset_trainer
 from alphaloop.backtester.params import BacktestParams
 from alphaloop.trading.strategy_loader import (
+    active_strategy_binding_keys,
     build_algorithmic_params,
+    build_active_strategy_config,
     build_active_strategy_payload,
+    bind_active_strategy_symbol,
     build_runtime_strategy_context,
+    build_strategy_reference,
     build_strategy_resolution_input,
+    build_strategy_version_tag,
+    canonicalize_strategy_record,
+    find_strategy_record,
+    find_active_strategy_binding_for_version,
     load_active_strategy,
+    load_active_strategy_bindings,
+    load_active_strategy_payload,
+    save_strategy_record,
+    load_strategy_json,
+    load_strategy_record,
     migrate_legacy_strategy_spec_v1,
     normalize_signal_mode,
     normalize_strategy_summary,
@@ -25,11 +38,15 @@ from alphaloop.trading.strategy_loader import (
     resolve_strategy_signal_logic,
     resolve_strategy_signal_rules,
     resolve_strategy_spec_version,
+    resolve_strategy_version,
     resolve_strategy_source,
     resolve_strategy_setup_family,
     resolve_strategy_signal_mode,
     resolve_validator_instruction,
+    resolve_strategy_version_string,
     serialize_strategy_spec,
+    sync_active_strategy_bindings,
+    store_active_strategy_bindings,
 )
 
 
@@ -74,6 +91,19 @@ def test_resolve_strategy_signal_rules_prefers_strategy_spec_entry_model_sources
         {"source": "macd_crossover"},
         {"source": "rsi_reversal"},
     ]
+
+
+def test_resolve_strategy_signal_rules_preserves_explicit_empty_list():
+    strategy = {
+        "params": {"signal_rules": [], "signal_logic": "OR"},
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "algo_ai",
+            "setup_family": "trend_continuation",
+        },
+    }
+
+    assert resolve_strategy_signal_rules(strategy, default_to_ema=True) == []
 
 
 def test_resolve_strategy_signal_logic_prefers_strategy_spec_entry_model():
@@ -147,6 +177,48 @@ def test_build_strategy_resolution_input_canonicalizes_explicit_strategy_spec():
     assert payload["strategy_spec"]["metadata"]["source"] == "backtest_runner"
 
 
+def test_build_strategy_resolution_input_preserves_canonical_identity_fields():
+    payload = build_strategy_resolution_input(
+        {
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "status": "candidate",
+            "signal_mode": "algo_only",
+            "source": "",
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "metadata": {
+                    "source": "ui_ai_signal_card",
+                    "version": 11,
+                },
+            },
+        }
+    )
+
+    assert payload["version"] == 11
+    assert payload["source"] == "ui_ai_signal_card"
+    assert payload["spec_version"] == "v1"
+    assert payload["strategy_spec"]["metadata"]["version"] == 11
+    assert payload["strategy_spec"]["metadata"]["source"] == "ui_ai_signal_card"
+
+
+def test_active_strategy_binding_keys_orders_instance_before_symbol():
+    keys = active_strategy_binding_keys(
+        "XAUUSD",
+        instance_id="bot-1",
+        instance_ids=["bot-2", "bot-3"],
+    )
+
+    assert keys == [
+        "active_strategy_bot-1",
+        "active_strategy_bot-2",
+        "active_strategy_bot-3",
+        "active_strategy_XAUUSD",
+    ]
+
+
 def test_normalize_strategy_summary_prefers_alias_metrics():
     summary = normalize_strategy_summary(
         {
@@ -161,6 +233,293 @@ def test_normalize_strategy_summary_prefers_alias_metrics():
     assert summary["sharpe"] == 1.1
     assert summary["total_pnl"] == 210.0
     assert summary["max_dd_pct"] == -5.5
+
+
+def test_canonicalize_strategy_record_prefers_spec_first_identity_fields():
+    record = canonicalize_strategy_record(
+        {
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "spec_version": "legacy-v0",
+            "signal_mode": "algo_only",
+            "source": "",
+            "signal_instruction": "legacy signal",
+            "validator_instruction": "legacy validator",
+            "ai_models": {"signal": "stale-signal"},
+            "summary": {"sharpe_ratio": 1.5},
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {
+                    "signal_instruction": "spec signal",
+                    "validator_instruction": "spec validator",
+                },
+                "ai_models": {"signal": "spec-signal"},
+                "metadata": {"source": "ui_ai_signal_card", "version": 9},
+            },
+        }
+    )
+
+    assert record["version"] == 9
+    assert record["spec_version"] == "v1"
+    assert record["signal_mode"] == "ai_signal"
+    assert record["source"] == "ui_ai_signal_card"
+    assert record["signal_instruction"] == "spec signal"
+    assert record["validator_instruction"] == "spec validator"
+    assert record["ai_models"] == {"signal": "spec-signal"}
+    assert record["summary"]["sharpe"] == 1.5
+    assert record["strategy_spec"]["metadata"]["version"] == 9
+
+
+def test_load_strategy_record_prefers_strategy_spec_metadata_version(tmp_path):
+    path = Path(tmp_path) / "XAUUSD_v7.json"
+    path.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card", "version": 7},
+        },
+    }))
+
+    record = load_strategy_record(path)
+
+    assert record is not None
+    assert record["version"] == 7
+    assert record["source"] == "ui_ai_signal_card"
+    assert record["_path"] == str(path)
+
+
+def test_save_strategy_record_canonicalizes_before_writing(tmp_path):
+    path = Path(tmp_path) / "XAUUSD_v7.json"
+
+    record = save_strategy_record(
+        path,
+        {
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "spec_version": "legacy-v0",
+            "signal_mode": "algo_only",
+            "setup_family": "pullback_continuation",
+            "source": "",
+            "signal_instruction": "",
+            "validator_instruction": "",
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {
+                    "signal_instruction": "spec signal",
+                    "validator_instruction": "spec validator",
+                },
+                "metadata": {
+                    "version": 7,
+                    "source": "ui_ai_signal_card",
+                },
+            },
+        },
+    )
+
+    saved = json.loads(path.read_text())
+
+    assert record["_path"] == str(path)
+    assert saved["version"] == 7
+    assert saved["spec_version"] == "v1"
+    assert saved["signal_mode"] == "ai_signal"
+    assert saved["setup_family"] == "discretionary_ai"
+    assert saved["source"] == "ui_ai_signal_card"
+    assert saved["signal_instruction"] == "spec signal"
+    assert saved["validator_instruction"] == "spec validator"
+
+
+def test_load_strategy_json_prefers_strategy_spec_metadata_version():
+    record = load_strategy_json(json.dumps({
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card", "version": 7},
+        },
+    }))
+
+    assert record is not None
+    assert record["version"] == 7
+    assert record["source"] == "ui_ai_signal_card"
+
+
+def test_find_strategy_record_matches_canonical_metadata_version(tmp_path):
+    path = Path(tmp_path) / "XAUUSD_v7.json"
+    path.write_text(json.dumps({
+        "symbol": "XAUUSD",
+        "version": "legacy",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"source": "ui_ai_signal_card", "version": 7},
+        },
+    }))
+
+    record = find_strategy_record("XAUUSD", 7, Path(tmp_path))
+
+    assert record is not None
+    assert record["version"] == 7
+    assert record["source"] == "ui_ai_signal_card"
+
+
+def test_build_strategy_reference_prefers_spec_first_version():
+    ref = build_strategy_reference(
+        {
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "strategy_spec": {
+                "metadata": {"version": 9},
+            },
+        }
+    )
+
+    assert ref == {
+        "symbol": "XAUUSD",
+        "strategy_id": "XAUUSD.v9",
+        "strategy_version": "9",
+    }
+
+
+def test_runtime_strategy_context_json_prefers_spec_first_runtime_contract():
+    signature = json.dumps(
+        build_runtime_strategy_context(
+            {
+                "symbol": "XAUUSD",
+                "version": "legacy",
+                "signal_mode": "algo_only",
+                "strategy_spec": {
+                    "spec_version": "v1",
+                    "signal_mode": "ai_signal",
+                    "setup_family": "discretionary_ai",
+                    "prompt_bundle": {},
+                    "metadata": {"version": 13},
+                },
+            }
+        ),
+        sort_keys=True,
+        default=str,
+    )
+
+    assert '"version": 13' in signature
+    assert '"signal_mode": "ai_signal"' in signature
+
+
+def test_active_strategy_payload_serializes_to_canonical_json():
+    payload = json.loads(json.dumps(build_active_strategy_payload(
+        {
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "signal_mode": "algo_only",
+            "summary": {"sharpe_ratio": 1.1},
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {},
+                "metadata": {"version": 14, "source": "ui_ai_signal_card"},
+            },
+        }
+    )))
+
+    assert payload["version"] == 14
+    assert payload["signal_mode"] == "ai_signal"
+    assert payload["summary"]["sharpe"] == 1.1
+
+
+@pytest.mark.asyncio
+async def test_store_active_strategy_bindings_writes_requested_keys_only():
+    settings = SimpleNamespace(set=AsyncMock())
+
+    payload = {
+        "symbol": "OLD",
+        "version": "legacy",
+        "signal_mode": "algo_only",
+        "strategy_spec": {
+            "spec_version": "v1",
+            "signal_mode": "ai_signal",
+            "setup_family": "discretionary_ai",
+            "prompt_bundle": {},
+            "metadata": {"version": 14},
+        },
+    }
+
+    strategy_json = await store_active_strategy_bindings(
+        settings,
+        payload,
+        symbol="XAUUSD",
+        instance_id="bot-1",
+        write_symbol_key=False,
+        write_instance_key=True,
+    )
+
+    settings.set.assert_awaited_once_with("active_strategy_bot-1", strategy_json)
+    persisted = json.loads(strategy_json)
+    assert persisted["version"] == 14
+    assert persisted["signal_mode"] == "ai_signal"
+
+
+def test_bind_active_strategy_symbol_keeps_canonical_fields():
+    payload = bind_active_strategy_symbol(
+        {
+            "symbol": "OLD",
+            "version": "legacy",
+            "signal_mode": "algo_only",
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {},
+                "metadata": {"version": 7},
+            },
+        },
+        "XAUUSD",
+    )
+
+    assert payload["symbol"] == "XAUUSD"
+    assert payload["version"] == 7
+    assert payload["signal_mode"] == "ai_signal"
+
+
+def test_resolve_strategy_version_string_uses_spec_first_version():
+    version = resolve_strategy_version_string(
+        {
+            "version": "legacy",
+            "strategy_spec": {
+                "metadata": {"version": 12},
+            },
+        }
+    )
+
+    assert version == "12"
+
+
+def test_build_strategy_version_tag_uses_spec_first_version():
+    version_tag = build_strategy_version_tag(
+        {
+            "version": "legacy",
+            "strategy_spec": {
+                "metadata": {"version": 12},
+            },
+        }
+    )
+
+    assert version_tag == "v12"
 
 
 def test_create_strategy_version_defaults_to_algo_ai(tmp_path, monkeypatch):
@@ -477,22 +836,24 @@ def test_create_strategy_version_infers_family_from_enabled_tools_when_flat_fami
 
 
 def test_create_strategy_version_retries_when_reserved_version_already_exists(tmp_path, monkeypatch):
+    fixed_name = "test-hawk-TESTUSD_algo_ai"
     monkeypatch.setattr(asset_trainer, "STRATEGY_VERSIONS_DIR", Path(tmp_path))
-    (Path(tmp_path) / "TESTUSD_v1.json").write_text("{}")
+    (Path(tmp_path) / f"{fixed_name}_v1.json").write_text("{}")
 
     versions = iter([1, 2])
-    monkeypatch.setattr(asset_trainer, "_next_version", lambda symbol: next(versions))
+    monkeypatch.setattr(asset_trainer, "_next_version", lambda name: next(versions))
 
     version = asset_trainer.create_strategy_version(
         symbol="TESTUSD",
         params=BacktestParams(),
         metrics={},
         tools=[],
+        name=fixed_name,
     )
 
     assert version["_version"] == 2
-    assert Path(version["_path"]).name == "TESTUSD_v2.json"
-    assert not (Path(tmp_path) / "TESTUSD_v2.lock").exists()
+    assert Path(version["_path"]).name == f"{fixed_name}_v2.json"
+    assert not (Path(tmp_path) / f"{fixed_name}_v2.lock").exists()
 
 
 @pytest.mark.asyncio
@@ -518,6 +879,168 @@ async def test_load_active_strategy_defaults_missing_spec_version_to_v1():
     assert config.strategy_spec.spec_version == "v1"
     assert config.strategy_spec.signal_mode == "algo_ai"
     assert config.strategy_spec.setup_family == "pullback_continuation"
+
+
+@pytest.mark.asyncio
+async def test_load_active_strategy_payload_prefers_instance_binding():
+    settings_service = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=[
+                json.dumps({
+                    "symbol": "XAUUSD",
+                    "version": "legacy",
+                    "signal_mode": "algo_only",
+                    "strategy_spec": {
+                        "spec_version": "v1",
+                        "signal_mode": "ai_signal",
+                        "setup_family": "discretionary_ai",
+                        "metadata": {"version": 17},
+                    },
+                }),
+                None,
+            ]
+        )
+    )
+
+    payload = await load_active_strategy_payload(settings_service, "XAUUSD", "bot-1")
+
+    assert payload is not None
+    assert payload["version"] == 17
+    assert payload["signal_mode"] == "ai_signal"
+    assert settings_service.get.await_args_list[0].args[0] == "active_strategy_bot-1"
+
+
+@pytest.mark.asyncio
+async def test_load_active_strategy_bindings_returns_canonical_payloads_in_binding_order():
+    settings_service = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=[
+                json.dumps({
+                    "symbol": "XAUUSD",
+                    "version": "legacy",
+                    "signal_mode": "algo_only",
+                    "strategy_spec": {
+                        "spec_version": "v1",
+                        "signal_mode": "ai_signal",
+                        "setup_family": "discretionary_ai",
+                        "metadata": {"version": 17},
+                    },
+                }),
+                json.dumps({
+                    "symbol": "XAUUSD",
+                    "version": 3,
+                    "signal_mode": "algo_only",
+                }),
+            ]
+        )
+    )
+
+    bindings = await load_active_strategy_bindings(
+        settings_service,
+        "XAUUSD",
+        instance_ids=["bot-2"],
+        include_symbol=True,
+    )
+
+    assert [key for key, _ in bindings] == [
+        "active_strategy_bot-2",
+        "active_strategy_XAUUSD",
+    ]
+    assert bindings[0][1]["version"] == 17
+    assert bindings[0][1]["signal_mode"] == "ai_signal"
+    assert bindings[1][1]["version"] == 3
+    assert bindings[1][1]["signal_mode"] == "algo_only"
+
+
+@pytest.mark.asyncio
+async def test_sync_active_strategy_bindings_updates_only_matching_symbol_and_version():
+    settings_service = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=[
+                json.dumps({
+                    "symbol": "XAUUSD",
+                    "version": 7,
+                    "signal_mode": "algo_only",
+                }),
+                json.dumps({
+                    "symbol": "XAUUSD",
+                    "version": 8,
+                    "signal_mode": "algo_only",
+                }),
+                json.dumps({
+                    "symbol": "EURUSD",
+                    "version": 7,
+                    "signal_mode": "algo_only",
+                }),
+            ]
+        ),
+        set=AsyncMock(),
+    )
+
+    updated = await sync_active_strategy_bindings(
+        settings_service,
+        "XAUUSD",
+        {
+            "symbol": "XAUUSD",
+            "version": 7,
+            "signal_mode": "ai_signal",
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {},
+            },
+        },
+        instance_ids=["bot-1", "bot-2"],
+        include_symbol=True,
+    )
+
+    assert updated == ["active_strategy_bot-1"]
+    assert settings_service.set.await_count == 1
+    assert settings_service.set.await_args.args[0] == "active_strategy_bot-1"
+    payload = json.loads(settings_service.set.await_args.args[1])
+    assert payload["version"] == 7
+    assert payload["signal_mode"] == "ai_signal"
+
+
+@pytest.mark.asyncio
+async def test_find_active_strategy_binding_for_version_prefers_canonical_version_match():
+    settings_service = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=[
+                json.dumps({
+                    "symbol": "XAUUSD",
+                    "version": "legacy",
+                    "signal_mode": "algo_only",
+                    "strategy_spec": {
+                        "spec_version": "v1",
+                        "signal_mode": "ai_signal",
+                        "setup_family": "discretionary_ai",
+                        "metadata": {"version": 18},
+                    },
+                }),
+                json.dumps({
+                    "symbol": "XAUUSD",
+                    "version": 7,
+                    "signal_mode": "algo_only",
+                }),
+            ]
+        )
+    )
+
+    binding = await find_active_strategy_binding_for_version(
+        settings_service,
+        "XAUUSD",
+        18,
+        instance_ids=["inst-1"],
+        include_symbol=True,
+    )
+
+    assert binding is not None
+    key, payload = binding
+    assert key == "active_strategy_inst-1"
+    assert payload["version"] == 18
+    assert payload["signal_mode"] == "ai_signal"
 
 
 @pytest.mark.asyncio
@@ -598,6 +1121,36 @@ async def test_load_active_strategy_prefers_strategy_spec_version_over_stale_top
     assert config is not None
     assert config.spec_version == "v1"
     assert config.strategy_spec.spec_version == "v1"
+
+
+@pytest.mark.asyncio
+async def test_load_active_strategy_prefers_strategy_spec_metadata_version():
+    settings = SimpleNamespace(
+        get=AsyncMock(
+            side_effect=[
+                json.dumps(
+                    {
+                        "symbol": "XAUUSD",
+                        "version": "legacy-v0",
+                        "status": "live",
+                        "signal_mode": "algo_only",
+                        "strategy_spec": {
+                            "spec_version": "v1",
+                            "signal_mode": "algo_only",
+                            "setup_family": "pullback_continuation",
+                            "metadata": {"version": 13},
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+
+    config = await load_active_strategy(settings, "XAUUSD")
+
+    assert config is not None
+    assert config.version == 13
+    assert config.strategy_spec.metadata["version"] == 13
 
 
 @pytest.mark.asyncio
@@ -761,6 +1314,44 @@ def test_serialize_strategy_spec_preserves_object_fields_even_without_prompt_bun
     assert spec["enabled_preconditions"] == ["session_filter"]
     assert spec["prompt_bundle"]["signal_instruction"] == "legacy signal"
     assert spec["prompt_bundle"]["validator_instruction"] == "legacy validator"
+
+
+def test_serialize_strategy_spec_prefers_canonical_object_identity_fields():
+    strategy = SimpleNamespace(
+        symbol="XAUUSD",
+        version="legacy",
+        source="",
+        spec_version="legacy-v0",
+        signal_mode="algo_only",
+        signal_instruction="legacy signal",
+        validator_instruction="legacy validator",
+        params={"risk_pct": 0.01},
+        tools={"session_filter": True},
+        validation={},
+        ai_models={"validator": "stale-validator"},
+        strategy_spec=SimpleNamespace(
+            spec_version="v1",
+            signal_mode="ai_signal",
+            setup_family="discretionary_ai",
+            direction_model="ai_hypothesis",
+            enabled_preconditions=["session_filter"],
+            entry_model={"type": "prompt_defined"},
+            invalidation_model={"type": "structural_plus_atr"},
+            exit_policy={"tp1_rr": 1.5},
+            risk_policy={"risk_pct": 0.01},
+            prompt_bundle=None,
+            ai_models={"validator": "spec-validator"},
+            metadata={"source": "ui_ai_signal_card", "version": 9},
+        ),
+    )
+
+    spec = serialize_strategy_spec(strategy)
+
+    assert spec["spec_version"] == "v1"
+    assert spec["signal_mode"] == "ai_signal"
+    assert spec["ai_models"] == {"validator": "spec-validator"}
+    assert spec["metadata"]["source"] == "ui_ai_signal_card"
+    assert spec["metadata"]["version"] == 9
 
 
 def test_prompt_resolution_prefers_strategy_spec_prompt_bundle():
@@ -1217,6 +1808,39 @@ def test_build_active_strategy_payload_prefers_strategy_spec_metadata_source():
     assert payload["source"] == "ui_ai_signal_card"
 
 
+def test_build_active_strategy_config_prefers_canonical_strategy_contract():
+    config = build_active_strategy_config(
+        {
+            "symbol": "XAUUSD",
+            "version": "legacy",
+            "status": "live",
+            "signal_mode": "algo_only",
+            "tools": ["fast_fingers"],
+            "signal_instruction": "",
+            "validator_instruction": "",
+            "ai_models": {"validator": "stale-validator"},
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "ai_signal",
+                "setup_family": "discretionary_ai",
+                "prompt_bundle": {
+                    "signal_instruction": "Spec signal",
+                    "validator_instruction": "Spec validator",
+                },
+                "ai_models": {"validator": "spec-validator"},
+                "metadata": {"version": 14},
+            },
+        }
+    )
+
+    assert config.version == 14
+    assert config.signal_mode == "ai_signal"
+    assert config.signal_instruction == "Spec signal"
+    assert config.validator_instruction == "Spec validator"
+    assert config.tools == {"fast_fingers": True}
+    assert config.ai_models == {"validator": "spec-validator"}
+
+
 def test_build_runtime_strategy_context_prefers_spec_first_family_and_source():
     payload = build_runtime_strategy_context(
         {
@@ -1238,6 +1862,36 @@ def test_build_runtime_strategy_context_prefers_spec_first_family_and_source():
     assert payload["signal_mode"] == "ai_signal"
     assert payload["setup_family"] == "discretionary_ai"
     assert payload["source"] == "ui_ai_signal_card"
+
+
+def test_resolve_strategy_version_prefers_strategy_spec_metadata():
+    strategy = {
+        "version": "legacy-v0",
+        "strategy_spec": {
+            "metadata": {"version": 12},
+        },
+    }
+
+    assert resolve_strategy_version(strategy) == 12
+
+
+def test_build_runtime_strategy_context_prefers_strategy_spec_metadata_version():
+    payload = build_runtime_strategy_context(
+        {
+            "symbol": "XAUUSD",
+            "version": "legacy-v0",
+            "status": "live",
+            "signal_mode": "algo_only",
+            "strategy_spec": {
+                "spec_version": "v1",
+                "signal_mode": "algo_only",
+                "setup_family": "pullback_continuation",
+                "metadata": {"version": 14},
+            },
+        }
+    )
+
+    assert payload["version"] == 14
 
 
 def test_build_runtime_strategy_context_normalizes_list_style_tools():

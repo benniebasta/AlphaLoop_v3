@@ -17,24 +17,35 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alphaloop.webui.auth_rbac import Role, require_role
+
 from alphaloop.backtester.asset_trainer import create_strategy_version
 from alphaloop.backtester.params import BacktestParams
 from alphaloop.core.constants import STRATEGY_VERSIONS_DIR
 from alphaloop.db.models.instance import RunningInstance
 from alphaloop.db.models.operator_audit import OperatorAuditLog
 from alphaloop.db.repositories.settings_repo import SettingsRepository
+from alphaloop.trading.overlay_loader import load_overlay_config, save_overlay_config
 from alphaloop.trading.strategy_loader import (
-    build_active_strategy_payload,
+    build_strategy_version_tag,
+    find_active_strategy_binding_for_version,
+    load_strategy_record,
     normalize_signal_mode,
     normalize_strategy_summary,
     migrate_legacy_strategy_spec_v1,
     resolve_signal_instruction,
     resolve_strategy_ai_models,
+    resolve_strategy_setup_family,
     resolve_strategy_signal_mode,
     resolve_strategy_spec_version,
     resolve_strategy_source,
+    resolve_strategy_version,
+    resolve_strategy_version_string,
     resolve_validator_instruction,
+    save_strategy_record,
     serialize_strategy_spec,
+    sync_active_strategy_bindings,
+    store_active_strategy_bindings,
 )
 from alphaloop.webui.deps import get_db_session
 
@@ -117,6 +128,7 @@ class UpdateStrategyRequest(BaseModel):
     validator_instruction: str | None = None
     scoring_weights: dict | None = None
     confidence_thresholds: dict | None = None
+    quality_floors: dict | None = None
 
 
 def _strict_signal_mode(raw_mode: str | None) -> str | None:
@@ -247,14 +259,12 @@ def _effective_source(data: dict) -> str:
     return resolve_strategy_source(data)
 
 
+def _effective_setup_family(data: dict) -> str:
+    return resolve_strategy_setup_family(data)
+
+
 def _normalized_summary(data: dict) -> dict:
     return normalize_strategy_summary(data)
-
-
-def _active_strategy_payload(data: dict) -> dict:
-    payload = build_active_strategy_payload(data)
-    payload["symbol"] = str(data.get("symbol") or payload.get("symbol") or "")
-    return payload
 
 
 def _refresh_strategy_spec(data: dict) -> None:
@@ -305,7 +315,7 @@ def _sync_strategy_spec_write_fields(data: dict, explicit_fields: set[str] | Non
         else:
             metadata["source"] = _effective_source(data)
         metadata["symbol"] = str(data.get("symbol") or "")
-        metadata["version"] = int(data.get("version", 0) or 0)
+        metadata["version"] = resolve_strategy_version(data)
         spec["metadata"] = metadata
         data["strategy_spec"] = spec
 
@@ -322,29 +332,36 @@ async def _sync_active_strategy_settings(
     We only update runtime bindings that already point at the same
     symbol/version so unrelated active strategies stay untouched.
     """
-    payload = json.dumps(_active_strategy_payload(data))
     symbol = data.get("symbol", "")
-    version = data.get("version", 0)
     repo = SettingsRepository(session)
-
-    async def _maybe_update(key: str) -> None:
-        raw = await repo.get(key)
-        if not raw:
-            return
-        try:
-            current = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return
-        if current.get("symbol") == symbol and int(current.get("version", -1)) == int(version):
-            await repo.set(key, payload)
-
-    await _maybe_update(f"active_strategy_{symbol}")
 
     result = await session.execute(
         select(RunningInstance.instance_id).where(RunningInstance.symbol == symbol)
     )
-    for instance_id in result.scalars():
-        await _maybe_update(f"active_strategy_{instance_id}")
+    await sync_active_strategy_bindings(
+        repo,
+        symbol,
+        data,
+        instance_ids=list(result.scalars()),
+        include_symbol=True,
+    )
+
+
+def _migrate_filename_if_needed(f: Path, data: dict) -> Path:
+    """Rename file to {name}_v{version}.json if it doesn't already match."""
+    name = data.get("name", "")
+    version = data.get("version")
+    if not name or not isinstance(version, int) or version <= 0:
+        return f
+    expected = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"
+    if f.name != expected.name and not expected.exists():
+        try:
+            f.rename(expected)
+            logger.info("Migrated strategy file: %s -> %s", f.name, expected.name)
+            return expected
+        except OSError:
+            pass
+    return f
 
 
 def _load_all_versions() -> list[dict]:
@@ -353,49 +370,40 @@ def _load_all_versions() -> list[dict]:
         return []
     versions = []
     for f in sorted(STRATEGY_VERSIONS_DIR.glob("*.json"), reverse=True):
-        try:
-            data = json.loads(f.read_text())
-            _refresh_strategy_spec(data)
-            data["signal_mode"] = _effective_signal_mode(data)
-            data["ai_models"] = resolve_strategy_ai_models(data)
-            data["summary"] = _normalized_summary(data)
-            data["_path"] = str(f)
-            versions.append(data)
-        except (json.JSONDecodeError, OSError):
+        data = load_strategy_record(f)
+        if data is None:
             continue
+        # Auto-rename legacy {symbol}_v{version}.json files to {name}_v{version}.json
+        new_path = _migrate_filename_if_needed(f, data)
+        if new_path != f:
+            data = load_strategy_record(new_path) or data
+        versions.append(data)
     return versions
 
 
-def _load_version(symbol: str, version: int) -> dict | None:
-    """Load a specific strategy version."""
-    path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
+def _load_version(name: str, version: int) -> dict | None:
+    """Load a specific strategy version by its generated name and version."""
+    path = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"
     if not path.exists():
         return None
-    try:
-        data = json.loads(path.read_text())
-        _refresh_strategy_spec(data)
-        data["signal_mode"] = _effective_signal_mode(data)
-        data["ai_models"] = resolve_strategy_ai_models(data)
-        data["summary"] = _normalized_summary(data)
-        data["_path"] = str(path)
-        return data
-    except (json.JSONDecodeError, OSError):
-        return None
+    return load_strategy_record(path)
 
 
 def _save_version(data: dict, explicit_fields: set[str] | None = None) -> None:
     """Save a strategy version back to disk."""
     path = Path(data.get("_path", ""))
     if not path.name or not path.exists():
-        symbol = data["symbol"]
+        name = data["name"]
         version = data["version"]
-        path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
+        path = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"
 
     # Remove internal fields before saving
     explicit_fields = explicit_fields or set()
     save_data = {k: v for k, v in data.items() if not k.startswith("_")}
+    save_data["spec_version"] = resolve_strategy_spec_version(save_data) or "v1"
     if "signal_mode" not in explicit_fields:
         save_data["signal_mode"] = _effective_signal_mode(save_data)
+    save_data["setup_family"] = _effective_setup_family(save_data)
     if "signal_instruction" not in explicit_fields:
         save_data["signal_instruction"] = resolve_signal_instruction(save_data)
     if "validator_instruction" not in explicit_fields:
@@ -406,9 +414,9 @@ def _save_version(data: dict, explicit_fields: set[str] | None = None) -> None:
         save_data["summary"] = _normalized_summary(save_data)
     _sync_strategy_spec_write_fields(save_data, explicit_fields)
     save_data["ai_models"] = resolve_strategy_ai_models(save_data)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(save_data, indent=2))
-    tmp.replace(path)
+    saved = save_strategy_record(path, save_data)
+    data.clear()
+    data.update(saved)
 
 
 @router.get("")
@@ -435,18 +443,18 @@ async def list_strategies(
     return {"strategies": versions[:limit], "total": len(versions)}
 
 
-@router.get("/{symbol}/v{version}")
-async def get_strategy(symbol: str, version: int) -> dict:
+@router.get("/{name}/v{version}")
+async def get_strategy(name: str, version: int) -> dict:
     """Get a specific strategy version."""
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
     if data is None:
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
     return data
 
 
-@router.put("/{symbol}/v{version}")
+@router.put("/{name}/v{version}")
 async def update_strategy(
-    symbol: str,
+    name: str,
     version: int,
     body: UpdateStrategyRequest,
     request: Request,
@@ -455,9 +463,9 @@ async def update_strategy(
 ) -> dict:
     """Update the editable parts of a strategy version."""
     _require_operator_auth(authorization)
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
     if data is None:
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
     explicit_fields = set(body.model_fields_set)
 
     if "signal_instruction" not in explicit_fields:
@@ -500,12 +508,15 @@ async def update_strategy(
         data["scoring_weights"] = body.scoring_weights
     if body.confidence_thresholds is not None:
         data["confidence_thresholds"] = body.confidence_thresholds
+    if body.quality_floors is not None:
+        data["quality_floors"] = body.quality_floors
 
     _save_version(data, explicit_fields)
+    symbol = data.get("symbol", name)
     _record_operator_audit(
         session,
         action="strategy_update",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value="version_file",
         new_value=json.dumps({
             "signal_mode": _effective_signal_mode(data),
@@ -520,21 +531,22 @@ async def update_strategy(
     logger.info("Updated strategy %s v%d", symbol, version)
     return {
         "status": "ok",
-        "strategy": _load_version(symbol, version) or data,
+        "strategy": _load_version(name, version) or data,
     }
 
 
-@router.post("/{symbol}/v{version}/evaluate")
+@router.post("/{name}/v{version}/evaluate")
 async def evaluate_promotion(
-    symbol: str,
+    name: str,
     version: int,
     body: PromoteRequest,
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Evaluate whether a strategy is eligible for promotion."""
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
     if data is None:
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
+    symbol = data.get("symbol", name)
 
     from alphaloop.backtester.deployment_pipeline import DeploymentPipeline
     from alphaloop.core.config import EvolutionConfig
@@ -554,6 +566,7 @@ async def evaluate_promotion(
 
     current_status = StrategyStatus(data.get("status", "candidate"))
     metrics = data.get("summary", {})
+    version_tag = resolve_strategy_version_string(data)
     repo = SettingsRepository(session)
     bypass_candidate_gate = await _candidate_gate_bypass(
         repo,
@@ -576,20 +589,22 @@ async def evaluate_promotion(
     }
 
 
-@router.post("/{symbol}/v{version}/promote")
+@router.post("/{name}/v{version}/promote")
 async def promote_strategy(
-    symbol: str,
+    name: str,
     version: int,
     body: PromoteRequest,
     request: Request,
     authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
+    _rbac: None = require_role(Role.ADMIN),
 ) -> dict:
     """Promote a strategy to the next deployment stage."""
     _require_operator_auth(authorization)
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
     if data is None:
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
+    symbol = data.get("symbol", name)
 
     from alphaloop.backtester.deployment_pipeline import DeploymentPipeline
     from alphaloop.core.config import EvolutionConfig
@@ -609,6 +624,7 @@ async def promote_strategy(
 
     current_status = StrategyStatus(data.get("status", "candidate"))
     metrics = data.get("summary", {})
+    version_tag = resolve_strategy_version_string(data)
     repo = SettingsRepository(session)
     bypass_candidate_gate = await _candidate_gate_bypass(
         repo,
@@ -618,7 +634,7 @@ async def promote_strategy(
 
     result = await pipeline.promote(
         symbol=symbol,
-        strategy_version=f"v{version}",
+        strategy_version=build_strategy_version_tag(data),
         current_status=current_status,
         metrics=metrics,
         cycles_completed=body.cycles_completed,
@@ -636,7 +652,7 @@ async def promote_strategy(
     _record_operator_audit(
         session,
         action="strategy_promote",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value=str(current_status),
         new_value=json.dumps({
             "promoted": bool(result.get("promoted")),
@@ -722,7 +738,7 @@ async def create_ai_signal_card(
     _record_operator_audit(
         session,
         action="strategy_create",
-        target=f"{version_data['symbol']}_v{version_data['_version']}",
+        target=f"{version_data['name']}_v{version_data['_version']}",
         old_value=None,
         new_value=json.dumps({
             "signal_mode": version_data.get("signal_mode"),
@@ -738,9 +754,9 @@ async def create_ai_signal_card(
     }
 
 
-@router.post("/{symbol}/v{version}/activate")
+@router.post("/{name}/v{version}/activate")
 async def activate_strategy(
-    symbol: str,
+    name: str,
     version: int,
     request: Request,
     authorization: str = Header(default=""),
@@ -748,9 +764,10 @@ async def activate_strategy(
 ) -> dict:
     """Set a strategy as the active live strategy for its symbol."""
     _require_operator_auth(authorization)
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
     if data is None:
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
+    symbol = data.get("symbol", name)
 
     status = data.get("status", "candidate")
     if status not in ("live", "demo", "dry_run"):
@@ -763,30 +780,34 @@ async def activate_strategy(
     # Save active strategy reference in DB settings
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
-    await repo.set(f"active_strategy_{symbol}", json.dumps(
-        _active_strategy_payload(data)
-    ))
+    await store_active_strategy_bindings(
+        repo,
+        data,
+        symbol=symbol,
+        write_symbol_key=True,
+        write_instance_key=False,
+    )
     _record_operator_audit(
         session,
         action="strategy_activate",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value=None,
         new_value=status,
         source_ip=request.client.host if request and request.client else "unknown",
     )
     await session.commit()
 
-    logger.info("Activated strategy %s v%d for live trading", symbol, version)
+    logger.info("Activated strategy %s v%d for live trading", name, version)
     return {
         "status": "ok",
-        "activated": f"{symbol} v{version}",
+        "activated": f"{name} v{version}",
         "strategy_status": status,
     }
 
 
-@router.post("/{symbol}/v{version}/canary/start")
+@router.post("/{name}/v{version}/canary/start")
 async def start_canary(
-    symbol: str,
+    name: str,
     version: int,
     body: CanaryRequest,
     request: Request,
@@ -795,9 +816,10 @@ async def start_canary(
 ) -> dict:
     """Start a canary deployment for a strategy version."""
     _require_operator_auth(authorization)
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
     if data is None:
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
+    symbol = data.get("symbol", name)
 
     from alphaloop.backtester.deployment_pipeline import DeploymentPipeline
     from alphaloop.core.config import EvolutionConfig
@@ -813,17 +835,18 @@ async def start_canary(
         event_bus=EventBus(),
         evolution_config=EvolutionConfig(),
     )
+    version_tag = resolve_strategy_version_string(data)
 
     result = await pipeline.start_canary(
         symbol=symbol,
-        strategy_version=f"v{version}",
+        strategy_version=build_strategy_version_tag(data),
         allocation_pct=body.allocation_pct,
         duration_hours=body.duration_hours,
     )
     _record_operator_audit(
         session,
         action="strategy_canary_start",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value=None,
         new_value=json.dumps({
             "allocation_pct": body.allocation_pct,
@@ -836,9 +859,9 @@ async def start_canary(
     return result
 
 
-@router.post("/{symbol}/v{version}/canary/end")
+@router.post("/{name}/v{version}/canary/end")
 async def end_canary(
-    symbol: str,
+    name: str,
     version: int,
     request: Request,
     authorization: str = Header(default=""),
@@ -846,9 +869,10 @@ async def end_canary(
 ) -> dict:
     """End a canary deployment and get recommendation."""
     _require_operator_auth(authorization)
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
     if data is None:
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
+    symbol = data.get("symbol", name)
 
     from alphaloop.backtester.deployment_pipeline import DeploymentPipeline
     from alphaloop.core.config import EvolutionConfig
@@ -864,6 +888,7 @@ async def end_canary(
         event_bus=EventBus(),
         evolution_config=EvolutionConfig(),
     )
+    version_tag = resolve_strategy_version_string(data)
 
     # Use summary metrics from the version as placeholder
     # In production, this would pull live canary trade metrics from DB
@@ -871,14 +896,14 @@ async def end_canary(
 
     result = await pipeline.end_canary(
         symbol=symbol,
-        strategy_version=f"v{version}",
-        canary_id=f"canary_{symbol}_{version}",
+        strategy_version=build_strategy_version_tag(data),
+        canary_id=f"canary_{name}_{version}",
         metrics=metrics,
     )
     _record_operator_audit(
         session,
         action="strategy_canary_end",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value=None,
         new_value=json.dumps(result, sort_keys=True),
         source_ip=request.client.host if request and request.client else "unknown",
@@ -888,9 +913,9 @@ async def end_canary(
     return result
 
 
-@router.put("/{symbol}/v{version}/models")
+@router.put("/{name}/v{version}/models")
 async def update_strategy_models(
-    symbol: str,
+    name: str,
     version: int,
     body: dict,
     request: Request,
@@ -899,13 +924,10 @@ async def update_strategy_models(
 ) -> dict:
     """Update AI model assignments for a strategy version."""
     _require_operator_auth(authorization)
-    path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
-    if not path.exists():
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
-
-    data = json.loads(path.read_text())
-    _refresh_strategy_spec(data)
-    data["signal_mode"] = _effective_signal_mode(data)
+    data = _load_version(name, version)
+    if data is None:
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
+    symbol = data.get("symbol", name)
     if "ai_models" not in data:
         data["ai_models"] = {}
     update_source = _resolve_update_source(body.get("source"), _effective_source(data))
@@ -932,12 +954,12 @@ async def update_strategy_models(
         data["validator_instruction"] = body["validator_instruction"] or ""
 
     _save_version(data, explicit_fields)
-    data = _load_version(symbol, version) or data
+    data = _load_version(name, version) or data
 
     _record_operator_audit(
         session,
         action="strategy_models_update",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value="ai_models",
         new_value=json.dumps({
             "ai_models": data["ai_models"],
@@ -948,7 +970,7 @@ async def update_strategy_models(
     await _sync_active_strategy_settings(session, data)
     await session.commit()
 
-    logger.info("Updated AI models for %s v%d: %s", symbol, version, data["ai_models"])
+    logger.info("Updated AI models for %s v%d: %s", name, version, data["ai_models"])
     return {
         "status": "ok",
         "ai_models": data["ai_models"],
@@ -958,27 +980,25 @@ async def update_strategy_models(
     }
 
 
-@router.get("/{symbol}/v{version}/overlay")
+@router.get("/{name}/v{version}/overlay")
 async def get_overlay(
-    symbol: str,
+    name: str,
     version: int,
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Get dry-run overlay config for a strategy version."""
-    from alphaloop.db.repositories.settings_repo import SettingsRepository
+    data = _load_version(name, version)
+    symbol = data.get("symbol", name) if data else name
     repo = SettingsRepository(session)
-    raw = await repo.get(f"dry_run_overlay_{symbol}_v{version}")
-    if raw:
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            pass
-    return {"extra_tools": []}
+    overlay = await load_overlay_config(repo, symbol, version)
+    if overlay is None:
+        return {"extra_tools": []}
+    return {"extra_tools": list(overlay.extra_tools)}
 
 
-@router.put("/{symbol}/v{version}/overlay")
+@router.put("/{name}/v{version}/overlay")
 async def set_overlay(
-    symbol: str,
+    name: str,
     version: int,
     body: dict,
     request: Request,
@@ -987,29 +1007,28 @@ async def set_overlay(
 ) -> dict:
     """Set dry-run overlay tools for a strategy version."""
     _require_operator_auth(authorization)
+    data = _load_version(name, version)
+    symbol = data.get("symbol", name) if data else name
     extra_tools = body.get("extra_tools", [])
     from alphaloop.db.repositories.settings_repo import SettingsRepository
     repo = SettingsRepository(session)
-    await repo.set(
-        f"dry_run_overlay_{symbol}_v{version}",
-        json.dumps({"extra_tools": extra_tools}),
-    )
+    overlay = await save_overlay_config(repo, symbol, version, extra_tools)
     _record_operator_audit(
         session,
         action="strategy_overlay_update",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value=None,
-        new_value=json.dumps({"extra_tools": extra_tools}, sort_keys=True),
+        new_value=json.dumps({"extra_tools": overlay.extra_tools}, sort_keys=True),
         source_ip=request.client.host if request and request.client else "unknown",
     )
     await session.commit()
-    logger.info("Set overlay for %s v%d: %s", symbol, version, extra_tools)
-    return {"status": "ok", "extra_tools": extra_tools}
+    logger.info("Set overlay for %s v%d: %s", name, version, overlay.extra_tools)
+    return {"status": "ok", "extra_tools": overlay.extra_tools}
 
 
-@router.delete("/{symbol}/v{version}")
+@router.delete("/{name}/v{version}")
 async def delete_strategy(
-    symbol: str,
+    name: str,
     version: int,
     request: Request,
     authorization: str = Header(default=""),
@@ -1017,11 +1036,12 @@ async def delete_strategy(
 ) -> dict:
     """Delete a strategy version JSON file."""
     _require_operator_auth(authorization)
-    path = STRATEGY_VERSIONS_DIR / f"{symbol}_v{version}.json"
+    path = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"
     if not path.exists():
-        raise HTTPException(404, f"Strategy {symbol} v{version} not found")
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
 
-    data = _load_version(symbol, version)
+    data = _load_version(name, version)
+    symbol = data.get("symbol", name) if data else name
     if data and data.get("status") in ("live", "demo"):
         raise HTTPException(
             400,
@@ -1031,28 +1051,40 @@ async def delete_strategy(
 
     # Check if this version is the active strategy for any instance
     repo = SettingsRepository(session)
-    active_raw = await repo.get(f"active_strategy_{symbol}")
-    if active_raw:
-        try:
-            active = json.loads(active_raw)
-            if int(active.get("version", -1)) == version:
-                raise HTTPException(
-                    400,
-                    f"Strategy {symbol} v{version} is the active strategy. "
-                    f"Activate a different version first.",
-                )
-        except (json.JSONDecodeError, TypeError):
-            pass
+    result = await session.execute(
+        select(RunningInstance.instance_id).where(RunningInstance.symbol == symbol)
+    )
+    binding = await find_active_strategy_binding_for_version(
+        repo,
+        symbol,
+        version,
+        instance_ids=list(result.scalars()),
+        include_symbol=True,
+    )
+    if binding is not None:
+        key, _active = binding
+        if key == f"active_strategy_{symbol}":
+            raise HTTPException(
+                400,
+                f"Strategy {name} v{version} is the active strategy. "
+                f"Activate a different version first.",
+            )
+        instance_id = key.removeprefix("active_strategy_")
+        raise HTTPException(
+            400,
+            f"Strategy {name} v{version} is bound to active instance {instance_id}. "
+            f"Activate a different version first.",
+        )
 
     path.unlink()
     _record_operator_audit(
         session,
         action="strategy_delete",
-        target=f"{symbol}_v{version}",
+        target=f"{name}_v{version}",
         old_value="version_file",
         new_value="deleted",
         source_ip=request.client.host if request and request.client else "unknown",
     )
     await session.commit()
-    logger.info("Deleted strategy %s v%d", symbol, version)
-    return {"status": "ok", "deleted": f"{symbol}_v{version}"}
+    logger.info("Deleted strategy %s v%d", name, version)
+    return {"status": "ok", "deleted": f"{name}_v{version}"}

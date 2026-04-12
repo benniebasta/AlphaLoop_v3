@@ -99,6 +99,12 @@ class TradeLog(Base):
     pnl_slippage_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_commission_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Trailing stop loss state (persisted so restarts resume correctly)
+    trail_high_water: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trail_sl_applied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Notes
     claude_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     post_trade_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

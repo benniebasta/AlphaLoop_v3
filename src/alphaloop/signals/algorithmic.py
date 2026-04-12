@@ -712,5 +712,14 @@ class AlgorithmicSignalEngine:
                 f"agreement={n_winning}/{n_active}."
             ),
             source_names=source_names,
+            source_detail={
+                "mode": "algo",
+                "rules_fired": [r.get("source", "?") for r in rule_diagnostics
+                                if (is_bull and r.get("bull")) or (not is_bull and r.get("bear"))],
+                "rules_checked": [r.get("source", "?") for r in rule_diagnostics],
+                "signal_logic": signal_logic,
+                "agreement_ratio": round(agreement_ratio, 3),
+                "indicator_values": _indicator_snapshot,
+            },
             generated_at=datetime.now(timezone.utc),
         )

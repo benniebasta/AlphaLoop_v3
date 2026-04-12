@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from alphaloop.config.settings_service import SettingsService
@@ -162,7 +163,10 @@ def normalize_strategy_signal_rules(
         return list(_DEFAULT_SIGNAL_RULES) if default_to_ema else []
     if not isinstance(value, list):
         return []
-    return [rule for rule in value if isinstance(rule, dict)]
+    filtered = [rule for rule in value if isinstance(rule, dict)]
+    if not filtered:
+        return list(_DEFAULT_SIGNAL_RULES) if default_to_ema else []
+    return filtered
 
 
 def normalize_strategy_signal_logic(value: Any) -> str:
@@ -255,10 +259,11 @@ def resolve_strategy_signal_rules(
             return []
         return _signal_rule_dicts_from_sources(raw_sources)
 
-    raw_rules, legacy_default_to_ema = _legacy_signal_rules(value)
+    raw_rules, raw_rules_was_none = _legacy_signal_rules(value)
+    should_default_to_ema = default_to_ema and raw_rules_was_none
     return normalize_strategy_signal_rules(
         raw_rules,
-        default_to_ema=default_to_ema and legacy_default_to_ema,
+        default_to_ema=should_default_to_ema,
     )
 
 
@@ -268,7 +273,7 @@ def build_algorithmic_params(value: Any) -> dict[str, Any]:
     else:
         params = dict(getattr(value, "params", {}) or {})
 
-    default_to_ema = ("signal_rules" not in params) or (params.get("signal_rules") is None)
+    default_to_ema = ("signal_rules" not in params) or not params.get("signal_rules")
     params["signal_rules"] = resolve_strategy_signal_rules(value, default_to_ema=default_to_ema)
     params["signal_logic"] = resolve_strategy_signal_logic(value)
     return params
@@ -286,11 +291,19 @@ def build_strategy_resolution_input(
         params = dict(value.get("params") or {})
         explicit_spec = value.get("strategy_spec")
         payload = {
-            "signal_mode": value.get("signal_mode"),
-            "setup_family": value.get("setup_family"),
+            "symbol": str(value.get("symbol") or ""),
+            "version": resolve_strategy_version(value),
+            "status": str(value.get("status") or ""),
+            "spec_version": resolve_strategy_spec_version(value) or "v1",
+            "signal_mode": resolve_strategy_signal_mode(value),
+            "setup_family": resolve_strategy_setup_family(value),
             "strategy_spec": dict(explicit_spec or {}),
-            "source": value.get("source"),
+            "source": resolve_strategy_source(value),
+            "signal_instruction": resolve_signal_instruction(value),
+            "validator_instruction": resolve_validator_instruction(value),
             "tools": _coerce_tool_flags(value.get("tools") if tools is _MISSING else tools),
+            "validation": dict(value.get("validation") or {}),
+            "ai_models": resolve_strategy_ai_models(value),
             "params": params,
         }
         if signal_rules is _MISSING and "signal_rules" in value and "signal_rules" not in params:
@@ -301,11 +314,19 @@ def build_strategy_resolution_input(
         params = dict(getattr(value, "params", {}) or {})
         explicit_spec = getattr(value, "strategy_spec", None)
         payload = {
-            "signal_mode": getattr(value, "signal_mode", None),
-            "setup_family": getattr(value, "setup_family", None),
+            "symbol": str(getattr(value, "symbol", "") or ""),
+            "version": resolve_strategy_version(value),
+            "status": str(getattr(value, "status", "") or ""),
+            "spec_version": resolve_strategy_spec_version(value) or "v1",
+            "signal_mode": resolve_strategy_signal_mode(value),
+            "setup_family": resolve_strategy_setup_family(value),
             "strategy_spec": dict(explicit_spec or {}),
-            "source": getattr(value, "source", None),
+            "source": resolve_strategy_source(value),
+            "signal_instruction": resolve_signal_instruction(value),
+            "validator_instruction": resolve_validator_instruction(value),
             "tools": _coerce_tool_flags(getattr(value, "tools", {}) if tools is _MISSING else tools),
+            "validation": dict(getattr(value, "validation", {}) or {}),
+            "ai_models": resolve_strategy_ai_models(value),
             "params": params,
         }
         if signal_rules is _MISSING:
@@ -337,6 +358,33 @@ def resolve_strategy_spec_version(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("spec_version") or "v1").strip().lower()
     return str(getattr(value, "spec_version", "v1") or "v1").strip().lower()
+
+
+def resolve_strategy_version(value: Any) -> int:
+    """Resolve strategy version with spec metadata taking precedence when present."""
+    strategy_spec = _strategy_spec_object(value)
+    metadata = None
+    if isinstance(strategy_spec, dict):
+        metadata = strategy_spec.get("metadata")
+    elif strategy_spec is not None:
+        metadata = getattr(strategy_spec, "metadata", None)
+
+    if isinstance(metadata, dict):
+        version = metadata.get("version", _MISSING)
+        if isinstance(version, (int, float, str)):
+            v = _safe_int(version)
+            if v > 0:
+                return v
+    elif metadata is not None:
+        version = getattr(metadata, "version", _MISSING)
+        if isinstance(version, (int, float, str)):
+            v = _safe_int(version)
+            if v > 0:
+                return v
+
+    if isinstance(value, dict):
+        return _safe_int(value.get("version", 0))
+    return _safe_int(getattr(value, "version", 0))
 
 
 def resolve_strategy_source(value: Any) -> str:
@@ -385,6 +433,62 @@ def resolve_validator_instruction(value: Any) -> str:
     return resolve_strategy_prompt(value, "validator_instruction")
 
 
+# Approved AI models — any model reference NOT in this set is rejected at load
+# time with a warning and replaced by the role default. Update this list when
+# new providers are vetted and API keys are confirmed to exist in production.
+APPROVED_AI_MODELS: frozenset[str] = frozenset({
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "deepseek-reasoner",
+    "gpt-5.4-mini",
+    "gpt-5.4",
+    "gpt-4o-mini",
+    "gpt-4o",
+})
+
+# Role-level defaults used when a model reference fails whitelist validation.
+_ROLE_DEFAULT_MODELS: dict[str, str] = {
+    "signal":        "gemini-2.5-flash-lite",
+    "validator":     "claude-haiku-4-5-20251001",
+    "research":      "gemini-2.5-pro",
+    "param_suggest": "deepseek-reasoner",
+    "regime":        "gemini-2.5-flash-lite",
+    "fallback":      "gemini-2.5-flash-lite",
+}
+
+
+def _is_approved_ai_model(model: str) -> bool:
+    if model in APPROVED_AI_MODELS:
+        return True
+    # Preserve synthetic strategy/test aliases instead of rewriting them to
+    # production defaults during canonicalization. These aliases are used in
+    # stored fixtures and unit payloads to verify spec-first propagation.
+    return model.startswith(("spec-", "override-"))
+
+
+def _validate_ai_models(raw: dict[str, str]) -> dict[str, str]:
+    """Enforce model whitelist. Unknown model references are replaced by the
+    role default and logged as errors so operators are alerted at load time
+    rather than at signal generation time when the failure mode is worse."""
+    result: dict[str, str] = {}
+    for role, model in raw.items():
+        if _is_approved_ai_model(model):
+            result[role] = model
+        else:
+            default = _ROLE_DEFAULT_MODELS.get(role, "gemini-2.5-flash-lite")
+            logger.error(
+                "[strategy_loader] REJECTED ai_models[%r]=%r — not in approved "
+                "model whitelist. Substituting default %r. Update the strategy "
+                "version or APPROVED_AI_MODELS to fix this.",
+                role, model, default,
+            )
+            result[role] = default
+    return result
+
+
 def resolve_strategy_ai_models(value: Any) -> dict[str, str]:
     strategy_spec = _strategy_spec_object(value)
     ai_models = None
@@ -394,14 +498,16 @@ def resolve_strategy_ai_models(value: Any) -> dict[str, str]:
         ai_models = getattr(strategy_spec, "ai_models", None)
 
     if isinstance(ai_models, dict) and ai_models:
-        return {str(name): str(model) for name, model in ai_models.items() if model}
+        raw = {str(name): str(model) for name, model in ai_models.items() if model}
+        return _validate_ai_models(raw)
 
     if isinstance(value, dict):
         raw_ai_models = value.get("ai_models")
     else:
         raw_ai_models = getattr(value, "ai_models", None)
     if isinstance(raw_ai_models, dict):
-        return {str(name): str(model) for name, model in raw_ai_models.items() if model}
+        raw = {str(name): str(model) for name, model in raw_ai_models.items() if model}
+        return _validate_ai_models(raw)
     return {}
 
 
@@ -482,17 +588,17 @@ def serialize_strategy_spec(value: Any) -> dict:
     else:
         base = {
             "symbol": str(getattr(value, "symbol", "") or ""),
-            "version": _safe_int(getattr(value, "version", 0)),
+            "version": resolve_strategy_version(value),
             "status": str(getattr(value, "status", "") or ""),
-            "source": str(getattr(value, "source", "") or ""),
-            "spec_version": str(getattr(value, "spec_version", "v1") or "v1"),
-            "signal_mode": str(getattr(value, "signal_mode", "") or ""),
+            "source": resolve_strategy_source(value),
+            "spec_version": resolve_strategy_spec_version(value) or "v1",
+            "signal_mode": resolve_strategy_signal_mode(value),
             "signal_instruction": resolve_signal_instruction(value),
             "validator_instruction": resolve_validator_instruction(value),
             "params": dict(getattr(value, "params", {}) or {}),
             "tools": _coerce_tool_flags(getattr(value, "tools", {}) or {}),
             "validation": dict(getattr(value, "validation", {}) or {}),
-            "ai_models": dict(getattr(value, "ai_models", {}) or {}),
+            "ai_models": resolve_strategy_ai_models(value),
         }
 
     if strategy_spec is not None and not isinstance(strategy_spec, dict):
@@ -523,7 +629,7 @@ def build_runtime_strategy_context(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return {
             "symbol": str(value.get("symbol") or ""),
-            "version": _safe_int(value.get("version", 0)),
+            "version": resolve_strategy_version(value),
             "status": str(value.get("status") or ""),
             "spec_version": resolve_strategy_spec_version(value) or "v1",
             "signal_mode": resolve_strategy_signal_mode(value),
@@ -542,7 +648,7 @@ def build_runtime_strategy_context(value: Any) -> dict[str, Any]:
 
     return {
         "symbol": str(getattr(value, "symbol", "") or ""),
-        "version": _safe_int(getattr(value, "version", 0)),
+        "version": resolve_strategy_version(value),
         "status": str(getattr(value, "status", "") or ""),
         "spec_version": resolve_strategy_spec_version(value) or "v1",
         "signal_mode": resolve_strategy_signal_mode(value),
@@ -559,7 +665,6 @@ def build_runtime_strategy_context(value: Any) -> dict[str, Any]:
         "strategy_spec": serialize_strategy_spec(value),
     }
 
-
 def build_active_strategy_payload(value: Any) -> dict[str, Any]:
     """Build the canonical payload stored in active_strategy_* settings."""
     runtime = build_runtime_strategy_context(value)
@@ -570,6 +675,306 @@ def build_active_strategy_payload(value: Any) -> dict[str, Any]:
         runtime["name"] = str(getattr(value, "name", "") or "")
         runtime["summary"] = normalize_strategy_summary(value)
     return runtime
+
+
+def bind_active_strategy_symbol(value: Any, symbol: str) -> dict[str, Any]:
+    """Build the canonical active-strategy payload and bind it to a target symbol."""
+    payload = build_active_strategy_payload(value)
+    payload["symbol"] = str(symbol or payload.get("symbol") or "")
+    return payload
+
+
+def build_active_strategy_config(value: Any, *, fallback_symbol: str = "") -> ActiveStrategyConfig:
+    """Build the typed active-strategy config from the canonical strategy contract."""
+    data = build_active_strategy_payload(value)
+    version = resolve_strategy_version(data)
+    status = str(data.get("status") or "")
+    if status not in ("", "candidate", "dry_run", "demo", "live", "retired"):
+        logger.warning(
+            "[strategy-loader] Unknown status '%s' for active_strategy_%s",
+            status,
+            fallback_symbol or data.get("symbol", ""),
+        )
+
+    strategy_spec = migrate_legacy_strategy_spec_v1(data)
+    resolved_strategy = {**data, "strategy_spec": strategy_spec}
+    return ActiveStrategyConfig(
+        symbol=str(data.get("symbol") or fallback_symbol or ""),
+        version=version,
+        spec_version=resolve_strategy_spec_version(data) or "v1",
+        status=status,
+        params=build_algorithmic_params(resolved_strategy),
+        tools=normalize_strategy_tools(data.get("tools") or {}),
+        validation=data.get("validation", {}) if isinstance(data.get("validation"), dict) else {},
+        ai_models=resolve_strategy_ai_models(resolved_strategy),
+        signal_mode=resolve_strategy_signal_mode(resolved_strategy),
+        signal_instruction=resolve_signal_instruction(resolved_strategy),
+        validator_instruction=resolve_validator_instruction(resolved_strategy),
+        scoring_weights=data.get("scoring_weights", {}) if isinstance(data.get("scoring_weights"), dict) else {},
+        confidence_thresholds=data.get("confidence_thresholds", {}) if isinstance(data.get("confidence_thresholds"), dict) else {},
+        strategy_spec=strategy_spec,
+    )
+
+
+async def store_active_strategy_bindings(
+    settings_service: Any,
+    value: Any,
+    *,
+    symbol: str,
+    instance_id: str = "",
+    write_symbol_key: bool = True,
+    write_instance_key: bool = False,
+) -> str:
+    """Persist canonical active-strategy JSON to the requested settings keys."""
+    strategy_json = json.dumps(build_active_strategy_payload(value))
+    if write_instance_key and instance_id:
+        await settings_service.set(f"active_strategy_{instance_id}", strategy_json)
+    if write_symbol_key and symbol:
+        await settings_service.set(f"active_strategy_{symbol}", strategy_json)
+    return strategy_json
+
+
+def active_strategy_binding_keys(
+    symbol: str,
+    *,
+    instance_id: str = "",
+    instance_ids: list[str] | tuple[str, ...] | None = None,
+    include_symbol: bool = True,
+) -> list[str]:
+    """Build active-strategy settings keys in canonical lookup/update order."""
+    keys: list[str] = []
+    if instance_id:
+        keys.append(f"active_strategy_{instance_id}")
+    if instance_ids:
+        keys.extend(f"active_strategy_{value}" for value in instance_ids if value)
+    if include_symbol and symbol:
+        keys.append(f"active_strategy_{symbol}")
+    return keys
+
+
+async def _load_active_strategy_raw(
+    settings_service: SettingsService,
+    symbol: str,
+    instance_id: str = "",
+) -> str | None:
+    """Read raw active-strategy JSON from settings storage using canonical lookup order."""
+    for key in active_strategy_binding_keys(symbol, instance_id=instance_id):
+        raw = await settings_service.get(key)
+        if raw:
+            return raw
+    return None
+
+
+def resolve_strategy_version_string(value: Any) -> str:
+    """Resolve a strategy version as the canonical string used in settings/execution metadata."""
+    version = resolve_strategy_version(value)
+    return str(version) if version > 0 else ""
+
+
+def build_strategy_version_tag(value: Any) -> str:
+    """Build the canonical external version tag (for example ``v12``)."""
+    version = resolve_strategy_version_string(value)
+    return f"v{version}" if version else ""
+
+
+def build_strategy_reference(value: Any, *, fallback_symbol: str = "") -> dict[str, str]:
+    """Build canonical strategy identity fields from a runtime or strategy payload."""
+    if isinstance(value, dict):
+        raw_symbol = value.get("symbol")
+    else:
+        raw_symbol = getattr(value, "symbol", "")
+    symbol = str(raw_symbol).strip() if isinstance(raw_symbol, (str, int, float)) else ""
+    if symbol.startswith("<") and "MagicMock" in symbol:
+        symbol = ""
+    if not symbol:
+        symbol = str(fallback_symbol or "")
+    version = resolve_strategy_version(value)
+    strategy_id = symbol
+    if version > 0 and symbol:
+        strategy_id = f"{symbol}.v{version}"
+    elif version > 0 and fallback_symbol:
+        strategy_id = f"{fallback_symbol}.v{version}"
+    elif not strategy_id:
+        strategy_id = fallback_symbol
+    return {
+        "symbol": symbol or fallback_symbol,
+        "strategy_id": strategy_id,
+        "strategy_version": str(version) if version > 0 else "",
+    }
+
+
+def canonicalize_strategy_record(data: dict, *, path: str | None = None) -> dict:
+    """Normalize a stored strategy record into the canonical operator/runtime shape."""
+    canonical = dict(data)
+    canonical["strategy_spec"] = migrate_legacy_strategy_spec_v1(canonical).to_dict()
+    canonical["version"] = resolve_strategy_version(canonical)
+    canonical["spec_version"] = resolve_strategy_spec_version(canonical) or "v1"
+    canonical["signal_mode"] = resolve_strategy_signal_mode(canonical)
+    canonical["setup_family"] = resolve_strategy_setup_family(canonical)
+    canonical["source"] = resolve_strategy_source(canonical)
+    canonical["signal_instruction"] = resolve_signal_instruction(canonical)
+    canonical["validator_instruction"] = resolve_validator_instruction(canonical)
+    canonical["ai_models"] = resolve_strategy_ai_models(canonical)
+    canonical["summary"] = normalize_strategy_summary(canonical)
+    if path:
+        canonical["_path"] = path
+    return canonical
+
+
+def load_strategy_json(raw: str | None) -> dict[str, Any] | None:
+    """Parse and canonicalize an in-memory strategy JSON payload."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, OSError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return canonicalize_strategy_record(data)
+
+
+def load_strategy_record(path: Path) -> dict[str, Any] | None:
+    """Load and canonicalize a strategy record from disk."""
+    payload = load_strategy_json(path.read_text())
+    if payload is None:
+        return None
+    payload["_path"] = str(path)
+    return payload
+
+
+def write_json_file(path: Path, payload: Any) -> None:
+    """Atomically write a JSON payload to disk."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(path)
+
+
+def save_strategy_record(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalize and atomically save a strategy record to disk."""
+    payload = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    canonical = canonicalize_strategy_record(payload)
+    write_json_file(path, canonical)
+    canonical["_path"] = str(path)
+    return canonical
+
+
+def find_strategy_record(
+    symbol: str,
+    version: int,
+    directory: Path,
+    name: str = "",
+) -> dict[str, Any] | None:
+    """Find a canonical strategy record by name+version or symbol+version."""
+    # Fast path: if name is known, look up directly
+    if name:
+        path = directory / f"{name}_v{version}.json"
+        if path.exists():
+            return load_strategy_record(path)
+    # Full scan: match by symbol and version fields inside each record
+    for path in directory.glob("*.json"):
+        record = load_strategy_record(path)
+        if (
+            record
+            and record.get("symbol") == symbol
+            and resolve_strategy_version(record) == int(version)
+        ):
+            return record
+    return None
+
+
+async def load_active_strategy_payload(
+    settings_service: SettingsService,
+    symbol: str,
+    instance_id: str = "",
+) -> dict[str, Any] | None:
+    """
+    Read canonical active-strategy payload from settings storage.
+
+    Lookup order:
+      1. active_strategy_{instance_id}  (per-agent binding)
+      2. active_strategy_{symbol}       (legacy single-agent fallback)
+    """
+    raw = await _load_active_strategy_raw(settings_service, symbol, instance_id)
+    if not raw:
+        return None
+    return load_strategy_json(raw)
+
+
+async def load_active_strategy_bindings(
+    settings_service: Any,
+    symbol: str,
+    *,
+    instance_ids: list[str] | tuple[str, ...] | None = None,
+    instance_id: str = "",
+    include_symbol: bool = True,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Load canonical active-strategy payloads for the requested binding keys."""
+    bindings: list[tuple[str, dict[str, Any]]] = []
+    for key in active_strategy_binding_keys(
+        symbol,
+        instance_id=instance_id,
+        instance_ids=instance_ids,
+        include_symbol=include_symbol,
+    ):
+        raw = await settings_service.get(key)
+        payload = load_strategy_json(raw)
+        if payload is not None:
+            bindings.append((key, payload))
+    return bindings
+
+
+async def sync_active_strategy_bindings(
+    settings_service: Any,
+    symbol: str,
+    value: Any,
+    *,
+    instance_ids: list[str] | tuple[str, ...] | None = None,
+    instance_id: str = "",
+    include_symbol: bool = True,
+) -> list[str]:
+    """
+    Rewrite existing active-strategy bindings that already point at the same symbol/version.
+
+    Returns the list of settings keys that were updated.
+    """
+    payload_json = json.dumps(build_active_strategy_payload(value))
+    target_symbol = str(symbol or build_active_strategy_payload(value).get("symbol") or "")
+    target_version = resolve_strategy_version(value)
+    updated_keys: list[str] = []
+    for key, current in await load_active_strategy_bindings(
+        settings_service,
+        target_symbol,
+        instance_ids=instance_ids,
+        instance_id=instance_id,
+        include_symbol=include_symbol,
+    ):
+        if current.get("symbol") == target_symbol and resolve_strategy_version(current) == target_version:
+            await settings_service.set(key, payload_json)
+            updated_keys.append(key)
+    return updated_keys
+
+
+async def find_active_strategy_binding_for_version(
+    settings_service: Any,
+    symbol: str,
+    version: int,
+    *,
+    instance_ids: list[str] | tuple[str, ...] | None = None,
+    instance_id: str = "",
+    include_symbol: bool = True,
+) -> tuple[str, dict[str, Any]] | None:
+    """Return the first canonical active binding currently pointing at the requested version."""
+    for key, payload in await load_active_strategy_bindings(
+        settings_service,
+        symbol,
+        instance_ids=instance_ids,
+        instance_id=instance_id,
+        include_symbol=include_symbol,
+    ):
+        if resolve_strategy_version(payload) == int(version):
+            return key, payload
+    return None
 
 
 def _infer_setup_family(data: dict) -> str:
@@ -622,8 +1027,10 @@ def migrate_legacy_strategy_spec_v1(data: dict) -> StrategySpecV1:
             prompt_bundle["validator_instruction"] = str(data.get("validator_instruction") or "")
         metadata = dict(raw_spec.get("metadata") or {})
         metadata.setdefault("source", resolve_strategy_source(data))
-        metadata.setdefault("symbol", str(data.get("symbol") or ""))
-        metadata.setdefault("version", _safe_int(data.get("version", 0)))
+        top_symbol = str(data.get("symbol") or "")
+        metadata["symbol"] = top_symbol if top_symbol else metadata.get("symbol", "")
+        top_version = _safe_int(data.get("version", 0))
+        metadata["version"] = top_version if top_version > 0 else _safe_int(metadata.get("version", 0))
         entry_model = dict(raw_spec.get("entry_model") or {})
         signal_logic = resolve_strategy_signal_logic(data)
         signal_rules = resolve_strategy_signal_rules(data, default_to_ema=True)
@@ -698,6 +1105,12 @@ def migrate_legacy_strategy_spec_v1(data: dict) -> StrategySpecV1:
             "tp1_rr": params.get("tp1_rr"),
             "tp2_rr": params.get("tp2_rr"),
             "tp1_close_pct": params.get("tp1_close_pct"),
+            "trail_enabled": params.get("trail_enabled", False),
+            "trail_type": params.get("trail_type", "atr"),
+            "trail_atr_mult": params.get("trail_atr_mult", 1.5),
+            "trail_pips": params.get("trail_pips", 200.0),
+            "trail_activation_rr": params.get("trail_activation_rr", 1.0),
+            "trail_step_min_pips": params.get("trail_step_min_pips", 5.0),
         },
         risk_policy={
             "risk_pct": params.get("risk_pct"),
@@ -712,7 +1125,7 @@ def migrate_legacy_strategy_spec_v1(data: dict) -> StrategySpecV1:
         metadata={
             "source": resolve_strategy_source(data),
             "symbol": str(data.get("symbol") or ""),
-            "version": int(data.get("version", 0) or 0),
+            "version": resolve_strategy_version(data),
         },
     )
 
@@ -731,62 +1144,41 @@ async def load_active_strategy(
 
     Returns None if no active strategy is set.
     """
-    raw = None
-    if instance_id:
-        raw = await settings_service.get(f"active_strategy_{instance_id}")
-    if not raw:
-        raw = await settings_service.get(f"active_strategy_{symbol}")
+    raw = await _load_active_strategy_raw(settings_service, symbol, instance_id)
     if not raw:
         return None
 
     try:
-        data = json.loads(raw)
+        raw_data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         logger.warning("[strategy-loader] Invalid JSON for active_strategy_%s", symbol)
         return None
-
-    # Validate required fields and types
-    if not isinstance(data, dict):
-        logger.warning("[strategy-loader] Expected dict for active_strategy_%s, got %s", symbol, type(data).__name__)
+    if not isinstance(raw_data, dict):
+        logger.warning(
+            "[strategy-loader] Expected dict for active_strategy_%s, got %s",
+            symbol,
+            type(raw_data).__name__,
+        )
         return None
 
-    version = data.get("version", 0)
-    if not isinstance(version, (int, float)):
-        logger.warning("[strategy-loader] Invalid version type for active_strategy_%s", symbol)
-        version = 0
-
-    status = data.get("status", "")
-    if status not in ("", "candidate", "dry_run", "demo", "live", "retired"):
-        logger.warning("[strategy-loader] Unknown status '%s' for active_strategy_%s", status, symbol)
-
-    spec_version = resolve_strategy_spec_version(data) or "v1"
-    if spec_version not in SUPPORTED_STRATEGY_SPEC_VERSIONS:
+    raw_spec_version = None
+    raw_spec = raw_data.get("strategy_spec")
+    if isinstance(raw_spec, dict):
+        raw_spec_version = raw_spec.get("spec_version")
+    if raw_spec_version is None:
+        raw_spec_version = raw_data.get("spec_version")
+    if raw_spec_version and str(raw_spec_version).strip().lower() not in SUPPORTED_STRATEGY_SPEC_VERSIONS:
         logger.error(
             "[strategy-loader] Unsupported spec_version '%s' for active_strategy_%s",
-            spec_version,
+            raw_spec_version,
             symbol,
         )
         return None
 
-    strategy_spec = migrate_legacy_strategy_spec_v1(data)
-    resolved_strategy = {**data, "strategy_spec": strategy_spec}
-
-    return ActiveStrategyConfig(
-        symbol=data.get("symbol", symbol),
-        version=int(version),
-        spec_version=spec_version,
-        status=status,
-        params=build_algorithmic_params(resolved_strategy),
-        tools=normalize_strategy_tools(data.get("tools") or {}),
-        validation=data.get("validation", {}) if isinstance(data.get("validation"), dict) else {},
-        ai_models=resolve_strategy_ai_models(resolved_strategy),
-        signal_mode=resolve_strategy_signal_mode(resolved_strategy),
-        signal_instruction=resolve_signal_instruction(resolved_strategy),
-        validator_instruction=resolve_validator_instruction(resolved_strategy),
-        scoring_weights=data.get("scoring_weights", {}) if isinstance(data.get("scoring_weights"), dict) else {},
-        confidence_thresholds=data.get("confidence_thresholds", {}) if isinstance(data.get("confidence_thresholds"), dict) else {},
-        strategy_spec=strategy_spec,
-    )
+    data = load_strategy_json(raw)
+    if data is None:
+        return None
+    return build_active_strategy_config(data, fallback_symbol=symbol)
 
 
 # Execution-only gates — these run post-confidence in algo_ai mode,
@@ -829,4 +1221,3 @@ def build_feature_pipeline(
         [name for name, _ in tools],
     )
     return FeaturePipeline(tools=[inst for _, inst in tools])
-

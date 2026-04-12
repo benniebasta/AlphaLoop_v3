@@ -48,39 +48,18 @@ from alphaloop.risk.cross_instance import CrossInstanceRiskAggregator
 from alphaloop.risk.guard_persistence import load_guard_state, save_guard_state
 from alphaloop.execution.control_plane import InstitutionalControlPlane
 from alphaloop.execution.service import ExecutionService
+from alphaloop.trading.runtime_utils import (
+    current_account_balance,
+    current_runtime_strategy,
+    current_strategy_reference,
+    safe_json_payload,
+    session_name_from_context,
+)
 from alphaloop.trading.strategy_loader import (
-    build_runtime_strategy_context,
     resolve_algorithmic_setup_tag,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _strategy_runtime_context(active_strategy) -> dict[str, Any]:
-    if active_strategy is None:
-        return {}
-    return build_runtime_strategy_context(active_strategy)
-
-
-def _strategy_setup_tag(active_strategy) -> str:
-    runtime = _strategy_runtime_context(active_strategy)
-    return resolve_algorithmic_setup_tag(runtime)
-
-
-def _strategy_signal_mode(active_strategy) -> str:
-    return str(_strategy_runtime_context(active_strategy).get("signal_mode") or "")
-
-
-def _strategy_validator_instruction(active_strategy) -> str:
-    return str(_strategy_runtime_context(active_strategy).get("validator_instruction") or "")
-
-
-def _strategy_runtime_signature(active_strategy) -> str:
-    if active_strategy is None:
-        return ""
-    payload = _strategy_runtime_context(active_strategy)
-    return json.dumps(payload, sort_keys=True, default=str)
-
 
 class TradingLoop:
     """
@@ -145,6 +124,7 @@ class TradingLoop:
 
         # Strategy-driven state (loaded from DB each cycle)
         self._active_strategy = None       # ActiveStrategyConfig | None
+        self._runtime_strategy: dict[str, Any] = {}
         self._feature_pipeline = None      # FeaturePipeline | None (algo_ai)
         self._algo_engine = None           # AlgorithmicSignalEngine | None
         self._strategy_runtime_sig = ""
@@ -167,6 +147,10 @@ class TradingLoop:
         # Trade repositioner (evaluates open trades each cycle)
         from alphaloop.risk.repositioner import TradeRepositioner
         self._repositioner = TradeRepositioner()
+
+        # Trailing stop loss manager
+        from alphaloop.risk.trailing_manager import TrailingStopManager
+        self._trailing_manager = TrailingStopManager()
 
         # Canary state (loaded from DB settings)
         self._canary_allocation: float | None = None  # e.g. 0.10 = 10%
@@ -237,6 +221,7 @@ class TradingLoop:
         while self._running:
             try:
                 await self._cycle()
+                self._circuit.record_success()
             except Exception as e:
                 logger.error("Trading cycle error: %s", e, exc_info=True)
                 self._circuit.record_failure()
@@ -261,61 +246,10 @@ class TradingLoop:
         self._running = False
         logger.info("Trading loop stop requested")
 
-    def _current_account_balance(self) -> float:
-        if self.risk_monitor is not None:
-            balance = float(getattr(self.risk_monitor, "account_balance", 0.0) or 0.0)
-            if balance > 0:
-                return balance
-        if self.sizer is not None:
-            balance = float(getattr(self.sizer, "account_balance", 0.0) or 0.0)
-            if balance > 0:
-                return balance
-        return 0.0
-
     def _active_strategy_runtime(self) -> dict[str, Any]:
-        return _strategy_runtime_context(self._active_strategy)
-
-    def _active_strategy_params(self) -> dict[str, Any]:
-        return dict(self._active_strategy_runtime().get("params") or {})
-
-    def _active_strategy_id(self) -> str:
-        runtime = self._active_strategy_runtime()
-        version = int(runtime.get("version", 0) or 0)
-        if version > 0:
-            return f"{self.symbol}.v{version}"
-        return self.symbol
-
-    @staticmethod
-    def _session_name_from_context(context: Any) -> str:
-        if isinstance(context, dict):
-            session = context.get("session", {})
-            if isinstance(session, dict):
-                return str(session.get("name", ""))
-            return str(getattr(session, "name", "") or "")
-        session = getattr(context, "session", None)
-        if isinstance(session, dict):
-            return str(session.get("name", ""))
-        return str(getattr(session, "name", "") or "")
-
-    @staticmethod
-    def _safe_json_payload(value: Any) -> dict | None:
-        if value is None:
-            return None
-        if isinstance(value, dict):
-            try:
-                json.dumps(value, default=str)
-                return value
-            except Exception:
-                return {"value": str(value)}
-        if hasattr(value, "model_dump"):
-            return TradingLoop._safe_json_payload(value.model_dump())
-        if hasattr(value, "__dict__"):
-            raw = {
-                key: val for key, val in vars(value).items()
-                if not key.startswith("_")
-            }
-            return TradingLoop._safe_json_payload(raw)
-        return {"value": str(value)}
+        if self._runtime_strategy:
+            return dict(self._runtime_strategy)
+        return current_runtime_strategy(active_strategy=self._active_strategy)
 
     async def _submit_execution(
         self,
@@ -333,24 +267,31 @@ class TradingLoop:
         if "risk_amount_usd" not in execution_sizing and "risk_usd" in execution_sizing:
             execution_sizing["risk_amount_usd"] = execution_sizing.get("risk_usd")
         runtime_strategy = self._active_strategy_runtime()
+        strategy_ref = current_strategy_reference(
+            symbol=self.symbol,
+            runtime_strategy=runtime_strategy,
+        )
         return await self._execution_service.execute_market_order(
             symbol=self.symbol,
             instance_id=self.instance_id,
-            account_balance=self._current_account_balance(),
+            account_balance=current_account_balance(
+                risk_monitor=self.risk_monitor,
+                sizer=self.sizer,
+            ),
             signal=signal,
             sizing=execution_sizing,
             stop_loss=stop_loss,
             take_profit=take_profit,
             take_profit_2=take_profit_2,
             comment=comment,
-            strategy_id=self._active_strategy_id(),
-            strategy_version=str(runtime_strategy.get("version", "") or ""),
-            signal_payload=self._safe_json_payload(signal),
-            validation_payload=self._safe_json_payload(validated),
-            market_context_snapshot=self._safe_json_payload(
-                {"symbol": self.symbol, "session": self._session_name_from_context(context)}
+            strategy_id=strategy_ref["strategy_id"],
+            strategy_version=strategy_ref["strategy_version"],
+            signal_payload=safe_json_payload(signal),
+            validation_payload=safe_json_payload(validated),
+            market_context_snapshot=safe_json_payload(
+                {"symbol": self.symbol, "session": session_name_from_context(context)}
             ),
-            session_name=self._session_name_from_context(context),
+            session_name=session_name_from_context(context),
             is_dry_run=self.dry_run,
         )
 
@@ -366,6 +307,7 @@ class TradingLoop:
         config = await load_active_strategy(self.settings_service, self.symbol, self.instance_id)
         if config is None:
             self._active_strategy = None
+            self._runtime_strategy = {}
             self._feature_pipeline = None
             self._algo_engine = None
             self._strategy_runtime_sig = ""
@@ -374,21 +316,23 @@ class TradingLoop:
             self._signal_dispatcher.update_signal_model("")
             self._execution_orch.update_state(
                 active_strategy=None,
+                runtime_strategy=None,
                 canary_allocation=self._canary_allocation,
             )
             return
 
-        next_runtime_sig = _strategy_runtime_signature(config)
+        runtime_config = current_runtime_strategy(active_strategy=config)
+        next_runtime_sig = json.dumps(runtime_config, sort_keys=True, default=str)
 
         # Only rebuild if the effective runtime strategy contract changed.
         if self._active_strategy and self._strategy_runtime_sig == next_runtime_sig:
             return
 
         self._active_strategy = config
-        self._strategy_runtime_sig = next_runtime_sig
 
         # Build feature pipeline for algo_ai mode
-        runtime_config = _strategy_runtime_context(config)
+        self._runtime_strategy = dict(runtime_config)
+        self._strategy_runtime_sig = next_runtime_sig
         runtime_signal_mode = str(runtime_config.get("signal_mode") or "")
 
         if runtime_signal_mode == "algo_ai":
@@ -412,7 +356,7 @@ class TradingLoop:
             self.symbol,
             dict(runtime_config.get("params") or {}),
             prev_ema_state=prev_state,
-            setup_tag=_strategy_setup_tag(config),
+            setup_tag=resolve_algorithmic_setup_tag(runtime_config),
         )
 
         # Notify extracted services of updated strategy state
@@ -420,6 +364,7 @@ class TradingLoop:
         self._signal_dispatcher.update_signal_model(self.signal_model_id)
         self._execution_orch.update_state(
             active_strategy=self._active_strategy,
+            runtime_strategy=self._runtime_strategy,
             canary_allocation=self._canary_allocation,
         )
 
@@ -540,10 +485,13 @@ class TradingLoop:
         context = await self._build_context()
 
         # Determine signal mode early
-        signal_mode = _strategy_signal_mode(self._active_strategy)
+        signal_mode = str(self._active_strategy_runtime().get("signal_mode") or "")
 
         # ── v4 institutional pipeline (all modes) ──
         await self._cycle_v4(context, signal_mode, t0)
+
+        # ── Position monitoring — repositioner + trailing SL (all modes) ──
+        await self._reposition_open_trades(context)
         return
 
     @staticmethod
@@ -616,7 +564,7 @@ class TradingLoop:
 
         # Build TradeConstructor with explicit asset config + strategy params
         from alphaloop.pipeline.construction import TradeConstructor
-        strat_params = self._active_strategy_params()
+        strat_params = dict(self._active_strategy_runtime().get("params") or {})
         _tc = TradeConstructor(
             pip_size=_asset_cfg.pip_size,
             sl_min_pts=_asset_cfg.sl_min_points,
@@ -837,7 +785,7 @@ class TradingLoop:
             orchestrator.ai_validator = BoundedAIValidator(
                 ai_caller=self.ai_caller,
                 validator_model=validator_model,
-                validator_instruction=_strategy_validator_instruction(self._active_strategy),
+                validator_instruction=str(runtime_strategy.get("validator_instruction") or ""),
                 fail_open=False,
             )
 
@@ -848,6 +796,7 @@ class TradingLoop:
                 ctx, regime,
                 signal_mode=signal_mode,
                 active_strategy=self._active_strategy,
+                runtime_strategy=self._active_strategy_runtime(),
             )
 
         result = await orchestrator.run(
@@ -893,6 +842,7 @@ class TradingLoop:
                 "hypothesis", "generated",
                 f"direction hypothesis: {result.hypothesis.direction} "
                 f"confidence={result.hypothesis.confidence:.2f}",
+                context=result.hypothesis.source_detail or {},
             )
             await self.event_bus.publish(DirectionHypothesized(
                 symbol=self.symbol,
@@ -942,9 +892,11 @@ class TradingLoop:
                     candidates_considered=getattr(result.signal, "construction_candidates", 0),
                 ))
 
+            _sig_ctx = getattr(result.hypothesis, "source_detail", {}) or {}
             await self._publish_step(
                 "signal_gen", "generated",
                 f"{result.signal.direction} conf:{result.signal.raw_confidence:.2f} setup:{result.signal.setup_type}",
+                context=_sig_ctx,
             )
             await self.event_bus.publish(SignalGenerated(
                 symbol=self.symbol,
@@ -1032,6 +984,7 @@ class TradingLoop:
         # Sync orchestrator with current cycle's strategy and canary state
         self._execution_orch.update_state(
             active_strategy=self._active_strategy,
+            runtime_strategy=self._active_strategy_runtime(),
             canary_allocation=self._canary_allocation,
             sizer=self.sizer,
             risk_monitor=self.risk_monitor,
@@ -1057,7 +1010,7 @@ class TradingLoop:
         )
 
     async def _reposition_open_trades(self, context: dict) -> None:
-        """Evaluate all open trades for repositioning triggers."""
+        """Evaluate all open trades for repositioning + trailing SL each cycle."""
         if not self.trade_repo or not self.executor:
             return
         try:
@@ -1065,13 +1018,29 @@ class TradingLoop:
         except Exception:
             return
 
+        from alphaloop.risk.trailing_manager import TrailingConfig
+        from datetime import datetime, timezone
+
+        runtime_strategy = self._active_strategy_runtime() or {}
+        trail_params = dict(runtime_strategy.get("params") or {})
+        # Merge tool toggles so TrailingConfig.from_params can read trailing_stop
+        trail_params["tools"] = dict(runtime_strategy.get("tools") or {})
+        trail_config = TrailingConfig.from_params(trail_params, self.symbol)
+
         for trade in open_trades:
             try:
-                current_price = 0.0
                 price_data = await self.executor.get_current_price()
+                current_price = 0.0
                 if price_data:
-                    current_price = price_data.get("bid", 0) or price_data.get("ask", 0)
+                    direction = (getattr(trade, "direction", "") or "").upper()
+                    if direction == "BUY":
+                        current_price = float(price_data.get("bid", 0) or 0)
+                    else:
+                        current_price = float(price_data.get("ask", 0) or 0)
 
+                # ── Repositioner (reactive: news / vol / spike) ──────────────
+                # Enabled by default; disabled only when tool toggle is explicitly False
+                reposition_enabled = trail_params["tools"].get("trade_repositioner", True)
                 trade_info = {
                     "order_result": {
                         "direction": trade.direction,
@@ -1082,18 +1051,32 @@ class TradingLoop:
                 }
                 events = self._repositioner.check(
                     trade_info, context, current_price=current_price,
-                )
+                ) if reposition_enabled else []
                 for ev in events:
                     if ev.action == "full_close":
-                        await self.executor.close_position(trade.order_ticket)
-                        if self.trade_repo:
-                            trade.outcome = "CLOSED"
+                        if not self.dry_run:
+                            await self.executor.close_position(trade.order_ticket)
+                        trade.outcome = "CLOSED"
                         logger.info("[reposition] Full close trade %s: %s", trade.order_ticket, ev.reason)
                     elif ev.action == "tighten_sl" and ev.new_sl:
-                        await self.executor.modify_sl_tp(trade.order_ticket, sl=ev.new_sl, tp=trade.take_profit_1 or 0)
-                        logger.info("[reposition] Tighten SL trade %s → %.5f: %s", trade.order_ticket, ev.new_sl, ev.reason)
-                    elif ev.action == "partial_close":
-                        logger.info("[reposition] Partial close trade %s: %s", trade.order_ticket, ev.reason)
+                        if not self.dry_run:
+                            await self.executor.modify_sl_tp(
+                                trade.order_ticket, sl=ev.new_sl, tp=trade.take_profit_1 or 0
+                            )
+                        trade.stop_loss = ev.new_sl
+                        logger.info(
+                            "[reposition]%s Tighten SL trade %s → %.5f: %s",
+                            "[DRY-RUN]" if self.dry_run else "",
+                            trade.order_ticket, ev.new_sl, ev.reason,
+                        )
+                    elif ev.action == "partial_close" and getattr(ev, "lots", None):
+                        if not self.dry_run:
+                            await self.executor.close_position(trade.order_ticket, lots=ev.lots)
+                        logger.info(
+                            "[reposition]%s Partial close trade %s %.2f lots: %s",
+                            "[DRY-RUN]" if self.dry_run else "",
+                            trade.order_ticket, ev.lots, ev.reason,
+                        )
 
                     await self.event_bus.publish(TradeRepositioned(
                         symbol=self.symbol,
@@ -1103,6 +1086,45 @@ class TradingLoop:
                         action=ev.action,
                         reason=ev.reason,
                     ))
+
+                # ── Trailing SL (proactive: ratchet SL toward profit) ────────
+                if trail_config.enabled and current_price > 0:
+                    h1_indicators = (
+                        context.get("timeframes", {}).get("H1", {}).get("indicators", {})
+                    )
+                    atr = float(h1_indicators.get("atr", 0) or 0)
+                    trail_ev = self._trailing_manager.evaluate(
+                        trade=trade,
+                        current_price=current_price,
+                        atr=atr,
+                        config=trail_config,
+                    )
+                    if trail_ev:
+                        if not self.dry_run:
+                            await self.executor.modify_sl_tp(
+                                trade.order_ticket,
+                                sl=trail_ev.new_sl,
+                                tp=trade.take_profit_1 or 0,
+                            )
+                        logger.info(
+                            "[trail-sl]%s ticket=%s %s → SL %.5f (was %.5f) hw=%.5f",
+                            " [DRY-RUN]" if self.dry_run else "",
+                            trade.order_ticket, trail_ev.trail_type,
+                            trail_ev.new_sl, trail_ev.old_sl, trail_ev.new_high_water,
+                        )
+                        # Persist state even in dry_run (restart resumes correctly)
+                        trade.stop_loss = trail_ev.new_sl
+                        trade.trail_high_water = trail_ev.new_high_water
+                        trade.trail_sl_applied_at = datetime.now(timezone.utc)
+                        await self.event_bus.publish(TradeRepositioned(
+                            symbol=self.symbol,
+                            instance_id=self.instance_id,
+                            trade_id=trade.order_ticket,
+                            trigger="trailing_sl",
+                            action="trail_sl",
+                            reason=trail_ev.reason,
+                        ))
+
             except Exception as e:
                 logger.warning("[reposition] Error on trade %s: %s", getattr(trade, "order_ticket", "?"), e)
 
@@ -1365,7 +1387,7 @@ class TradingLoop:
 
             # Read EMA/RSI periods from active strategy params (Optuna-tuned)
             # Falls back to defaults if no strategy loaded yet
-            _p = self._active_strategy_params()
+            _p = dict(self._active_strategy_runtime().get("params") or {})
             _ema_fast_p  = int(_p.get("ema_fast",   21))
             _ema_slow_p  = int(_p.get("ema_slow",   55))
             _rsi_period  = int(_p.get("rsi_period", 14))

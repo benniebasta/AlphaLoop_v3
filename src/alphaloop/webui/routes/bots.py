@@ -21,9 +21,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alphaloop.core.constants import STRATEGY_VERSIONS_DIR
+from alphaloop.webui.auth_rbac import Role, require_role
 from alphaloop.db.models.operator_audit import OperatorAuditLog
-from alphaloop.trading.strategy_loader import build_active_strategy_payload
+from alphaloop.trading.overlay_loader import load_overlay_config
+from alphaloop.trading.strategy_loader import (
+    build_active_strategy_payload,
+    bind_active_strategy_symbol,
+    build_strategy_reference,
+    build_strategy_version_tag,
+    find_strategy_record,
+    load_active_strategy_payload,
+    store_active_strategy_bindings,
+)
 from alphaloop.db.models.instance import RunningInstance
+from alphaloop.db.repositories.trade_repo import TradeRepository
 from alphaloop.webui.deps import get_db_session, get_container
 
 logger = logging.getLogger(__name__)
@@ -71,9 +82,9 @@ def _bot_to_dict(b: RunningInstance, bound_strategy: dict | None = None) -> dict
     bound_version = None
     if bound_strategy:
         try:
-            version = int(bound_strategy.get("version", 0) or 0)
-            if version > 0:
-                bound_version = f"v{version}"
+            bound_version = build_strategy_version_tag(
+                {"symbol": b.symbol, **bound_strategy}
+            ) or None
         except (TypeError, ValueError):
             bound_version = None
     d = {
@@ -105,14 +116,6 @@ def _bot_to_dict(b: RunningInstance, bound_strategy: dict | None = None) -> dict
             },
         }
     return d
-
-
-def _bound_active_strategy_payload(symbol: str, strategy_data: dict) -> dict:
-    payload = build_active_strategy_payload(strategy_data)
-    payload["symbol"] = symbol
-    return payload
-
-
 def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
         import ctypes
@@ -166,16 +169,17 @@ async def list_bots(
         bound = None
         if settings_svc:
             try:
-                raw = await settings_svc.get(f"active_strategy_{b.instance_id}")
-                if not raw:
-                    raw = await settings_svc.get(f"active_strategy_{b.symbol}")
-                if raw:
-                    bound = json.loads(raw)
-                    # Fetch dry-run overlay tools for this strategy
-                    ver = bound.get("version", 0)
-                    overlay_raw = await settings_svc.get(f"dry_run_overlay_{b.symbol}_v{ver}")
-                    if overlay_raw:
-                        bound["overlay"] = json.loads(overlay_raw).get("extra_tools", [])
+                bound = await load_active_strategy_payload(
+                    settings_svc,
+                    b.symbol,
+                    b.instance_id,
+                )
+                if bound is not None:
+                    ref = build_strategy_reference(bound, fallback_symbol=b.symbol)
+                    ver = int(ref.get("strategy_version", "") or 0)
+                    overlay = await load_overlay_config(settings_svc, b.symbol, ver)
+                    if overlay is not None:
+                        bound["overlay"] = list(overlay.extra_tools)
             except Exception:
                 pass
         enriched.append(_bot_to_dict(b, bound))
@@ -254,6 +258,7 @@ class AgentStartRequest(BaseModel):
     symbol: str = "XAUUSD"
     dry_run: bool = True
     strategy_version: int | None = None
+    strategy_name: str = ""
     risk_budget_pct: float = 1.0
     poll_interval_sec: float = 60.0
 
@@ -265,6 +270,7 @@ async def start_agent(
     authorization: str = Header(default=""),
     session: AsyncSession = Depends(get_db_session),
     container=Depends(get_container),
+    _rbac: None = require_role(Role.ADMIN),
 ) -> dict:
     """
     Launch a trading agent as a subprocess from the WebUI.
@@ -286,6 +292,8 @@ async def start_agent(
     await session.flush()
 
     instance_id = f"{body.symbol}_{uuid.uuid4().hex[:8]}"
+    strategy_data = None
+    active_payload: dict | None = None
 
     # Bind selected strategy card to per-instance settings key
     if body.strategy_version is not None:
@@ -294,21 +302,22 @@ async def start_agent(
             settings_svc = SettingsService(container.db_session_factory)
 
             # Look up the strategy JSON file
-            strategy_data = None
-            for f in STRATEGY_VERSIONS_DIR.glob(f"{body.symbol}_v*.json"):
-                try:
-                    data = json.loads(f.read_text())
-                    if data.get("version") == body.strategy_version:
-                        strategy_data = data
-                        break
-                except (json.JSONDecodeError, OSError):
-                    continue
+            strategy_data = find_strategy_record(
+                body.symbol,
+                body.strategy_version,
+                STRATEGY_VERSIONS_DIR,
+                name=body.strategy_name,
+            )
 
             if strategy_data:
-                active_payload = _bound_active_strategy_payload(body.symbol, strategy_data)
-                await settings_svc.set(
-                    f"active_strategy_{instance_id}",
-                    json.dumps(active_payload),
+                active_payload = bind_active_strategy_symbol(strategy_data, body.symbol)
+                await store_active_strategy_bindings(
+                    settings_svc,
+                    active_payload,
+                    symbol=body.symbol,
+                    instance_id=instance_id,
+                    write_symbol_key=False,
+                    write_instance_key=True,
                 )
                 logger.info(
                     "Bound strategy %s v%d to instance %s",
@@ -348,7 +357,7 @@ async def start_agent(
     if body.dry_run:
         cmd.append("--dry-run")
     else:
-        cmd.append("--live")
+        cmd.extend(["--live", "--allow-v4-live"])
 
     try:
         proc = subprocess.Popen(
@@ -368,11 +377,9 @@ async def start_agent(
             symbol=body.symbol,
             instance_id=instance_id,
             pid=proc.pid,
-            strategy_version=(
-                f"v{int(active_payload.get('version', 0) or 0)}"
-                if body.strategy_version is not None and strategy_data
-                else None
-            ),
+            strategy_version=build_strategy_version_tag(
+                {"symbol": body.symbol, **(active_payload or {})}
+            ) or None,
         )
         session.add(pre_reg)
         _record_operator_audit(
@@ -491,3 +498,200 @@ async def stop_agent(
     await session.flush()
 
     return {"status": "ok", "instance_id": instance_id, "stop_method": _method}
+
+
+# ── Manual Trade (dry-run) ────────────────────────────────────────────────────
+
+def _trade_to_dict(t) -> dict:
+    return {
+        "id": t.id,
+        "symbol": t.symbol,
+        "direction": t.direction,
+        "lot_size": t.lot_size,
+        "entry_price": t.entry_price,
+        "stop_loss": t.stop_loss,
+        "take_profit_1": t.take_profit_1,
+        "order_ticket": t.order_ticket,
+        "outcome": t.outcome,
+        "opened_at": t.opened_at.isoformat() + "Z" if t.opened_at else None,
+        "close_price": t.close_price,
+        "pnl_usd": t.pnl_usd,
+        "is_dry_run": t.is_dry_run,
+    }
+
+
+class ManualOpenRequest(BaseModel):
+    direction: str
+    lots: float = 0.01
+    sl: float | None = None
+    tp: float | None = None
+    entry_price: float | None = None
+
+
+class ManualCloseRequest(BaseModel):
+    trade_id: int
+    close_price: float | None = None
+
+
+@router.get("/{instance_id}/trades")
+async def list_instance_trades(
+    instance_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """List open trades for a bot instance."""
+    result = await session.execute(
+        select(RunningInstance).where(RunningInstance.instance_id == instance_id)
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    repo = TradeRepository(session)
+    trades = await repo.get_open_trades(instance_id=instance_id)
+    return {"trades": [_trade_to_dict(t) for t in trades]}
+
+
+@router.post("/{instance_id}/trades/open")
+async def manual_open_trade(
+    instance_id: str,
+    body: ManualOpenRequest,
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Open a manual dry-run trade on a bot instance."""
+    _require_operator_auth(authorization)
+
+    result = await session.execute(
+        select(RunningInstance).where(RunningInstance.instance_id == instance_id)
+    )
+    bot = result.scalar_one_or_none()
+    if bot is None:
+        raise HTTPException(status_code=404, detail="Bot not found")
+
+    direction = body.direction.upper()
+    if direction not in ("BUY", "SELL"):
+        raise HTTPException(status_code=400, detail="direction must be BUY or SELL")
+
+    # Fetch live price via yfinance — MT5 can't be shared across processes
+    # (bot process already owns the MT5 connection; WebUI is a separate process)
+    fill_price = body.entry_price or 0.0
+    if fill_price == 0.0:
+        try:
+            import asyncio as _asyncio
+            import yfinance as _yf
+            from alphaloop.data.yf_catalog import get_yf_ticker
+            _ticker = get_yf_ticker(bot.symbol)
+            _hist = await _asyncio.to_thread(
+                lambda: _yf.download(_ticker, period="1d", interval="1m", progress=False)
+            )
+            if not _hist.empty:
+                fill_price = float(_hist["Close"].iloc[-1].squeeze())
+        except Exception as _e:
+            logger.warning("yfinance price fetch failed for %s: %s", bot.symbol, _e)
+
+    # Generate dry-run ticket (no MT5 connection needed — ticket is synthetic)
+    from alphaloop.execution.mt5_executor import MT5Executor
+    executor = MT5Executor(symbol=bot.symbol, dry_run=True)
+    order_result = await executor.open_order(
+        direction=direction,
+        lots=body.lots,
+        sl=body.sl or 0.0,
+        tp=body.tp or 0.0,
+        comment="manual",
+    )
+    if not order_result.success:
+        raise HTTPException(status_code=502, detail=order_result.error_message)
+    repo = TradeRepository(session)
+    trade = await repo.create(
+        symbol=bot.symbol,
+        direction=direction,
+        lot_size=body.lots,
+        entry_price=fill_price,
+        stop_loss=body.sl,
+        take_profit_1=body.tp,
+        order_ticket=order_result.order_ticket,
+        outcome="OPEN",
+        instance_id=instance_id,
+        is_dry_run=True,
+        setup_type="manual",
+    )
+    _record_operator_audit(
+        session,
+        action="manual_trade_open",
+        target=instance_id,
+        old_value=None,
+        new_value=f"{direction}:{body.lots}@{fill_price}",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return _trade_to_dict(trade)
+
+
+@router.post("/{instance_id}/trades/close")
+async def manual_close_trade(
+    instance_id: str,
+    body: ManualCloseRequest,
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Close a manual trade on a bot instance."""
+    _require_operator_auth(authorization)
+
+    repo = TradeRepository(session)
+    trade = await repo.get_by_id(body.trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if trade.instance_id != instance_id:
+        raise HTTPException(status_code=403, detail="Trade does not belong to this instance")
+    if trade.outcome != "OPEN":
+        raise HTTPException(status_code=400, detail=f"Trade already closed (outcome={trade.outcome})")
+
+    # Fetch live close price via yfinance (same approach as open)
+    close_price = body.close_price or 0.0
+    if close_price == 0.0:
+        try:
+            import asyncio as _asyncio
+            import yfinance as _yf
+            from alphaloop.data.yf_catalog import get_yf_ticker
+            _ticker = get_yf_ticker(trade.symbol)
+            _hist = await _asyncio.to_thread(
+                lambda: _yf.download(_ticker, period="1d", interval="1m", progress=False)
+            )
+            if not _hist.empty:
+                close_price = float(_hist["Close"].iloc[-1].squeeze())
+        except Exception as _e:
+            logger.warning("yfinance close price fetch failed for %s: %s", trade.symbol, _e)
+
+    # Calculate P&L using asset pip config
+    pnl_usd = 0.0
+    if close_price and trade.entry_price and trade.lot_size:
+        try:
+            from alphaloop.config.assets import get_asset_config
+            _asset = get_asset_config(trade.symbol)
+            _pip_size = _asset.pip_size or 1.0
+            _pip_val = _asset.pip_value_per_lot or 1.0
+            _diff = (close_price - trade.entry_price) if trade.direction == "BUY" \
+                    else (trade.entry_price - close_price)
+            pnl_usd = round((_diff / _pip_size) * _pip_val * trade.lot_size, 2)
+        except Exception as _e:
+            logger.warning("P&L calc failed for trade %d: %s", trade.id, _e)
+
+    outcome = "WIN" if pnl_usd > 0 else "LOSS" if pnl_usd < 0 else "BE"
+
+    await repo.close_trade(
+        trade.id,
+        close_price=close_price,
+        pnl_usd=pnl_usd,
+        outcome=outcome,
+        changed_by="manual",
+    )
+    _record_operator_audit(
+        session,
+        action="manual_trade_close",
+        target=instance_id,
+        old_value=f"trade_id:{body.trade_id}",
+        new_value=f"close_price:{close_price} pnl:{pnl_usd} outcome:{outcome}",
+        source_ip=request.client.host if request.client else "unknown",
+    )
+    await session.commit()
+    return {"status": "ok", "trade_id": body.trade_id, "close_price": close_price, "pnl_usd": pnl_usd, "outcome": outcome}

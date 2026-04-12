@@ -830,7 +830,7 @@ async def main_async() -> None:
     from alphaloop.monitoring.alert_rules import AlertEngine, create_default_rules
     from alphaloop.notifications.dispatcher import NotificationDispatcher
     from alphaloop.core.events import (
-        TradeClosed as _TC, RiskLimitHit as _RLH, PipelineBlocked as _PB,
+        TradeClosed as _TC, RiskLimitHit as _RLH,
     )
 
     alert_engine = AlertEngine()

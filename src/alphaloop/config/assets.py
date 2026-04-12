@@ -76,6 +76,12 @@ class AssetConfig(BaseModel):
     # AI context
     ai_context: str = ""
 
+    # Trailing SL defaults (used by TrailingConfig.from_params as fallback)
+    trail_atr_mult: float = 1.5
+    trail_pips: float = 200.0       # symbol-specific — distance in pips for fixed_pips mode
+    trail_activation_rr: float = 1.0
+    trail_step_min_pips: float = 5.0
+
 
 # ── Asset library ─────────────────────────────────────────────────────────────
 
@@ -94,6 +100,11 @@ ASSETS: dict[str, AssetConfig] = {
         max_spread_points=30.0,
         use_dxy_filter=True,
         correlation_symbol="DX-Y.NYB",
+        # Trail: pip_size=0.1 → 200 pips=$20, activation at 1R, step 5 pips=$0.50
+        trail_atr_mult=1.5,
+        trail_pips=200.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=5.0,
         ai_context=(
             "XAUUSD specific: Watch for liquidity sweeps at round numbers ($2300, $2350). "
             "NY open (13:00 UTC) often creates the strongest moves. "
@@ -114,6 +125,11 @@ ASSETS: dict[str, AssetConfig] = {
         sl_max_points=800.0,
         max_spread_points=50.0,
         use_dxy_filter=True,
+        # Trail: pip_size=0.001 → 300 pips=$0.30, more volatile than gold
+        trail_atr_mult=1.8,
+        trail_pips=300.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=10.0,
         ai_context=(
             "XAGUSD: More volatile than gold, wider spreads. "
             "Follows gold but with amplified moves (gold/silver ratio matters)."
@@ -133,6 +149,11 @@ ASSETS: dict[str, AssetConfig] = {
         sl_min_points=500.0,
         sl_max_points=5000.0,
         max_spread_points=200.0,
+        # Trail: pip_size=1.0 → 1500 pips=$1500 ≈ 1R, wider trail for BTC volatility
+        trail_atr_mult=2.0,
+        trail_pips=1500.0,
+        trail_activation_rr=1.5,
+        trail_step_min_pips=50.0,
         ai_context=(
             "BTCUSD specific: 24/7 market but most volatility during US hours. "
             "Watch for whale manipulation and liquidation cascades at key levels. "
@@ -153,6 +174,11 @@ ASSETS: dict[str, AssetConfig] = {
         sl_min_points=300.0,
         sl_max_points=3000.0,
         max_spread_points=150.0,
+        # Trail: pip_size=0.1 → 500 pips=$50, wider than gold due to ETH volatility
+        trail_atr_mult=2.0,
+        trail_pips=500.0,
+        trail_activation_rr=1.5,
+        trail_step_min_pips=20.0,
         ai_context=(
             "ETHUSD: Follows BTC with beta amplification. "
             "Gas fees and network activity affect sentiment."
@@ -171,6 +197,11 @@ ASSETS: dict[str, AssetConfig] = {
         max_spread_points=3.0,
         use_dxy_filter=True,
         correlation_symbol="DX-Y.NYB",
+        # Trail: pip_size=0.0001 → 150 pips=$0.015, step 3 pips
+        trail_atr_mult=1.5,
+        trail_pips=150.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=3.0,
         ai_context="EURUSD: Most liquid forex pair. Best during London/NY overlap.",
     ),
     "GBPUSD": AssetConfig(
@@ -185,6 +216,11 @@ ASSETS: dict[str, AssetConfig] = {
         sl_max_points=350.0,
         max_spread_points=5.0,
         use_dxy_filter=True,
+        # Trail: wider than EURUSD due to higher volatility
+        trail_atr_mult=1.5,
+        trail_pips=200.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=5.0,
         ai_context="GBPUSD (Cable): Higher volatility than EURUSD.",
     ),
     "USDJPY": AssetConfig(
@@ -199,6 +235,11 @@ ASSETS: dict[str, AssetConfig] = {
         sl_min_points=100.0,
         sl_max_points=300.0,
         max_spread_points=3.0,
+        # Trail: pip_size=0.01 → 150 pips=$1.50
+        trail_atr_mult=1.5,
+        trail_pips=150.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=3.0,
         ai_context="USDJPY: Driven by US-Japan yield differential.",
     ),
     "AUDUSD": AssetConfig(
@@ -214,6 +255,10 @@ ASSETS: dict[str, AssetConfig] = {
         sl_max_points=250.0,
         max_spread_points=4.0,
         use_dxy_filter=True,
+        trail_atr_mult=1.5,
+        trail_pips=150.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=3.0,
         ai_context="AUDUSD: Commodity currency — correlates with gold and iron ore.",
     ),
     "US30": AssetConfig(
@@ -227,6 +272,11 @@ ASSETS: dict[str, AssetConfig] = {
         sl_min_points=200.0,
         sl_max_points=1000.0,
         max_spread_points=50.0,
+        # Trail: pip_size=1.0 → 300 pips=$300, indices need wider trail
+        trail_atr_mult=1.8,
+        trail_pips=300.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=20.0,
         ai_context="US30 (Dow Jones): Driven by earnings, Fed policy, economic data.",
     ),
     "NAS100": AssetConfig(
@@ -242,6 +292,11 @@ ASSETS: dict[str, AssetConfig] = {
         sl_min_points=300.0,
         sl_max_points=1500.0,
         max_spread_points=100.0,
+        # Trail: pip_size=1.0 → 400 pips=$400, more volatile than US30
+        trail_atr_mult=2.0,
+        trail_pips=400.0,
+        trail_activation_rr=1.0,
+        trail_step_min_pips=30.0,
         ai_context="NAS100: Tech-heavy index, more volatile than Dow.",
     ),
 }

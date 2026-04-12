@@ -53,5 +53,13 @@ class BacktestParams(BaseModel):
     tools: dict[str, bool] = Field(default_factory=dict)
     source: str = ""
 
+    # Trailing stop loss
+    trail_enabled: bool = False
+    trail_type: str = "atr"           # "atr" | "fixed_pips"
+    trail_atr_mult: float = 1.5       # SL distance = ATR × trail_atr_mult
+    trail_pips: float = 200.0         # SL distance in pips (fixed_pips mode)
+    trail_activation_rr: float = 1.0  # min R-profit before trail engages
+    trail_step_min_pips: float = 5.0  # min SL improvement per cycle
+
     # Bounds for optimizer (not tuned directly, used by suggest())
     max_param_change_pct: float = 0.15  # max ±15% per generation

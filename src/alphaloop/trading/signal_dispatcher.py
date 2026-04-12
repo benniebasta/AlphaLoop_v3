@@ -1,5 +1,5 @@
 """
-trading/signal_dispatcher.py — Signal generation dispatcher.
+trading/signal_dispatcher.py - Signal generation dispatcher.
 
 Extracted from TradingLoop so that signal dispatch logic (AI hypothesis,
 algo hypothesis, model routing) lives in one place and is independently
@@ -11,12 +11,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from alphaloop.trading.strategy_loader import (
-    build_runtime_strategy_context,
-    resolve_strategy_signal_mode,
-)
+from alphaloop.trading.runtime_utils import current_runtime_strategy
+from alphaloop.trading.strategy_loader import resolve_strategy_signal_mode
 
 logger = logging.getLogger(__name__)
+
 
 class SignalDispatcher:
     """
@@ -43,11 +42,9 @@ class SignalDispatcher:
         self.symbol = symbol
         self.instance_id = instance_id
 
-        # Mutable — updated by TradingLoop._ensure_strategy_loaded
+        # Mutable - updated by TradingLoop._ensure_strategy_loaded
         self._algo_engine: Any = None
         self.signal_model_id: str = ""
-
-    # ── Strategy reload hooks ────────────────────────────────────────────────
 
     def update_algo_engine(self, engine: Any) -> None:
         """Replace the algorithmic engine after a strategy reload."""
@@ -57,8 +54,6 @@ class SignalDispatcher:
         """Update the AI signal model ID after a strategy reload."""
         self.signal_model_id = model_id
 
-    # ── Dispatch ─────────────────────────────────────────────────────────────
-
     async def dispatch(
         self,
         ctx: Any,
@@ -66,53 +61,42 @@ class SignalDispatcher:
         *,
         signal_mode: str,
         active_strategy: Any = None,
+        runtime_strategy: dict[str, Any] | None = None,
     ) -> Any:
         """
         Generate a direction hypothesis for the v4 pipeline.
 
-        Parameters
-        ----------
-        ctx : MarketContext
-            Current cycle market data and indicators.
-        regime : RegimeResult | None
-            Output from the RegimeClassifier pipeline stage.
-        signal_mode : str
-            One of "ai_signal", "algo_only", "algo_ai".
-        active_strategy : ActiveStrategyConfig | None
-            Current strategy config; used for AI model routing overrides.
-
-        Returns
-        -------
-        DirectionHypothesis | None
-            None means no directional view (HOLD / insufficient data).
+        Returns ``None`` when no directional view is available.
         """
-        if active_strategy is not None:
-            runtime_strategy = build_runtime_strategy_context(active_strategy)
-        else:
+        has_strategy_contract = runtime_strategy is not None or active_strategy is not None
+        runtime_strategy = current_runtime_strategy(
+            runtime_strategy=runtime_strategy,
+            active_strategy=active_strategy,
+        )
+        if not runtime_strategy:
             runtime_strategy = {
                 "signal_mode": resolve_strategy_signal_mode({"signal_mode": signal_mode}),
                 "signal_instruction": "",
                 "ai_models": {},
             }
+
         effective_signal_mode = runtime_strategy.get("signal_mode", signal_mode)
         runtime_ai_models = dict(runtime_strategy.get("ai_models") or {})
         signal_model_id = str(runtime_ai_models.get("signal") or self.signal_model_id or "")
 
         if effective_signal_mode == "ai_signal" and self._signal_engine:
-            # AI path: the signal engine queries the LLM and returns a direction
-            # hypothesis.  SL/TP construction happens in orchestrator Stage 3B.
             try:
                 return await self._signal_engine.generate_hypothesis(
                     ctx,
                     ai_caller=self._ai_caller,
                     model_id=signal_model_id,
                     prompt_instructions=runtime_strategy.get("signal_instruction", ""),
+                    active_tools=dict(runtime_strategy.get("tools") or {}),
                 )
             except Exception as e:
                 logger.warning("[dispatcher] AI signal engine error: %s", e)
                 return None
 
-        # algo_only / algo_ai: deterministic direction hypothesis from indicators
         if self._algo_engine:
             try:
                 return await self._algo_engine.generate_hypothesis(ctx)
