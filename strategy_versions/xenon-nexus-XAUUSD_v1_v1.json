@@ -1,0 +1,151 @@
+{
+  "symbol": "XAUUSD",
+  "version": 1,
+  "spec_version": "v1",
+  "name": "xenon-nexus-XAUUSD_v1",
+  "created_at": "2026-04-13T14:49:52.231889+00:00",
+  "source": "backtest_runner",
+  "seed_hash": null,
+  "params": {
+    "ema_fast": 21,
+    "ema_slow": 55,
+    "sl_atr_mult": 2.0,
+    "tp1_rr": 2.0,
+    "tp2_rr": 4.0,
+    "tp1_close_pct": 0.6,
+    "rsi_period": 14,
+    "rsi_ob": 70.0,
+    "rsi_os": 30.0,
+    "risk_pct": 0.01,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "bb_period": 20,
+    "bb_std_dev": 2.0,
+    "adx_period": 14,
+    "adx_min_threshold": 20.0,
+    "volume_ma_period": 20,
+    "signal_rules": [
+      {
+        "source": "ema_crossover"
+      },
+      {
+        "source": "macd_crossover"
+      },
+      {
+        "source": "rsi_reversal"
+      },
+      {
+        "source": "bollinger_breakout"
+      },
+      {
+        "source": "adx_trend"
+      }
+    ],
+    "signal_logic": "MAJORITY"
+  },
+  "summary": {
+    "total_trades": 0,
+    "win_rate": 0,
+    "sharpe": 0,
+    "max_dd_pct": 0,
+    "total_pnl": 0,
+    "timeframe": "15m",
+    "days": 365,
+    "initial_capital": 10000.0
+  },
+  "status": "retired",
+  "tools": {
+    "session_filter": false,
+    "news_filter": false,
+    "volatility_filter": true,
+    "dxy_filter": false,
+    "sentiment_filter": false,
+    "risk_filter": false,
+    "ema200_filter": false,
+    "macd_filter": false,
+    "bollinger_filter": false,
+    "adx_filter": false,
+    "volume_filter": true,
+    "swing_structure": false,
+    "tick_jump_guard": true,
+    "liq_vacuum_guard": true,
+    "bos_guard": false,
+    "fvg_guard": false,
+    "vwap_guard": true,
+    "correlation_guard": false,
+    "ema_crossover": false,
+    "rsi_feature": false,
+    "trendilo": false,
+    "fast_fingers": false,
+    "choppiness_index": false,
+    "alma_filter": false
+  },
+  "validation": {
+    "min_confidence": 0.6,
+    "min_rr": 1.0,
+    "check_rsi": true,
+    "rsi_ob": 70.0,
+    "rsi_os": 30.0,
+    "check_ema200_trend": false,
+    "check_bos": false,
+    "check_fvg": false,
+    "check_tick_jump": true,
+    "check_liq_vacuum": true,
+    "check_regime": true,
+    "validation_level": "strict"
+  },
+  "ai_models": {
+    "signal": "gemini-2.5-flash-lite",
+    "validator": "claude-haiku-4-5-20251001",
+    "research": "gemini-2.5-pro",
+    "param_suggest": "deepseek-reasoner",
+    "regime": "gemini-2.5-flash-lite",
+    "fallback": "gemini-2.5-flash-lite"
+  },
+  "signal_mode": "algo_ai",
+  "signal_instruction": "",
+  "validator_instruction": "",
+  "scoring_weights": {},
+  "confidence_thresholds": {},
+  "fingerprint": "9afc9b9c04a5012f",
+  "strategy_spec": {
+    "spec_version": "v1",
+    "signal_mode": "algo_ai",
+    "setup_family": "trend_continuation",
+    "direction_model": "algorithmic_rules",
+    "enabled_preconditions": [],
+    "entry_model": {
+      "type": "rule_derived",
+      "signal_logic": "MAJORITY",
+      "signal_rule_sources": [
+        "ema_crossover",
+        "macd_crossover",
+        "rsi_reversal",
+        "bollinger_breakout",
+        "adx_trend"
+      ]
+    },
+    "invalidation_model": {},
+    "exit_policy": {},
+    "risk_policy": {},
+    "prompt_bundle": {
+      "signal_instruction": "",
+      "validator_instruction": ""
+    },
+    "ai_models": {
+      "signal": "gemini-2.5-flash-lite",
+      "validator": "claude-haiku-4-5-20251001",
+      "research": "gemini-2.5-pro",
+      "param_suggest": "deepseek-reasoner",
+      "regime": "gemini-2.5-flash-lite",
+      "fallback": "gemini-2.5-flash-lite"
+    },
+    "metadata": {
+      "source": "backtest_runner",
+      "symbol": "XAUUSD",
+      "version": 1
+    }
+  },
+  "setup_family": "trend_continuation"
+}

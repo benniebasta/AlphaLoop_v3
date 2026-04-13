@@ -23,6 +23,9 @@ class RSIFeature(BaseTool):
     requires_direction = True
 
     async def run(self, context) -> ToolResult:
+        rsi_ob = self.config.get("rsi_overbought", 75.0)
+        rsi_os = self.config.get("rsi_oversold", 25.0)
+
         direction = context.trade_direction.upper()
         m15 = context.indicators.get("M15", {})
         rsi_val = m15.get("rsi")
@@ -34,18 +37,18 @@ class RSIFeature(BaseTool):
                 severity="info",
             )
 
-        if direction == "BUY" and rsi_val > 75:
+        if direction == "BUY" and rsi_val > rsi_ob:
             return ToolResult(
                 passed=False,
-                reason=f"BUY blocked: RSI {rsi_val:.1f} > 75 — overbought",
+                reason=f"BUY blocked: RSI {rsi_val:.1f} > {rsi_ob} — overbought",
                 severity="warn",
                 data={"rsi": rsi_val},
             )
 
-        if direction == "SELL" and rsi_val < 25:
+        if direction == "SELL" and rsi_val < rsi_os:
             return ToolResult(
                 passed=False,
-                reason=f"SELL blocked: RSI {rsi_val:.1f} < 25 — oversold",
+                reason=f"SELL blocked: RSI {rsi_val:.1f} < {rsi_os} — oversold",
                 severity="warn",
                 data={"rsi": rsi_val},
             )
@@ -57,6 +60,9 @@ class RSIFeature(BaseTool):
         )
 
     async def extract_features(self, context) -> FeatureResult:
+        rsi_ob = self.config.get("rsi_overbought", 75.0)
+        rsi_os = self.config.get("rsi_oversold", 25.0)
+
         m15 = context.indicators.get("M15", {})
         rsi_val = m15.get("rsi")
 
@@ -82,7 +88,7 @@ class RSIFeature(BaseTool):
         return FeatureResult(
             group="momentum",
             features={"rsi_quality": round(min(100.0, max(0.0, rsi_quality)), 1)},
-            reference_thresholds={"overbought": 75.0, "oversold": 25.0},
+            reference_thresholds={"overbought": rsi_ob, "oversold": rsi_os},
             meta={"rsi": rsi_val, "direction": direction or "none"},
         )
 

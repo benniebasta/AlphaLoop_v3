@@ -108,16 +108,36 @@ class StructuralInvalidator:
         context,
         *,
         enabled_tools: dict[str, bool] | None = None,
+        signal_mode: str = "",
     ) -> InvalidationResult:
         """Run all applicable invalidation checks.
 
         When *enabled_tools* is provided, strategy-type-dependent checks
         whose corresponding tool is toggled OFF are skipped.
+
+        In ``ai_signal`` mode the AI already processed BOS/FVG/swing context
+        when generating the direction hypothesis — re-running the mechanical
+        checks would contradict the AI's judgment.  Those checks are bypassed.
         """
 
         failures: list[InvalidationFailure] = []
         checks_run: list[str] = []
-        tools = enabled_tools or {}
+        tools = dict(enabled_tools or {})
+
+        # AI-oracle mode: the AI already processed all directional/structural indicators
+        # (BOS/FVG/swing in T2, EMA200/RSI/ADX/MACD/Bollinger in T3, DXY/sentiment in T4).
+        # Re-running mechanical checks on the same data contradicts the AI's judgment.
+        # Execution/safety guards (tick_jump, liq_vacuum, vwap, session, volatility,
+        # news, risk, correlation) still run — the AI does not process those.
+        if signal_mode == "ai_signal":
+            for _tool in (
+                "bos_guard", "fvg_guard", "swing_structure",
+                "ema200_filter", "macd_filter", "adx_filter",
+                "bollinger_filter", "rsi_feature", "dxy_filter",
+                "sentiment_filter", "ema_crossover", "alma_filter",
+                "trendilo", "choppiness_index",
+            ):
+                tools[_tool] = False
 
         # --- Universal checks ---
         self._check_sl_direction(signal, failures, checks_run)

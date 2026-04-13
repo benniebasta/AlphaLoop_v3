@@ -565,7 +565,7 @@ export async function render(container) {
     }
     const cur = parseInt(daysInput.value);
     if (cur > yfMax && yfMax < mt5Max) {
-      hintEl.textContent = `Without MT5: yfinance limits ${tf} to ${yfMax} days`;
+      hintEl.textContent = `Fallback only: yfinance caps ${tf} at ${yfMax} days (MT5 required for full history)`;
     } else {
       hintEl.textContent = '';
     }

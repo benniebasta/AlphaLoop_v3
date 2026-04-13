@@ -89,16 +89,14 @@ class VolatilityFilter(BaseTool):
                 meta={"status": "unavailable"},
             )
 
-        max_atr_pct = 2.5
-        min_atr_pct = 0.05
+        max_atr_pct = self.config.get("max_atr_pct", 2.5)
+        min_atr_pct = self.config.get("min_atr_pct", 0.05)
 
-        # volatility_regime: 100 = optimal normal range, 0 = extreme/dead
         if atr_pct > max_atr_pct:
             score = max(0.0, 100 - (atr_pct - max_atr_pct) / max_atr_pct * 100)
         elif atr_pct < min_atr_pct:
             score = max(0.0, atr_pct / min_atr_pct * 20)
         else:
-            # Map 0.05-2.5 to a bell curve peaking at ~0.5-1.5%
             mid = (max_atr_pct + min_atr_pct) / 2
             dist = abs(atr_pct - mid) / (max_atr_pct - min_atr_pct)
             score = max(50.0, 100 - dist * 100)

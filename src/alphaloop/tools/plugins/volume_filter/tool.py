@@ -12,10 +12,6 @@ from __future__ import annotations
 
 from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
-# Minimum volume ratio relative to 20-bar average
-_MIN_VOL_RATIO = 0.8
-
-
 class VolumeFilter(BaseTool):
     """
     Volume participation filter.
@@ -29,6 +25,8 @@ class VolumeFilter(BaseTool):
     description = "Volume participation filter — blocks low-volume entries"
 
     async def run(self, context) -> ToolResult:
+        min_vol_ratio = self.config.get("min_vol_ratio", 0.8)
+
         m15_ind    = context.indicators.get("M15", {})
         vol_ratio  = m15_ind.get("volume_ratio")
 
@@ -39,21 +37,21 @@ class VolumeFilter(BaseTool):
                 severity="info",
             )
 
-        if vol_ratio >= _MIN_VOL_RATIO:
+        if vol_ratio >= min_vol_ratio:
             return ToolResult(
                 passed=True,
                 reason=f"Volume ratio {vol_ratio:.2f}x avg — adequate participation",
-                data={"volume_ratio": vol_ratio, "min_ratio": _MIN_VOL_RATIO},
+                data={"volume_ratio": vol_ratio, "min_ratio": min_vol_ratio},
             )
 
         return ToolResult(
             passed=False,
             reason=(
                 f"Entry blocked: volume ratio {vol_ratio:.2f}x is below "
-                f"minimum {_MIN_VOL_RATIO}x — below-average participation"
+                f"minimum {min_vol_ratio}x — below-average participation"
             ),
             severity="warn",
-            data={"volume_ratio": vol_ratio, "min_ratio": _MIN_VOL_RATIO},
+            data={"volume_ratio": vol_ratio, "min_ratio": min_vol_ratio},
         )
 
     async def extract_features(self, context) -> FeatureResult:
@@ -80,6 +78,6 @@ class VolumeFilter(BaseTool):
         return FeatureResult(
             group="volume",
             features={"volume_confirmation": round(score, 1)},
-            reference_thresholds={"min_vol_ratio": _MIN_VOL_RATIO},
+            reference_thresholds={"min_vol_ratio": self.config.get("min_vol_ratio", 0.8)},
             meta={"volume_ratio": vol_ratio},
         )

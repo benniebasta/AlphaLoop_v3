@@ -246,6 +246,9 @@ def create_webui_app(container: Container) -> FastAPI:
     from alphaloop.webui.routes.assets import router as assets_router
     app.include_router(assets_router)
 
+    from alphaloop.webui.routes.asset_params import router as asset_params_router
+    app.include_router(asset_params_router)
+
     from alphaloop.webui.routes.execution import router as execution_router
     app.include_router(execution_router)
 

@@ -24,14 +24,18 @@ _ASSET_CLASS_DEFAULTS: dict[str, dict[str, object]] = {
     "crypto": {
         # 24/7 markets — Asia sessions are valid trading windows
         "session_filter": {
-            "min_session_score": 0.20,   # Allow asia_early (0.20) — crypto never sleeps
+            "min_session_score": 0.20,
         },
-        # Crypto is volatile by nature — allow wider ATR bands
         "volatility_filter": {
             "max_atr_pct": 5.0,
             "min_atr_pct": 0.02,
         },
-        # Wider SL/TP to absorb crypto micro-volatility
+        "adx_filter": {
+            "min_adx": 18.0,   # Crypto trends fast — slightly lower ADX bar
+        },
+        "fvg_guard": {
+            "min_size_atr": 0.10,  # Smaller FVGs acceptable in fast crypto markets
+        },
         "tick_jump_guard": {
             "max_tick_jump_atr": 1.5,
         },
@@ -39,13 +43,29 @@ _ASSET_CLASS_DEFAULTS: dict[str, dict[str, object]] = {
             "max_range_atr": 4.0,
             "min_body_pct": 20.0,
         },
-        # More extension allowed — crypto can run far from VWAP
         "vwap_guard": {
             "max_extension_atr": 3.0,
         },
+        "rsi_feature": {
+            "rsi_overbought": 75.0,
+            "rsi_oversold": 25.0,
+        },
+        "bollinger_filter": {
+            "buy_max_pct_b": 0.75,
+            "sell_min_pct_b": 0.25,
+        },
+        "trendilo": {
+            "strength_threshold": 25.0,
+        },
+        "choppiness_index": {
+            "choppy_threshold": 65.0,
+            "trending_threshold": 40.0,
+        },
+        "volume_filter": {
+            "min_vol_ratio": 0.60,
+        },
     },
     "spot_metal": {
-        # Metals: standard session discipline, tighter spread
         "session_filter": {
             "min_session_score": 0.70,
         },
@@ -53,9 +73,42 @@ _ASSET_CLASS_DEFAULTS: dict[str, dict[str, object]] = {
             "max_atr_pct": 3.0,
             "min_atr_pct": 0.03,
         },
-        # DXY alignment is more important for metals
+        "adx_filter": {
+            "min_adx": 20.0,
+        },
+        "fvg_guard": {
+            "min_size_atr": 0.15,
+        },
+        "tick_jump_guard": {
+            "max_tick_jump_atr": 0.9,
+        },
+        "liq_vacuum_guard": {
+            "max_range_atr": 3.0,
+            "min_body_pct": 25.0,
+        },
+        "vwap_guard": {
+            "max_extension_atr": 2.0,
+        },
         "dxy_filter": {
             "block_strength_threshold": 0.40,
+        },
+        "rsi_feature": {
+            "rsi_overbought": 70.0,
+            "rsi_oversold": 30.0,
+        },
+        "bollinger_filter": {
+            "buy_max_pct_b": 0.70,
+            "sell_min_pct_b": 0.30,
+        },
+        "trendilo": {
+            "strength_threshold": 25.0,
+        },
+        "choppiness_index": {
+            "choppy_threshold": 61.8,
+            "trending_threshold": 38.2,
+        },
+        "volume_filter": {
+            "min_vol_ratio": 0.70,
         },
     },
     "forex_major": {
@@ -66,8 +119,39 @@ _ASSET_CLASS_DEFAULTS: dict[str, dict[str, object]] = {
             "max_atr_pct": 1.5,
             "min_atr_pct": 0.01,
         },
+        "adx_filter": {
+            "min_adx": 22.0,   # Forex needs stronger trend confirmation
+        },
+        "fvg_guard": {
+            "min_size_atr": 0.12,
+        },
+        "tick_jump_guard": {
+            "max_tick_jump_atr": 0.7,
+        },
+        "liq_vacuum_guard": {
+            "max_range_atr": 2.5,
+            "min_body_pct": 30.0,
+        },
         "vwap_guard": {
             "max_extension_atr": 1.5,
+        },
+        "rsi_feature": {
+            "rsi_overbought": 70.0,
+            "rsi_oversold": 30.0,
+        },
+        "bollinger_filter": {
+            "buy_max_pct_b": 0.65,
+            "sell_min_pct_b": 0.35,
+        },
+        "trendilo": {
+            "strength_threshold": 30.0,
+        },
+        "choppiness_index": {
+            "choppy_threshold": 61.8,
+            "trending_threshold": 38.2,
+        },
+        "volume_filter": {
+            "min_vol_ratio": 0.75,
         },
     },
     "forex_minor": {
@@ -78,9 +162,42 @@ _ASSET_CLASS_DEFAULTS: dict[str, dict[str, object]] = {
             "max_atr_pct": 2.0,
             "min_atr_pct": 0.01,
         },
+        "adx_filter": {
+            "min_adx": 22.0,
+        },
+        "fvg_guard": {
+            "min_size_atr": 0.12,
+        },
+        "tick_jump_guard": {
+            "max_tick_jump_atr": 0.8,
+        },
+        "liq_vacuum_guard": {
+            "max_range_atr": 2.5,
+            "min_body_pct": 30.0,
+        },
+        "vwap_guard": {
+            "max_extension_atr": 1.5,
+        },
+        "rsi_feature": {
+            "rsi_overbought": 70.0,
+            "rsi_oversold": 30.0,
+        },
+        "bollinger_filter": {
+            "buy_max_pct_b": 0.68,
+            "sell_min_pct_b": 0.32,
+        },
+        "trendilo": {
+            "strength_threshold": 30.0,
+        },
+        "choppiness_index": {
+            "choppy_threshold": 62.0,
+            "trending_threshold": 38.0,
+        },
+        "volume_filter": {
+            "min_vol_ratio": 0.70,
+        },
     },
     "index": {
-        # Indices: strict session discipline (market hours only)
         "session_filter": {
             "min_session_score": 0.80,
         },
@@ -88,8 +205,39 @@ _ASSET_CLASS_DEFAULTS: dict[str, dict[str, object]] = {
             "max_atr_pct": 2.5,
             "min_atr_pct": 0.02,
         },
+        "adx_filter": {
+            "min_adx": 22.0,
+        },
+        "fvg_guard": {
+            "min_size_atr": 0.15,
+        },
         "tick_jump_guard": {
             "max_tick_jump_atr": 1.2,
+        },
+        "liq_vacuum_guard": {
+            "max_range_atr": 3.0,
+            "min_body_pct": 25.0,
+        },
+        "vwap_guard": {
+            "max_extension_atr": 2.0,
+        },
+        "rsi_feature": {
+            "rsi_overbought": 72.0,
+            "rsi_oversold": 28.0,
+        },
+        "bollinger_filter": {
+            "buy_max_pct_b": 0.70,
+            "sell_min_pct_b": 0.30,
+        },
+        "trendilo": {
+            "strength_threshold": 25.0,
+        },
+        "choppiness_index": {
+            "choppy_threshold": 60.0,
+            "trending_threshold": 38.2,
+        },
+        "volume_filter": {
+            "min_vol_ratio": 0.80,
         },
     },
 }

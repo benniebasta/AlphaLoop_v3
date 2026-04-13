@@ -19,29 +19,60 @@ router = APIRouter(prefix="/api/assets", tags=["assets"])
 # Canonical tool keys — must stay in sync with SeedLab bt-tool-* checkbox IDs
 # key → bt-tool-{key.replace("_", "-")}
 _ALL_TOOLS = [
-    "session", "volatility", "ema200",
-    "bos", "fvg", "tick_jump", "liq_vacuum", "vwap",
+    # Core
+    "session", "volatility", "news_filter", "risk_filter",
+    # Structure
+    "ema200", "bos", "fvg", "tick_jump", "liq_vacuum", "vwap",
+    # Technical
     "macd", "bollinger", "adx", "volume", "swing",
+    # Trend
+    "ema_crossover", "alma_filter", "trendilo",
+    # Momentum
+    "rsi_feature", "fast_fingers", "choppiness_index",
+    # Macro
+    "dxy_filter", "sentiment_filter", "correlation_guard",
 ]
 
 
 def _default_tools(ac: AssetConfig) -> dict[str, bool]:
     """Derive sensible default tool presets from an AssetConfig."""
-    is_crypto = ac.asset_class == "crypto"
+    cls        = ac.asset_class
+    is_crypto  = cls == "crypto"
+    is_metal   = cls == "spot_metal"
+    is_fx_maj  = cls == "forex_major"
+    is_fx      = cls in ("forex_major", "forex_minor")
+    is_index   = cls == "index"
     return {
-        "session":     not is_crypto,   # crypto is 24/7 — session filter irrelevant
-        "volatility":  True,
-        "ema200":      True,
-        "bos":         False,
-        "fvg":         False,
-        "tick_jump":   False,
-        "liq_vacuum":  False,
-        "vwap":        False,
-        "macd":        False,
-        "bollinger":   False,
-        "adx":         False,
-        "volume":      False,
-        "swing":       False,
+        # Core
+        "session":          not is_crypto,
+        "volatility":       True,
+        "news_filter":      True,
+        "risk_filter":      True,
+        # Structure
+        "ema200":           True,
+        "bos":              is_metal,
+        "fvg":              is_metal,
+        "tick_jump":        is_crypto or is_metal,
+        "liq_vacuum":       is_metal,
+        "vwap":             is_crypto or is_metal or is_index,
+        # Technical
+        "macd":             is_fx or is_index,
+        "bollinger":        False,
+        "adx":              is_metal or is_fx,
+        "volume":           is_crypto or is_index,
+        "swing":            is_fx_maj,
+        # Trend
+        "ema_crossover":    is_fx_maj or is_index,
+        "alma_filter":      is_metal,
+        "trendilo":         is_metal or is_fx,
+        # Momentum
+        "rsi_feature":      True,
+        "fast_fingers":     is_crypto or is_metal or is_index,
+        "choppiness_index": True,
+        # Macro
+        "dxy_filter":       is_metal or is_fx_maj,
+        "sentiment_filter": is_crypto,
+        "correlation_guard": True,
     }
 
 
@@ -56,12 +87,13 @@ async def list_assets(
         raw = await repo.get(f"ASSET_TOOLS_{symbol}", "")
         if raw:
             try:
-                tools = json.loads(raw)
-                # Fill any missing keys with defaults (new tools added later)
-                defaults = _default_tools(ac)
-                for k in _ALL_TOOLS:
-                    if k not in tools:
-                        tools[k] = defaults[k]
+                stored = json.loads(raw)
+                if len(stored) < len(_ALL_TOOLS):
+                    # Stored data is stale (missing new tools) — migrate to full defaults
+                    tools = _default_tools(ac)
+                    await repo.set_many({f"ASSET_TOOLS_{symbol}": json.dumps(tools)})
+                else:
+                    tools = stored
             except (json.JSONDecodeError, TypeError):
                 tools = _default_tools(ac)
         else:
@@ -88,6 +120,34 @@ def _require_operator_auth(authorization: str) -> None:
     scheme, _, provided = authorization.partition(" ")
     if scheme.lower() != "bearer" or provided.strip() != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@router.post("/{symbol}/tools/reset")
+async def reset_asset_tools(
+    symbol: str,
+    request: Request,
+    authorization: str = Header(default=""),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Reset a symbol's tool preset to class defaults."""
+    _require_operator_auth(authorization)
+    symbol = symbol.upper()
+    if symbol not in ASSETS:
+        raise HTTPException(status_code=404, detail=f"Symbol '{symbol}' not in asset library")
+    ac = ASSETS[symbol]
+    tools = _default_tools(ac)
+    repo = SettingsRepository(session)
+    await repo.set_many({f"ASSET_TOOLS_{symbol}": json.dumps(tools)})
+    session.add(OperatorAuditLog(
+        operator="webui",
+        action="asset_tools_reset",
+        target=symbol,
+        old_value=None,
+        new_value=json.dumps(tools, sort_keys=True),
+        source_ip=request.client.host if request and request.client else "unknown",
+    ))
+    await session.commit()
+    return {"status": "ok", "symbol": symbol, "tools": tools}
 
 
 @router.put("/{symbol}/tools")

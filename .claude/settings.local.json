@@ -220,7 +220,10 @@
       "Bash(curl -s \"http://localhost:8090/api/pipeline/funnel?hours=1&source=historical_replay\")",
       "Bash(curl -s http://localhost:8090/api/strategies)",
       "Bash(curl -s \"http://localhost:8090/api/strategies/phantom-knight-BTCUSD_ai/v1\")",
-      "Bash(wc -l docs/planning/*.md docs/claude/*.md docs/references/*.md)"
+      "Bash(wc -l docs/planning/*.md docs/claude/*.md docs/references/*.md)",
+      "Bash(taskkill //PID 18388 //F)",
+      "Bash(gh api:*)",
+      "Bash(grep -E \"\\\\.\\(py\\)$\")"
     ]
   }
 }

@@ -190,6 +190,29 @@ def run_vectorbt_backtest(
     rsi_os = float(resolved_params.get("rsi_os", 30.0))
     setup_tag = resolve_algorithmic_setup_tag(strategy_payload)
 
+    # --- Pre-compute ADX as Series (per-bar indexable) ---
+    adx_series = adx_data.get("adx") if isinstance(adx_data.get("adx"), pd.Series) else None
+    plus_di_series = adx_data.get("plus_di") if isinstance(adx_data.get("plus_di"), pd.Series) else None
+    minus_di_series = adx_data.get("minus_di") if isinstance(adx_data.get("minus_di"), pd.Series) else None
+
+    # --- Extract active safety filter set ---
+    tools_raw = resolved_params.get("tools") or params.get("tools") or {}
+    if isinstance(tools_raw, (list, tuple, set)):
+        active_filters: set[str] = set(tools_raw)
+    else:
+        active_filters = {k for k, v in tools_raw.items() if v}
+
+    # --- Pre-compute EMA200 if needed (single pass, O(n)) ---
+    ema200_s = ema(close, 200) if "ema200_filter" in active_filters else None
+
+    # --- Session score helper (imported once) ---
+    _session_score_fn = None
+    if "session_filter" in active_filters:
+        try:
+            from alphaloop.utils.time import get_session_score_for_hour as _session_score_fn  # noqa: F401
+        except ImportError:
+            pass
+
     # --- Bar-by-bar simulation ---
     n = len(ohlcv_df)
     entries = np.full(n, False)
@@ -251,12 +274,18 @@ def run_vectorbt_backtest(
         cur_atr = float(atr_s.iloc[i]) if not pd.isna(atr_s.iloc[i]) else 0
 
         # ADX
-        cur_adx = float(adx_data.get("adx", 0)) if isinstance(adx_data.get("adx"), (int, float)) else None
-        cur_plus_di = float(adx_data.get("plus_di", 0)) if isinstance(adx_data.get("plus_di"), (int, float)) else None
-        cur_minus_di = float(adx_data.get("minus_di", 0)) if isinstance(adx_data.get("minus_di"), (int, float)) else None
+        # ADX: index pre-computed Series per bar
+        cur_adx = float(adx_series.iloc[i]) if adx_series is not None and not pd.isna(adx_series.iloc[i]) else None
+        cur_plus_di = float(plus_di_series.iloc[i]) if plus_di_series is not None and not pd.isna(plus_di_series.iloc[i]) else None
+        cur_minus_di = float(minus_di_series.iloc[i]) if minus_di_series is not None and not pd.isna(minus_di_series.iloc[i]) else None
 
-        # BOS data
-        bos_data = detect_bos(ohlcv_df.iloc[:i + 1], cur_atr, lookback=20)
+        # Bollinger %B per bar
+        cur_bb_pctb = float(bb_pctb_s.iloc[i]) if bb_pctb_s is not None and not pd.isna(bb_pctb_s.iloc[i]) else None
+
+        # BOS: windowed slice — only last 60 bars needed (O(1) not O(n))
+        _win_start = max(0, i - 59)
+        _win = ohlcv_df.iloc[_win_start:i + 1]
+        bos_data = detect_bos(_win, cur_atr, lookback=20)
 
         result = compute_direction(
             signal_rules=signal_rules,
@@ -271,7 +300,7 @@ def run_vectorbt_backtest(
             rsi=cur_rsi,
             macd_hist=cur_macd,
             prev_macd_hist=prev_macd,
-            bb_pct_b=None,  # bollinger pct_b series access varies by version
+            bb_pct_b=cur_bb_pctb,
             adx=cur_adx,
             plus_di=cur_plus_di,
             minus_di=cur_minus_di,
@@ -287,9 +316,93 @@ def run_vectorbt_backtest(
         opportunities += 1
 
         # --- Construct trade using live TradeConstructor ---
-        # Build indicators dict matching what market_context produces
-        swing_data = find_swing_highs_lows(ohlcv_df.iloc[:i + 1])
-        fvg_data = detect_fvg(ohlcv_df.iloc[:i + 1], cur_atr)
+        # Windowed slices — O(1) per bar, not O(n)
+        swing_data = find_swing_highs_lows(_win)
+        fvg_data = detect_fvg(_win, cur_atr)
+
+        # --- Safety tool filters (match live trading behaviour) ---
+        _filtered = False
+
+        if "volatility_filter" in active_filters:
+            atr_pct = (cur_atr / cur_price) * 100 if cur_price > 0 else 0
+            if atr_pct > 2.5 or atr_pct < 0.05:
+                _filtered = True
+
+        if not _filtered and "session_filter" in active_filters and _session_score_fn and timestamps:
+            ts = timestamps[i]
+            bar_hour = ts.hour if hasattr(ts, "hour") else 12
+            if _session_score_fn(bar_hour) < 0.50:
+                _filtered = True
+
+        if not _filtered and "ema200_filter" in active_filters and ema200_s is not None:
+            e200 = float(ema200_s.iloc[i]) if not pd.isna(ema200_s.iloc[i]) else None
+            if e200 is not None:
+                if direction == "BUY" and cur_price < e200:
+                    _filtered = True
+                elif direction == "SELL" and cur_price > e200:
+                    _filtered = True
+
+        if not _filtered and "tick_jump_guard" in active_filters and i >= 2:
+            move = abs(float(ohlcv_df["close"].iloc[i]) - float(ohlcv_df["close"].iloc[i - 2]))
+            if cur_atr > 0 and move / cur_atr > 0.8:
+                _filtered = True
+
+        if not _filtered and "liq_vacuum_guard" in active_filters:
+            bar_range = float(ohlcv_df["high"].iloc[i]) - float(ohlcv_df["low"].iloc[i])
+            body = abs(float(ohlcv_df["open"].iloc[i]) - float(ohlcv_df["close"].iloc[i]))
+            if bar_range > 0 and cur_atr > 0 and bar_range / cur_atr > 2.5 and (body / bar_range) * 100 < 30:
+                _filtered = True
+
+        if not _filtered and "vwap_guard" in active_filters and cur_ema_fast is not None:
+            if cur_atr > 0 and abs(cur_price - cur_ema_fast) / cur_atr > 1.5:
+                _filtered = True
+
+        if not _filtered and "macd_filter" in active_filters and cur_macd is not None:
+            if direction == "BUY" and cur_macd < 0:
+                _filtered = True
+            elif direction == "SELL" and cur_macd > 0:
+                _filtered = True
+
+        if not _filtered and "bollinger_filter" in active_filters and cur_bb_pctb is not None:
+            if direction == "BUY" and cur_bb_pctb > 0.7:
+                _filtered = True
+            elif direction == "SELL" and cur_bb_pctb < 0.3:
+                _filtered = True
+
+        if not _filtered and "adx_filter" in active_filters and cur_adx is not None:
+            adx_min = float(resolved_params.get("adx_min_threshold", 25.0))
+            if cur_adx < adx_min:
+                _filtered = True
+
+        if not _filtered and "swing_structure" in active_filters:
+            sh_prices = [h["price"] for h in swing_data.get("swing_highs", [])]
+            sl_prices_sw = [lo["price"] for lo in swing_data.get("swing_lows", [])]
+            if len(sh_prices) >= 2 and len(sl_prices_sw) >= 2:
+                structure = (
+                    "bullish" if sh_prices[-1] > sh_prices[-2] and sl_prices_sw[-1] > sl_prices_sw[-2]
+                    else "bearish" if sh_prices[-1] < sh_prices[-2] and sl_prices_sw[-1] < sl_prices_sw[-2]
+                    else "ranging"
+                )
+                if direction == "BUY" and structure != "bullish":
+                    _filtered = True
+                elif direction == "SELL" and structure != "bearish":
+                    _filtered = True
+
+        if not _filtered and "bos_guard" in active_filters:
+            if direction == "BUY" and not bos_data.get("bullish_bos"):
+                _filtered = True
+            elif direction == "SELL" and not bos_data.get("bearish_bos"):
+                _filtered = True
+
+        if not _filtered and "fvg_guard" in active_filters:
+            if direction == "BUY" and not fvg_data.get("has_bullish"):
+                _filtered = True
+            elif direction == "SELL" and not fvg_data.get("has_bearish"):
+                _filtered = True
+
+        if _filtered:
+            skipped_reasons["tool_filter"] = skipped_reasons.get("tool_filter", 0) + 1
+            continue
 
         indicators = {
             "swing_highs": swing_data["swing_highs"],
@@ -421,15 +534,24 @@ def run_vectorbt_backtest(
     avg_rr = round(sum(rr_ratios) / len(rr_ratios), 3) if rr_ratios else 0.0
     avg_sl_dist = round(sum(sl_distances) / len(sl_distances), 1) if sl_distances else 0.0
 
-    # Sharpe
+    # Sharpe / Sortino — annualise by trade frequency, not a fixed daily factor
+    # Estimate trades-per-year from the data window length
     pnl_arr = np.array(trades_pnl, dtype=np.float64)
-    std = float(np.std(pnl_arr, ddof=1)) if trade_count >= 10 else 0
-    sharpe = round(float(np.mean(pnl_arr) / std * (252 ** 0.5)), 3) if std > 0 else None
+    r_arr = pnl_arr / equity[0]  # per-trade returns relative to starting balance
+    if len(timestamps) >= 2:
+        span_days = max((timestamps[-1] - timestamps[0]).days, 1)
+    else:
+        span_days = len(ohlcv_df)  # fallback: assume 1 bar ≈ 1 day
+    trades_per_year = trade_count / span_days * 365
+    ann_factor = float(trades_per_year ** 0.5)
+
+    std = float(np.std(r_arr, ddof=1)) if trade_count >= 10 else 0
+    sharpe = round(float(np.mean(r_arr) / std * ann_factor), 3) if std > 0 else None
 
     # Sortino
-    downside = pnl_arr[pnl_arr < 0]
-    down_std = float(np.std(downside, ddof=1)) if len(downside) >= 5 else 0
-    sortino = round(float(np.mean(pnl_arr) / down_std * (252 ** 0.5)), 3) if down_std > 0 else None
+    downside_r = r_arr[r_arr < 0]
+    down_std = float(np.std(downside_r, ddof=1)) if len(downside_r) >= 5 else 0
+    sortino = round(float(np.mean(r_arr) / down_std * ann_factor), 3) if down_std > 0 else None
 
     # Max drawdown
     eq_arr = np.array(equity, dtype=np.float64)

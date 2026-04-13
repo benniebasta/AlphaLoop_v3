@@ -388,7 +388,9 @@ class PipelineOrchestrator:
             # Stage 4A: Structural Invalidation
             # ============================================================
             inv = await self.invalidator.validate(
-                signal, regime, context, enabled_tools=self.enabled_tools,
+                signal, regime, context,
+                enabled_tools=self.enabled_tools,
+                signal_mode=mode,
             )
             result.invalidation = inv
             self._record_stage(

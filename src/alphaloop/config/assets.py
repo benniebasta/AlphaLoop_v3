@@ -105,6 +105,14 @@ def _tf(
     liq_spike: float = 0.0,
     tick_atr: float = 0.0,
     vwap_band: float = 0.0,
+    rsi_ob: float = 0.0,
+    rsi_os: float = 0.0,
+    bb_buy_max: float = 0.0,
+    bb_sell_min: float = 0.0,
+    trendilo_str: float = 0.0,
+    chop_thresh: float = 0.0,
+    trend_thresh: float = 0.0,
+    vol_ratio: float = 0.0,
 ) -> dict[str, object]:
     """Build one timeframe's calibration dict for an asset."""
     d: dict[str, object] = {
@@ -122,15 +130,37 @@ def _tf(
     if min_atr_pct:
         tools_cfg.setdefault("volatility_filter", {})["min_atr_pct"] = min_atr_pct
     if adx_thresh:
-        tools_cfg["adx_filter"] = {"adx_threshold": adx_thresh}
+        tools_cfg["adx_filter"] = {"min_adx": adx_thresh}
     if fvg_min_atr:
-        tools_cfg["fvg_guard"] = {"fvg_min_atr": fvg_min_atr}
+        tools_cfg["fvg_guard"] = {"min_size_atr": fvg_min_atr}
     if liq_spike:
-        tools_cfg["liq_vacuum_guard"] = {"spike_mult": liq_spike}
+        tools_cfg["liq_vacuum_guard"] = {"max_range_atr": liq_spike}
     if tick_atr:
-        tools_cfg["tick_jump_guard"] = {"tick_jump_atr_max": tick_atr}
+        tools_cfg["tick_jump_guard"] = {"max_tick_jump_atr": tick_atr}
     if vwap_band:
-        tools_cfg["vwap_guard"] = {"vwap_band_atr": vwap_band}
+        tools_cfg["vwap_guard"] = {"max_extension_atr": vwap_band}
+    if rsi_ob or rsi_os:
+        tools_cfg["rsi_feature"] = {}
+        if rsi_ob:
+            tools_cfg["rsi_feature"]["rsi_overbought"] = rsi_ob
+        if rsi_os:
+            tools_cfg["rsi_feature"]["rsi_oversold"] = rsi_os
+    if bb_buy_max or bb_sell_min:
+        tools_cfg["bollinger_filter"] = {}
+        if bb_buy_max:
+            tools_cfg["bollinger_filter"]["buy_max_pct_b"] = bb_buy_max
+        if bb_sell_min:
+            tools_cfg["bollinger_filter"]["sell_min_pct_b"] = bb_sell_min
+    if trendilo_str:
+        tools_cfg["trendilo"] = {"strength_threshold": trendilo_str}
+    if chop_thresh or trend_thresh:
+        tools_cfg["choppiness_index"] = {}
+        if chop_thresh:
+            tools_cfg["choppiness_index"]["choppy_threshold"] = chop_thresh
+        if trend_thresh:
+            tools_cfg["choppiness_index"]["trending_threshold"] = trend_thresh
+    if vol_ratio:
+        tools_cfg["volume_filter"] = {"min_vol_ratio": vol_ratio}
     if tools_cfg:
         d["tools_config"] = tools_cfg
     return d
@@ -138,103 +168,103 @@ def _tf(
 
 # --- Per-asset TF calibration tables ---
 _XAUUSD_TF = {
-    "M1":  _tf(30, 150, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.008, min_atr_pct=0.001),
-    "M5":  _tf(60, 250, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.015, min_atr_pct=0.002),
-    "M15": _tf(150, 500, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.03, min_atr_pct=0.003),
-    "M30": _tf(200, 600, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.04, min_atr_pct=0.004),
-    "H1":  _tf(250, 800, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.06, min_atr_pct=0.005),
-    "H4":  _tf(350, 1200, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.08, min_atr_pct=0.006),
-    "D1":  _tf(500, 2000, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.12, min_atr_pct=0.008),
+    "M1":  _tf(30, 150, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.008, min_atr_pct=0.001, adx_thresh=18, fvg_min_atr=0.10, liq_spike=2.0, tick_atr=0.7, vwap_band=1.2, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "M5":  _tf(60, 250, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.015, min_atr_pct=0.002, adx_thresh=20, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.8, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "M15": _tf(150, 500, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.03, min_atr_pct=0.003, adx_thresh=20, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.9, vwap_band=1.8, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "M30": _tf(200, 600, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.04, min_atr_pct=0.004, adx_thresh=22, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=1.0, vwap_band=2.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "H1":  _tf(250, 800, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.06, min_atr_pct=0.005, adx_thresh=22, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.1, vwap_band=2.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "H4":  _tf(350, 1200, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.08, min_atr_pct=0.006, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.0, tick_atr=1.3, vwap_band=3.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "D1":  _tf(500, 2000, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.12, min_atr_pct=0.008, adx_thresh=25, fvg_min_atr=0.25, liq_spike=4.5, tick_atr=1.5, vwap_band=3.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
 }
 
 _XAGUSD_TF = {
-    "M1":  _tf(40, 200, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.010),
-    "M5":  _tf(80, 350, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.020),
-    "M15": _tf(200, 800, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.040),
-    "M30": _tf(250, 900, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.050),
-    "H1":  _tf(300, 1100, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.070),
-    "H4":  _tf(450, 1500, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.090),
-    "D1":  _tf(600, 2500, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.140),
+    "M1":  _tf(40, 200, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.010, min_atr_pct=0.001, adx_thresh=18, fvg_min_atr=0.10, liq_spike=2.5, tick_atr=0.8, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "M5":  _tf(80, 350, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.020, min_atr_pct=0.002, adx_thresh=20, fvg_min_atr=0.12, liq_spike=3.0, tick_atr=0.9, vwap_band=1.8, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "M15": _tf(200, 800, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.040, min_atr_pct=0.003, adx_thresh=20, fvg_min_atr=0.15, liq_spike=3.5, tick_atr=1.0, vwap_band=2.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "M30": _tf(250, 900, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.050, min_atr_pct=0.004, adx_thresh=22, fvg_min_atr=0.15, liq_spike=3.5, tick_atr=1.1, vwap_band=2.2, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "H1":  _tf(300, 1100, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.070, min_atr_pct=0.005, adx_thresh=22, fvg_min_atr=0.18, liq_spike=4.0, tick_atr=1.2, vwap_band=2.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "H4":  _tf(450, 1500, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.090, min_atr_pct=0.006, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.5, tick_atr=1.4, vwap_band=3.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
+    "D1":  _tf(600, 2500, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.140, min_atr_pct=0.008, adx_thresh=25, fvg_min_atr=0.25, liq_spike=5.0, tick_atr=1.6, vwap_band=3.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.70),
 }
 
 _BTCUSD_TF = {
-    "M1":  _tf(100, 1000, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.010),
-    "M5":  _tf(200, 2000, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.020),
-    "M15": _tf(500, 5000, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.040),
-    "M30": _tf(600, 5500, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.050),
-    "H1":  _tf(800, 7000, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.070),
-    "H4":  _tf(1200, 10000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.100),
-    "D1":  _tf(2000, 15000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.150),
+    "M1":  _tf(100, 1000, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.010, min_atr_pct=0.002, adx_thresh=16, fvg_min_atr=0.08, liq_spike=3.5, tick_atr=1.2, vwap_band=2.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "M5":  _tf(200, 2000, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.020, min_atr_pct=0.003, adx_thresh=18, fvg_min_atr=0.10, liq_spike=4.0, tick_atr=1.4, vwap_band=3.0, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "M15": _tf(500, 5000, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.040, min_atr_pct=0.005, adx_thresh=18, fvg_min_atr=0.10, liq_spike=4.5, tick_atr=1.5, vwap_band=3.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "M30": _tf(600, 5500, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.050, min_atr_pct=0.006, adx_thresh=20, fvg_min_atr=0.12, liq_spike=4.5, tick_atr=1.6, vwap_band=3.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "H1":  _tf(800, 7000, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.070, min_atr_pct=0.008, adx_thresh=20, fvg_min_atr=0.12, liq_spike=5.0, tick_atr=1.8, vwap_band=4.0, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "H4":  _tf(1200, 10000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.100, min_atr_pct=0.010, adx_thresh=22, fvg_min_atr=0.15, liq_spike=5.5, tick_atr=2.0, vwap_band=4.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "D1":  _tf(2000, 15000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.150, min_atr_pct=0.015, adx_thresh=22, fvg_min_atr=0.18, liq_spike=6.0, tick_atr=2.5, vwap_band=5.0, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
 }
 
 _ETHUSD_TF = {
-    "M1":  _tf(30, 300, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.012),
-    "M5":  _tf(60, 600, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.025),
-    "M15": _tf(150, 1500, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.050),
-    "M30": _tf(200, 2000, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.060),
-    "H1":  _tf(300, 3000, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.080),
-    "H4":  _tf(500, 5000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.120),
-    "D1":  _tf(800, 8000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.170),
+    "M1":  _tf(30, 300, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.012, min_atr_pct=0.002, adx_thresh=16, fvg_min_atr=0.08, liq_spike=3.5, tick_atr=1.2, vwap_band=2.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "M5":  _tf(60, 600, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.025, min_atr_pct=0.003, adx_thresh=18, fvg_min_atr=0.10, liq_spike=4.0, tick_atr=1.4, vwap_band=3.0, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "M15": _tf(150, 1500, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.050, min_atr_pct=0.005, adx_thresh=18, fvg_min_atr=0.10, liq_spike=4.5, tick_atr=1.5, vwap_band=3.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "M30": _tf(200, 2000, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.060, min_atr_pct=0.006, adx_thresh=20, fvg_min_atr=0.12, liq_spike=4.5, tick_atr=1.6, vwap_band=3.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "H1":  _tf(300, 3000, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.080, min_atr_pct=0.008, adx_thresh=20, fvg_min_atr=0.12, liq_spike=5.0, tick_atr=1.8, vwap_band=4.0, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "H4":  _tf(500, 5000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.120, min_atr_pct=0.010, adx_thresh=22, fvg_min_atr=0.15, liq_spike=5.5, tick_atr=2.0, vwap_band=4.5, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
+    "D1":  _tf(800, 8000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.170, min_atr_pct=0.015, adx_thresh=22, fvg_min_atr=0.18, liq_spike=6.0, tick_atr=2.5, vwap_band=5.0, rsi_ob=75, rsi_os=25, bb_buy_max=0.75, bb_sell_min=0.25, trendilo_str=25, chop_thresh=65.0, trend_thresh=40.0, vol_ratio=0.60),
 }
 
 _EURUSD_TF = {
-    "M1":  _tf(5, 30, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003),
-    "M5":  _tf(10, 50, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005),
-    "M15": _tf(20, 100, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010),
-    "M30": _tf(30, 120, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.015),
-    "H1":  _tf(40, 200, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.020),
-    "H4":  _tf(60, 350, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.030),
-    "D1":  _tf(100, 600, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.050),
+    "M1":  _tf(5, 30, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003, min_atr_pct=0.0003, adx_thresh=20, fvg_min_atr=0.10, liq_spike=2.0, tick_atr=0.6, vwap_band=1.2, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M5":  _tf(10, 50, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005, min_atr_pct=0.0005, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.7, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M15": _tf(20, 100, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010, min_atr_pct=0.001, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.7, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M30": _tf(30, 120, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.015, min_atr_pct=0.001, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.8, vwap_band=1.8, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "H1":  _tf(40, 200, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.020, min_atr_pct=0.002, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.9, vwap_band=2.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "H4":  _tf(60, 350, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.030, min_atr_pct=0.003, adx_thresh=25, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.0, vwap_band=2.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "D1":  _tf(100, 600, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.050, min_atr_pct=0.005, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.0, tick_atr=1.2, vwap_band=3.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
 }
 
 _GBPUSD_TF = {
-    "M1":  _tf(6, 35, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.004),
-    "M5":  _tf(12, 60, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.006),
-    "M15": _tf(25, 120, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.012),
-    "M30": _tf(35, 150, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.018),
-    "H1":  _tf(50, 250, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.025),
-    "H4":  _tf(80, 400, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.035),
-    "D1":  _tf(120, 700, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.060),
+    "M1":  _tf(6, 35, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.004, min_atr_pct=0.0004, adx_thresh=20, fvg_min_atr=0.10, liq_spike=2.0, tick_atr=0.6, vwap_band=1.2, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M5":  _tf(12, 60, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.006, min_atr_pct=0.0006, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.7, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M15": _tf(25, 120, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.012, min_atr_pct=0.001, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.8, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M30": _tf(35, 150, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.018, min_atr_pct=0.002, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.9, vwap_band=1.8, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "H1":  _tf(50, 250, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.025, min_atr_pct=0.002, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=1.0, vwap_band=2.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "H4":  _tf(80, 400, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.035, min_atr_pct=0.003, adx_thresh=25, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.1, vwap_band=2.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "D1":  _tf(120, 700, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.060, min_atr_pct=0.005, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.0, tick_atr=1.3, vwap_band=3.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
 }
 
 _USDJPY_TF = {
-    "M1":  _tf(5, 30, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003),
-    "M5":  _tf(10, 50, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005),
-    "M15": _tf(20, 100, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010),
-    "M30": _tf(30, 130, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.015),
-    "H1":  _tf(40, 200, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.020),
-    "H4":  _tf(60, 350, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.030),
-    "D1":  _tf(100, 600, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.050),
+    "M1":  _tf(5, 30, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003, min_atr_pct=0.0003, adx_thresh=20, fvg_min_atr=0.10, liq_spike=2.0, tick_atr=0.6, vwap_band=1.2, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M5":  _tf(10, 50, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005, min_atr_pct=0.0005, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.7, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M15": _tf(20, 100, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010, min_atr_pct=0.001, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.7, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "M30": _tf(30, 130, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.015, min_atr_pct=0.001, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.8, vwap_band=1.8, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "H1":  _tf(40, 200, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.020, min_atr_pct=0.002, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.9, vwap_band=2.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "H4":  _tf(60, 350, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.030, min_atr_pct=0.003, adx_thresh=25, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.0, vwap_band=2.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
+    "D1":  _tf(100, 600, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.050, min_atr_pct=0.005, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.0, tick_atr=1.2, vwap_band=3.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.65, bb_sell_min=0.35, trendilo_str=30, chop_thresh=61.8, trend_thresh=38.2, vol_ratio=0.75),
 }
 
 _AUDUSD_TF = {
-    "M1":  _tf(4, 25, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003),
-    "M5":  _tf(8, 40, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005),
-    "M15": _tf(15, 80, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010),
-    "M30": _tf(20, 100, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.012),
-    "H1":  _tf(30, 150, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.018),
-    "H4":  _tf(50, 300, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.028),
-    "D1":  _tf(80, 500, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.045),
+    "M1":  _tf(4, 25, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003, min_atr_pct=0.0003, adx_thresh=20, fvg_min_atr=0.10, liq_spike=2.0, tick_atr=0.6, vwap_band=1.2, rsi_ob=70, rsi_os=30, bb_buy_max=0.68, bb_sell_min=0.32, trendilo_str=30, chop_thresh=62.0, trend_thresh=38.0, vol_ratio=0.70),
+    "M5":  _tf(8, 40, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005, min_atr_pct=0.0005, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.7, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.68, bb_sell_min=0.32, trendilo_str=30, chop_thresh=62.0, trend_thresh=38.0, vol_ratio=0.70),
+    "M15": _tf(15, 80, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010, min_atr_pct=0.001, adx_thresh=22, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.7, vwap_band=1.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.68, bb_sell_min=0.32, trendilo_str=30, chop_thresh=62.0, trend_thresh=38.0, vol_ratio=0.70),
+    "M30": _tf(20, 100, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.012, min_atr_pct=0.001, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.8, vwap_band=1.8, rsi_ob=70, rsi_os=30, bb_buy_max=0.68, bb_sell_min=0.32, trendilo_str=30, chop_thresh=62.0, trend_thresh=38.0, vol_ratio=0.70),
+    "H1":  _tf(30, 150, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.018, min_atr_pct=0.002, adx_thresh=24, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=0.9, vwap_band=2.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.68, bb_sell_min=0.32, trendilo_str=30, chop_thresh=62.0, trend_thresh=38.0, vol_ratio=0.70),
+    "H4":  _tf(50, 300, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.028, min_atr_pct=0.003, adx_thresh=25, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.0, vwap_band=2.5, rsi_ob=70, rsi_os=30, bb_buy_max=0.68, bb_sell_min=0.32, trendilo_str=30, chop_thresh=62.0, trend_thresh=38.0, vol_ratio=0.70),
+    "D1":  _tf(80, 500, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.045, min_atr_pct=0.005, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.0, tick_atr=1.2, vwap_band=3.0, rsi_ob=70, rsi_os=30, bb_buy_max=0.68, bb_sell_min=0.32, trendilo_str=30, chop_thresh=62.0, trend_thresh=38.0, vol_ratio=0.70),
 }
 
 _US30_TF = {
-    "M1":  _tf(40, 200, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.005),
-    "M5":  _tf(80, 400, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.008),
-    "M15": _tf(200, 1000, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.015),
-    "M30": _tf(250, 1200, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.020),
-    "H1":  _tf(350, 1500, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.030),
-    "H4":  _tf(500, 2500, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.045),
-    "D1":  _tf(800, 4000, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.070),
+    "M1":  _tf(40, 200, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.005, min_atr_pct=0.0005, adx_thresh=20, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=0.9, vwap_band=1.5, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "M5":  _tf(80, 400, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.008, min_atr_pct=0.001, adx_thresh=22, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=1.0, vwap_band=1.8, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "M15": _tf(200, 1000, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.015, min_atr_pct=0.002, adx_thresh=22, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=1.1, vwap_band=2.0, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "M30": _tf(250, 1200, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.020, min_atr_pct=0.002, adx_thresh=24, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.1, vwap_band=2.0, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "H1":  _tf(350, 1500, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.030, min_atr_pct=0.003, adx_thresh=24, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.2, vwap_band=2.5, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "H4":  _tf(500, 2500, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.045, min_atr_pct=0.004, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.0, tick_atr=1.4, vwap_band=3.0, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "D1":  _tf(800, 4000, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.070, min_atr_pct=0.006, adx_thresh=25, fvg_min_atr=0.25, liq_spike=4.5, tick_atr=1.6, vwap_band=3.5, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
 }
 
 _NAS100_TF = {
-    "M1":  _tf(60, 300, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.006),
-    "M5":  _tf(120, 600, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.010),
-    "M15": _tf(300, 1500, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.020),
-    "M30": _tf(350, 1800, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.025),
-    "H1":  _tf(500, 2500, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.035),
-    "H4":  _tf(800, 4000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.055),
-    "D1":  _tf(1200, 6000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.080),
+    "M1":  _tf(60, 300, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.006, min_atr_pct=0.0006, adx_thresh=20, fvg_min_atr=0.12, liq_spike=2.5, tick_atr=1.0, vwap_band=1.5, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "M5":  _tf(120, 600, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.010, min_atr_pct=0.001, adx_thresh=22, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=1.1, vwap_band=1.8, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "M15": _tf(300, 1500, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.020, min_atr_pct=0.002, adx_thresh=22, fvg_min_atr=0.15, liq_spike=3.0, tick_atr=1.2, vwap_band=2.0, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "M30": _tf(350, 1800, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.025, min_atr_pct=0.002, adx_thresh=24, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.2, vwap_band=2.2, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "H1":  _tf(500, 2500, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.035, min_atr_pct=0.003, adx_thresh=24, fvg_min_atr=0.18, liq_spike=3.5, tick_atr=1.3, vwap_band=2.5, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "H4":  _tf(800, 4000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.055, min_atr_pct=0.005, adx_thresh=25, fvg_min_atr=0.20, liq_spike=4.0, tick_atr=1.5, vwap_band=3.0, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
+    "D1":  _tf(1200, 6000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.080, min_atr_pct=0.007, adx_thresh=25, fvg_min_atr=0.25, liq_spike=4.5, tick_atr=1.8, vwap_band=3.5, rsi_ob=72, rsi_os=28, bb_buy_max=0.70, bb_sell_min=0.30, trendilo_str=25, chop_thresh=60.0, trend_thresh=38.2, vol_ratio=0.80),
 }
 
 _ASSET_TF_MAP: dict[str, dict[str, dict[str, object]]] = {

@@ -134,6 +134,47 @@ const SCHEMA = [
           { key: 'MACRO_ABORT_THRESHOLD',     label: 'Macro Abort Threshold', type: 'number', desc: 'Abort if pipeline modifier ≤ this (extreme conflict).' },
         ],
       },
+      {
+        title: 'Stateful Guards',
+        fields: [
+          { key: 'GUARD_SIGNAL_HASH_WINDOW',       label: 'Signal Hash Dedup — Window',      type: 'number', desc: 'Reject duplicate setups within N cycles. Default: 3' },
+          { key: 'GUARD_CONF_VARIANCE_WINDOW',      label: 'Confidence Variance — Window',    type: 'number', desc: 'Rolling window of confidence scores. Default: 3' },
+          { key: 'GUARD_CONF_VARIANCE_MAX_STDEV',   label: 'Confidence Variance — Max Stdev', type: 'number', desc: 'Max allowed stdev before rejection. Default: 0.15' },
+          { key: 'GUARD_SPREAD_REGIME_WINDOW',      label: 'Spread Regime — Window',          type: 'number', desc: 'Samples for rolling spread median. Default: 50' },
+          { key: 'GUARD_SPREAD_REGIME_THRESHOLD',   label: 'Spread Regime — Threshold',       type: 'number', desc: 'Reject if spread > N× median. Default: 1.8' },
+          { key: 'GUARD_EQUITY_CURVE_WINDOW',       label: 'Equity Curve Scaler — Window',    type: 'number', desc: 'Trades to look back for equity MA. Default: 20' },
+          { key: 'GUARD_EQUITY_CURVE_SCALE',        label: 'Equity Curve Scaler — Scale',     type: 'number', desc: 'Risk multiplier when equity below MA. Default: 0.5' },
+          { key: 'GUARD_DD_PAUSE_MINUTES',          label: 'Drawdown Pause — Duration (min)', type: 'number', desc: 'Pause entries after accelerating losses. Default: 30' },
+          { key: 'GUARD_DD_PAUSE_LOOKBACK',         label: 'Drawdown Pause — Lookback',       type: 'number', desc: 'Consecutive losses to trigger pause. Default: 3' },
+          { key: 'GUARD_PORTFOLIO_CAP_ENABLED',     label: 'Portfolio Risk Cap',              type: 'toggle', desc: 'Block new entries when total open risk exceeds limit. Always recommended.' },
+          { key: 'USE_CORRELATION_GUARD',           label: 'Correlation Guard',               type: 'toggle', desc: 'Block/reduce correlated positions.' },
+          { key: 'CORRELATION_THRESHOLD_BLOCK',     label: 'Correlation — Block Threshold',   type: 'number', desc: 'Block if correlation ≥ this. Default: 0.90' },
+          { key: 'CORRELATION_THRESHOLD_REDUCE',    label: 'Correlation — Reduce Threshold',  type: 'number', desc: 'Reduce size if correlation ≥ this. Default: 0.75' },
+          { key: 'GUARD_NEAR_DEDUP_ATR',            label: 'Near-Position Dedup (ATR)',       type: 'number', desc: 'Skip signal if open trade within N ATR. Default: 1.0' },
+        ],
+      },
+      {
+        title: 'Position Management',
+        fields: [
+          { key: 'REPOSITIONER_ENABLED',              label: 'Trade Repositioner',          type: 'toggle', desc: 'Dynamically manage open trades (SL trail, partial close).' },
+          { key: 'REPOSITIONER_OPPOSITE_SIGNAL',      label: 'Close on Opposite Signal',    type: 'toggle', desc: 'Full close if new signal conflicts with open trade.' },
+          { key: 'REPOSITIONER_NEWS_RISK',            label: 'News Risk — Tighten SL',      type: 'toggle', desc: 'Move SL to breakeven or partial close before news.' },
+          { key: 'REPOSITIONER_NEWS_WINDOW_MIN',      label: 'News Window (min)',            type: 'number', desc: 'Minutes before news to trigger. Default: 15' },
+          { key: 'REPOSITIONER_VOLUME_SPIKE',         label: 'Volume Spike — Trail SL',     type: 'toggle', desc: 'Move SL to breakeven on volume spike if in profit.' },
+          { key: 'REPOSITIONER_VOLUME_SPIKE_MULT',    label: 'Volume Spike Multiplier',     type: 'number', desc: 'M15 volume must be ≥ N× 20-bar avg. Default: 2.5' },
+          { key: 'REPOSITIONER_VOLATILITY_SPIKE',     label: 'Volatility Spike — Trail SL', type: 'toggle', desc: 'Move SL to breakeven on ATR spike if in profit.' },
+          { key: 'REPOSITIONER_VOLATILITY_SPIKE_MULT', label: 'ATR Spike Multiplier',       type: 'number', desc: 'H1 ATR must be ≥ N× baseline. Default: 1.8' },
+          { key: 'TRAIL_NOTE', label: 'Trailing SL Defaults', type: 'readonly', default: 'Per-symbol defaults live in AssetConfig (assets.py). Override per strategy card → Tune tab.', desc: 'XAUUSD: ATR×1.5, 200 pips, 1.0R act. | BTCUSD: ATR×2.0, 1500 pips, 1.5R act. | NAS100: ATR×2.0, 400 pips. Enable per strategy in Tools tab → Exit Management.' },
+        ],
+      },
+      {
+        title: 'Mode-Specific Overrides',
+        fields: [
+          { key: 'tool_enabled_risk_filter_dry_run',  label: 'Risk Filter (Dry Run)', type: 'toggle' },
+          { key: 'tool_enabled_risk_filter_backtest', label: 'Risk Filter (Backtest)', type: 'toggle' },
+          { key: 'tool_enabled_risk_filter_live',     label: 'Risk Filter (Live)',    type: 'toggle' },
+        ],
+      },
     ],
   },
 
@@ -255,117 +296,13 @@ const SCHEMA = [
   },
 
   {
-    id: 'tools', label: 'Tools', icon: '🛠️',
-    sections: [
-      {
-        title: '1. Pipeline Filters (toggleable)',
-        fields: [
-          { key: 'tool_enabled_session_filter',     label: 'Session Filter',     type: 'toggle', desc: 'Block trades outside active sessions (London/NY). Order: 1.' },
-          { key: 'MIN_SESSION_SCORE',               label: 'Min Session Score',  type: 'number', desc: 'Min session quality score (0.0–1.0). Default: 0.55' },
-          { key: 'SESSION_SCORE_NOTE', label: 'Session Score — Asset Defaults', type: 'readonly',
-            default: 'Crypto & Asia pairs use 0.40; metals & major forex use 0.70.',
-            desc: 'BTCUSD/ETHUSD: 0.40 | USDJPY: 0.40 | AUDUSD: 0.40 | XAUUSD/XAGUSD/EURUSD/GBPUSD/US30/NAS100: 0.70. Override per strategy card → Tune tab or edit AssetConfig.min_session_score.' },
-          { key: 'tool_enabled_news_filter',        label: 'News Filter',        type: 'toggle', desc: 'Block trades around high-impact news events. Order: 2.' },
-          { key: 'NEWS_PRE_MINUTES',                label: 'Pre-News Window (min)', type: 'number', desc: 'Minutes before news to block. Default: 30' },
-          { key: 'NEWS_POST_MINUTES',               label: 'Post-News Window (min)', type: 'number', desc: 'Minutes after news to block. Default: 15' },
-          { key: 'tool_enabled_volatility_filter',  label: 'Volatility Filter',  type: 'toggle', desc: 'Block trades during extreme or dead volatility. Order: 3.' },
-          { key: 'MAX_VOLATILITY_ATR_PCT',          label: 'Max ATR %',          type: 'number', desc: 'Block if H1 ATR% exceeds this. Default: 2.5' },
-          { key: 'MIN_VOLATILITY_ATR_PCT',          label: 'Min ATR %',          type: 'number', desc: 'Block if H1 ATR% below this (dead market). Default: 0.05' },
-          { key: 'tool_enabled_dxy_filter',         label: 'DXY Filter',         type: 'toggle', desc: 'Use USD index correlation for gold/forex signals. Order: 4.' },
-          { key: 'tool_enabled_sentiment_filter',   label: 'Sentiment Filter',   type: 'toggle', desc: 'Polymarket macro sentiment — reduces size on conflict. Order: 5.' },
-          { key: 'tool_enabled_risk_filter',        label: 'Risk Filter',        type: 'toggle', desc: 'Enforce daily loss, drawdown, kill switch limits. Order: 6.' },
-        ],
-      },
-      {
-        title: '2. Validation Rule Guards (toggleable per-strategy)',
-        fields: [
-          { key: 'USE_EMA200_FILTER',    label: 'EMA200 Trend Filter',    type: 'toggle', desc: 'Block trades against the EMA200 trend direction.' },
-          { key: 'USE_BOS_GUARD',        label: 'BOS Structure Guard',    type: 'toggle', desc: 'Require Break of Structure confirmation on M15.' },
-          { key: 'BOS_MIN_BREAK_ATR',    label: 'BOS Min Break (ATR)',    type: 'number', desc: 'Min break distance in ATR units. Default: 0.2' },
-          { key: 'BOS_SWING_LOOKBACK',   label: 'BOS Swing Lookback',    type: 'number', desc: 'Bars to scan for swing points. Default: 20' },
-          { key: 'CHECK_FVG',            label: 'FVG Structure Guard',    type: 'toggle', desc: 'Require entry inside a Fair Value Gap zone.' },
-          { key: 'FVG_MIN_SIZE_ATR',     label: 'FVG Min Size (ATR)',     type: 'number', desc: 'Minimum gap size in ATR units. Default: 0.15' },
-          { key: 'FVG_LOOKBACK',         label: 'FVG Lookback',          type: 'number', desc: 'Candles to scan for gaps. Default: 20' },
-          { key: 'CHECK_TICK_JUMP',      label: 'Tick Jump Guard',       type: 'toggle', desc: 'Reject entries on sudden 2-bar price spikes.' },
-          { key: 'TICK_JUMP_ATR_MAX',    label: 'Tick Jump Max (ATR)',   type: 'number', desc: 'Max 2-bar move in ATR units. Default: 0.8' },
-          { key: 'CHECK_LIQ_VACUUM',     label: 'Liquidity Vacuum Guard', type: 'toggle', desc: 'Reject thin-body spike candles (no conviction).' },
-          { key: 'LIQ_VACUUM_SPIKE_MULT', label: 'Spike Multiplier',     type: 'number', desc: 'ATR spike threshold. Default: 2.5' },
-          { key: 'LIQ_VACUUM_BODY_PCT',  label: 'Min Body %',            type: 'number', desc: 'Candle body min % of range. Default: 30' },
-          { key: 'USE_VWAP_GUARD',       label: 'VWAP Guard',            type: 'toggle', desc: 'Block entries overextended from VWAP.' },
-          { key: 'VWAP_EXTENSION_MAX_ATR', label: 'VWAP Max Extension (ATR)', type: 'number', desc: 'Max distance from VWAP in ATR units. Default: 1.5' },
-          { key: 'USE_MACD_FILTER',     label: 'MACD Filter',            type: 'toggle', desc: 'Block if MACD histogram disagrees with direction.' },
-          { key: 'MACD_FAST',           label: 'MACD Fast Period',       type: 'number', desc: 'Fast EMA period. Default: 12' },
-          { key: 'MACD_SLOW',           label: 'MACD Slow Period',       type: 'number', desc: 'Slow EMA period. Default: 26' },
-          { key: 'MACD_SIGNAL',         label: 'MACD Signal Period',     type: 'number', desc: 'Signal line period. Default: 9' },
-          { key: 'USE_BOLLINGER_FILTER', label: 'Bollinger Filter',      type: 'toggle', desc: 'Block if entry outside Bollinger band zone.' },
-          { key: 'BB_PERIOD',           label: 'Bollinger Period',       type: 'number', desc: 'Moving average period. Default: 20' },
-          { key: 'BB_STD_DEV',          label: 'Bollinger Std Dev',      type: 'number', desc: 'Standard deviation multiplier. Default: 2.0' },
-          { key: 'USE_ADX_FILTER',      label: 'ADX Filter',             type: 'toggle', desc: 'Block if ADX below threshold (no trend).' },
-          { key: 'ADX_PERIOD',          label: 'ADX Period',             type: 'number', desc: 'ADX indicator period. Default: 14' },
-          { key: 'ADX_MIN_THRESHOLD',   label: 'ADX Min Threshold',      type: 'number', desc: 'Block below this value. Default: 20' },
-          { key: 'USE_VOLUME_FILTER',   label: 'Volume Filter',          type: 'toggle', desc: 'Block if volume below average.' },
-          { key: 'VOLUME_MA_PERIOD',    label: 'Volume MA Period',       type: 'number', desc: 'Volume moving average bars. Default: 20' },
-          { key: 'USE_SWING_STRUCTURE', label: 'Swing Structure',        type: 'toggle', desc: 'Require HH/HL for BUY, LH/LL for SELL.' },
-          { key: 'GUARD_RSI_NOTE', label: 'RSI Thresholds — Asset Notes', type: 'readonly',
-            default: 'RSI OB/OS are uniform (70/30) across all assets by default.',
-            desc: 'Crypto (BTC/ETH) benefits from wider bands: OB=75, OS=25. Metals/FX can stay at 70/30. ATR-relative guards (BOS, FVG, VWAP, TickJump) are already asset-normalised — no per-symbol tuning needed. Edit AssetConfig.rsi_overbought/rsi_oversold for per-symbol extremes.' },
-        ],
-      },
-      {
-        title: '3. Stateful Guards (always-on system protection)',
-        fields: [
-          { key: 'GUARD_SIGNAL_HASH_WINDOW',       label: 'Signal Hash Dedup — Window',      type: 'number', desc: 'Reject duplicate setups within N cycles. Default: 3' },
-          { key: 'GUARD_CONF_VARIANCE_WINDOW',      label: 'Confidence Variance — Window',    type: 'number', desc: 'Rolling window of confidence scores. Default: 3' },
-          { key: 'GUARD_CONF_VARIANCE_MAX_STDEV',   label: 'Confidence Variance — Max Stdev', type: 'number', desc: 'Max allowed stdev before rejection. Default: 0.15' },
-          { key: 'GUARD_SPREAD_REGIME_WINDOW',      label: 'Spread Regime — Window',          type: 'number', desc: 'Samples for rolling spread median. Default: 50' },
-          { key: 'GUARD_SPREAD_REGIME_THRESHOLD',   label: 'Spread Regime — Threshold',       type: 'number', desc: 'Reject if spread > N× median. Default: 1.8' },
-          { key: 'GUARD_EQUITY_CURVE_WINDOW',       label: 'Equity Curve Scaler — Window',    type: 'number', desc: 'Trades to look back for equity MA. Default: 20' },
-          { key: 'GUARD_EQUITY_CURVE_SCALE',        label: 'Equity Curve Scaler — Scale',     type: 'number', desc: 'Risk multiplier when equity below MA. Default: 0.5' },
-          { key: 'GUARD_DD_PAUSE_MINUTES',          label: 'Drawdown Pause — Duration (min)', type: 'number', desc: 'Pause entries after accelerating losses. Default: 30' },
-          { key: 'GUARD_DD_PAUSE_LOOKBACK',         label: 'Drawdown Pause — Lookback',       type: 'number', desc: 'Consecutive losses to trigger pause. Default: 3' },
-          { key: 'GUARD_PORTFOLIO_CAP_ENABLED',     label: 'Portfolio Risk Cap',              type: 'toggle', desc: 'Block new entries when total open risk exceeds limit. Always recommended.' },
-          { key: 'USE_CORRELATION_GUARD',           label: 'Correlation Guard',               type: 'toggle', desc: 'Block/reduce correlated positions.' },
-          { key: 'CORRELATION_THRESHOLD_BLOCK',     label: 'Correlation — Block Threshold',   type: 'number', desc: 'Block if correlation ≥ this. Default: 0.90' },
-          { key: 'CORRELATION_THRESHOLD_REDUCE',    label: 'Correlation — Reduce Threshold',  type: 'number', desc: 'Reduce size if correlation ≥ this. Default: 0.75' },
-          { key: 'GUARD_NEAR_DEDUP_ATR',            label: 'Near-Position Dedup (ATR)',       type: 'number', desc: 'Skip signal if open trade within N ATR. Default: 1.0' },
-          { key: 'STATEFUL_NOTE', label: 'Stateful Guards — Asset Notes', type: 'readonly',
-            default: 'All stateful guards are system-wide — no per-symbol customisation needed.',
-            desc: 'Spread regime uses N× rolling median (already relative to each symbol\'s normal spread). Near-dedup uses ATR units (already normalised). Equity curve & drawdown pause apply account-wide across all open bots.' },
-        ],
-      },
-      {
-        title: '4. Position Management (live trades)',
-        fields: [
-          { key: 'REPOSITIONER_ENABLED',              label: 'Trade Repositioner',          type: 'toggle', desc: 'Dynamically manage open trades (SL trail, partial close).' },
-          { key: 'REPOSITIONER_OPPOSITE_SIGNAL',      label: 'Close on Opposite Signal',    type: 'toggle', desc: 'Full close if new signal conflicts with open trade.' },
-          { key: 'REPOSITIONER_NEWS_RISK',            label: 'News Risk — Tighten SL',      type: 'toggle', desc: 'Move SL to breakeven or partial close before news.' },
-          { key: 'REPOSITIONER_NEWS_WINDOW_MIN',      label: 'News Window (min)',            type: 'number', desc: 'Minutes before news to trigger. Default: 15' },
-          { key: 'REPOSITIONER_VOLUME_SPIKE',         label: 'Volume Spike — Trail SL',     type: 'toggle', desc: 'Move SL to breakeven on volume spike if in profit.' },
-          { key: 'REPOSITIONER_VOLUME_SPIKE_MULT',    label: 'Volume Spike Multiplier',     type: 'number', desc: 'M15 volume must be ≥ N× 20-bar avg. Default: 2.5' },
-          { key: 'REPOSITIONER_VOLATILITY_SPIKE',     label: 'Volatility Spike — Trail SL', type: 'toggle', desc: 'Move SL to breakeven on ATR spike if in profit.' },
-          { key: 'REPOSITIONER_VOLATILITY_SPIKE_MULT', label: 'ATR Spike Multiplier',       type: 'number', desc: 'H1 ATR must be ≥ N× baseline. Default: 1.8' },
-          { key: 'TRAIL_NOTE',             label: 'Trailing SL Defaults',        type: 'readonly', default: 'Per-symbol defaults live in AssetConfig (assets.py). Override per strategy card → Tune tab.', desc: 'XAUUSD: ATR×1.5, 200 pips, 1.0R act. | BTCUSD: ATR×2.0, 1500 pips, 1.5R act. | NAS100: ATR×2.0, 400 pips. Enable per strategy in Tools tab → Exit Management.' },
-        ],
-      },
-      {
-        title: 'Mode-Specific Overrides',
-        fields: [
-          { key: 'tool_enabled_risk_filter_dry_run',  label: 'Risk Filter (Dry Run)', type: 'toggle' },
-          { key: 'tool_enabled_risk_filter_backtest', label: 'Risk Filter (Backtest)', type: 'toggle' },
-          { key: 'tool_enabled_risk_filter_live',     label: 'Risk Filter (Live)',    type: 'toggle' },
-        ],
-      },
-    ],
-  },
-
-  {
     id: 'sounds', label: 'Sounds', icon: '🔊',
     localOnly: true,
     sections: [],
   },
 
   {
-    id: 'assets', label: 'Assets', icon: '🪙',
+    id: 'assets', label: 'Filter Presets', icon: '🪙',
     localOnly: true,
     sections: [],
   },
@@ -632,50 +569,66 @@ export async function render(container) {
 
   /* ── Assets panel ───────────────────────────────────────────────────── */
   const _TOOL_GROUPS = [
-    {
-      label: 'Core',
-      keys: ['session', 'volatility', 'ema200'],
-    },
-    {
-      label: 'Structure Guards',
-      keys: ['bos', 'fvg', 'tick_jump', 'liq_vacuum', 'vwap'],
-    },
-    {
-      label: 'Technical',
-      keys: ['macd', 'bollinger', 'adx', 'volume', 'swing'],
-    },
+    { label: 'Core',      keys: ['session', 'volatility', 'news_filter', 'risk_filter'] },
+    { label: 'Structure', keys: ['ema200', 'bos', 'fvg', 'tick_jump', 'liq_vacuum', 'vwap'] },
+    { label: 'Technical', keys: ['macd', 'bollinger', 'adx', 'volume', 'swing'] },
+    { label: 'Trend',     keys: ['ema_crossover', 'alma_filter', 'trendilo'] },
+    { label: 'Momentum',  keys: ['rsi_feature', 'fast_fingers', 'choppiness_index'] },
+    { label: 'Macro',     keys: ['dxy_filter', 'sentiment_filter', 'correlation_guard'] },
   ];
 
   const _TOOL_SHORT = {
-    session:    'Session',
-    volatility: 'Volatility',
-    ema200:     'EMA200',
-    bos:        'BOS',
-    fvg:        'FVG',
-    tick_jump:  'Tick Jump',
-    liq_vacuum: 'Liq Vacuum',
-    vwap:       'VWAP',
-    macd:       'MACD',
-    bollinger:  'Bollinger',
-    adx:        'ADX',
-    volume:     'Volume',
-    swing:      'Swing',
+    session:          'Session',
+    volatility:       'Volatility',
+    news_filter:      'News',
+    risk_filter:      'Risk',
+    ema200:           'EMA200',
+    bos:              'BOS',
+    fvg:              'FVG',
+    tick_jump:        'Tick Jump',
+    liq_vacuum:       'Liq Vacuum',
+    vwap:             'VWAP',
+    macd:             'MACD',
+    bollinger:        'Bollinger',
+    adx:              'ADX',
+    volume:           'Volume',
+    swing:            'Swing',
+    ema_crossover:    'EMA Cross',
+    alma_filter:      'ALMA',
+    trendilo:         'Trendilo',
+    rsi_feature:      'RSI',
+    fast_fingers:     'Fast Fingers',
+    choppiness_index: 'Choppiness',
+    dxy_filter:       'DXY',
+    sentiment_filter: 'Sentiment',
+    correlation_guard:'Correlation',
   };
 
   const _TOOL_DESC = {
-    session:    'Block trades outside active sessions (London/NY)',
-    volatility: 'Block extreme or dead ATR% conditions',
-    ema200:     'Block entries against the EMA200 direction',
-    bos:        'Require a Break of Structure before entry',
-    fvg:        'Require a Fair Value Gap for entry',
-    tick_jump:  'Reject 2-bar price spikes',
-    liq_vacuum: 'Reject thin-body candles (no follow-through)',
-    vwap:       'Block overextended entries far from VWAP',
-    macd:       'Block when MACD histogram disagrees',
-    bollinger:  'Block outside the Bollinger band zone',
-    adx:        'Block when ADX < 20 (no trend)',
-    volume:     'Block when volume is below rolling average',
-    swing:      'Require HH/HL or LH/LL pattern',
+    session:          'Block trades outside active sessions (London/NY)',
+    volatility:       'Block extreme or dead ATR% conditions',
+    news_filter:      'Block trades around high-impact news events',
+    risk_filter:      'Enforce daily loss, drawdown, and kill switch limits',
+    ema200:           'Block entries against the EMA200 direction',
+    bos:              'Require a Break of Structure before entry',
+    fvg:              'Require a Fair Value Gap for entry',
+    tick_jump:        'Reject 2-bar price spikes',
+    liq_vacuum:       'Reject thin-body candles (no follow-through)',
+    vwap:             'Block overextended entries far from VWAP',
+    macd:             'Block when MACD histogram disagrees',
+    bollinger:        'Block outside the Bollinger band zone',
+    adx:              'Block when ADX is too low (no trend)',
+    volume:           'Block when volume is below rolling average',
+    swing:            'Require HH/HL for BUY or LH/LL for SELL',
+    ema_crossover:    'Block counter-trend entries vs fast/slow EMA cross',
+    alma_filter:      'Block counter-trend entries vs Arnaud Legoux MA',
+    trendilo:         'Block counter-trend entries via regression slope',
+    rsi_feature:      'Validate overbought/oversold RSI conditions',
+    fast_fingers:     'Block momentum-exhausted overextended entries',
+    choppiness_index: 'Block entries in ranging/choppy market conditions',
+    dxy_filter:       'Block conflicting USD/gold trades via DXY correlation',
+    sentiment_filter: 'Reduce size on Polymarket macro sentiment conflict',
+    correlation_guard:'Block new entries correlated with existing open positions',
   };
 
   const _CLASS_COLORS = {
@@ -740,6 +693,7 @@ export async function render(container) {
           </div>
           <span class="asset-active-count" data-count="${asset.symbol}">${active}/${total} active</span>
           <span class="asset-save-feedback" data-feedback="${asset.symbol}">✓ Saved</span>
+          <button class="asset-reset-btn" data-symbol="${asset.symbol}" title="Reset to class defaults">↺</button>
           <button class="asset-save-btn" data-symbol="${asset.symbol}">Save</button>
         </div>
         <div class="asset-preset-body">${groupsHtml}</div>
@@ -804,6 +758,37 @@ export async function render(container) {
         }
         btn.disabled = false;
         btn.textContent = 'Save';
+      });
+
+      // Reset button
+      const resetBtn = card.querySelector('.asset-reset-btn');
+      resetBtn.addEventListener('click', async () => {
+        if (!confirm(`Reset ${symbol} to class defaults?`)) return;
+        resetBtn.disabled = true;
+        try {
+          const data = await apiPost(`/api/assets/${symbol}/tools/reset`, {});
+          // Re-render this card with fresh defaults
+          const fresh = _assetsCache.find(a => a.symbol === symbol);
+          if (fresh) fresh.tools = data.tools;
+          const newCard = document.createElement('div');
+          newCard.innerHTML = _buildCard({ ...fresh, tools: data.tools });
+          card.replaceWith(newCard.firstElementChild);
+          // Re-attach listeners for the new card
+          const replaced = el.querySelector(`.asset-preset-card[data-symbol="${symbol}"]`);
+          if (replaced) replaced.querySelectorAll('input[data-tool]').forEach(cb => {
+            const countEl2 = el.querySelector(`.asset-active-count[data-count="${symbol}"]`);
+            cb.addEventListener('change', () => {
+              const t = replaced.querySelectorAll('input[data-tool]').length;
+              const a = [...replaced.querySelectorAll('input[data-tool]')].filter(c => c.checked).length;
+              if (countEl2) countEl2.textContent = `${a}/${t} active`;
+            });
+          });
+          window.__assetPresetsCache = null;
+          window.showToast(`${symbol} reset to defaults`);
+        } catch (err) {
+          window.showToast(err.message, 'error');
+        }
+        resetBtn.disabled = false;
       });
     });
   }

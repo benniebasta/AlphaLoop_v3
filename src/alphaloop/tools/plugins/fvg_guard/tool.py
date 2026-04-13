@@ -24,9 +24,8 @@ class FVGGuard(BaseTool):
     description = "Fair value gap confirmation — validates imbalance zones"
     requires_direction = True
 
-    MIN_SIZE_ATR = 0.15
-
     async def run(self, context) -> ToolResult:
+        min_size_atr = self.config.get("min_size_atr", 0.15)
         direction = context.trade_direction.upper()
         m15_ind = context.indicators.get("M15", {})
         fvg_data = m15_ind.get("fvg")
@@ -51,18 +50,17 @@ class FVGGuard(BaseTool):
                 severity="warn",
             )
 
-        # Filter by minimum size
-        candidates = [g for g in gaps if g.get("size_atr", 0) >= self.MIN_SIZE_ATR]
+        candidates = [g for g in gaps if g.get("size_atr", 0) >= min_size_atr]
 
         if not candidates:
             return ToolResult(
                 passed=False,
                 reason=(
-                    f"No {label} FVG >= {self.MIN_SIZE_ATR}x ATR on M15 — "
+                    f"No {label} FVG >= {min_size_atr}x ATR on M15 — "
                     f"no imbalance zone for {direction.lower()}"
                 ),
                 severity="warn",
-                data={"available_fvgs": len(gaps), "min_size_atr": self.MIN_SIZE_ATR},
+                data={"available_fvgs": len(gaps), "min_size_atr": min_size_atr},
             )
 
         # Most recent qualifying FVG

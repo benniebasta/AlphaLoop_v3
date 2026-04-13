@@ -41,7 +41,9 @@ class TrendiloFilter(BaseTool):
         slope_dir = trendilo_data.get("direction", "flat")
         strength = trendilo_data.get("strength", 0)
 
-        if direction == "BUY" and slope_dir == "down" and strength > 30:
+        strength_threshold = self.config.get("strength_threshold", 30.0)
+
+        if direction == "BUY" and slope_dir == "down" and strength > strength_threshold:
             return ToolResult(
                 passed=False,
                 reason=f"BUY blocked: Trendilo slope is down (strength={strength:.1f})",
@@ -49,7 +51,7 @@ class TrendiloFilter(BaseTool):
                 data=trendilo_data,
             )
 
-        if direction == "SELL" and slope_dir == "up" and strength > 30:
+        if direction == "SELL" and slope_dir == "up" and strength > strength_threshold:
             return ToolResult(
                 passed=False,
                 reason=f"SELL blocked: Trendilo slope is up (strength={strength:.1f})",

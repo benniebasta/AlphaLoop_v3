@@ -641,7 +641,8 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
         direction = "BUY" if is_bull else "SELL"
 
         # --- EMA200 Trend Filter ---
-        if "ema200_filter" in filters:
+        # Skipped in ai_signal — AI received EMA200 context in T3 of its prompt
+        if "ema200_filter" in filters and params.signal_mode != "ai_signal":
             e200 = c['ema200'][i]
             if not np.isnan(e200):
                 if direction == "BUY" and price < e200:
@@ -650,7 +651,8 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
                     return None
 
         # --- BOS Guard (only needs last 21 bars) ---
-        if "bos_guard" in filters:
+        # Skipped in ai_signal mode — AI already processed BOS context when forming hypothesis
+        if "bos_guard" in filters and params.signal_mode != "ai_signal":
             bos = _detect_bos_simple(highs[max(0, i - 21):i + 1], lows[max(0, i - 21):i + 1])
             if direction == "BUY" and bos != "bullish":
                 return None
@@ -658,7 +660,7 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
                 return None
 
         # --- FVG Guard (only needs last 21 bars) ---
-        if "fvg_guard" in filters:
+        if "fvg_guard" in filters and params.signal_mode != "ai_signal":
             if not _has_fvg(highs[max(0, i - 21):i + 1], lows[max(0, i - 21):i + 1], direction):
                 return None
 
@@ -683,7 +685,8 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
                 return None
 
         # --- MACD Filter (pre-computed) ---
-        if "macd_filter" in filters and i >= params.macd_slow + params.macd_signal:
+        # Skipped in ai_signal — AI received MACD context in T3
+        if "macd_filter" in filters and i >= params.macd_slow + params.macd_signal and params.signal_mode != "ai_signal":
             histogram = c['macd_line'][i] - c['macd_sig'][i]
             if direction == "BUY" and histogram < 0:
                 return None
@@ -691,7 +694,8 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
                 return None
 
         # --- Bollinger Filter (only needs bb_period bars) ---
-        if "bollinger_filter" in filters and i >= params.bb_period:
+        # Skipped in ai_signal — AI received Bollinger context in T3
+        if "bollinger_filter" in filters and i >= params.bb_period and params.signal_mode != "ai_signal":
             bb_slice = closes[i - params.bb_period + 1:i + 1]
             bb_mid = float(np.mean(bb_slice))
             bb_std = float(np.std(bb_slice))
@@ -703,7 +707,8 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
                     return None
 
         # --- ADX Filter (only needs adx_period*3 bars) ---
-        if "adx_filter" in filters and i >= params.adx_period * 2:
+        # Skipped in ai_signal — AI received ADX context in T3
+        if "adx_filter" in filters and i >= params.adx_period * 2 and params.signal_mode != "ai_signal":
             win = params.adx_period * 3
             adx_val = _adx_simple(highs[max(0, i - win):i + 1], lows[max(0, i - win):i + 1],
                                   closes[max(0, i - win):i + 1], params.adx_period)
@@ -713,7 +718,7 @@ def make_signal_fn(params: BacktestParams, filters: list[str]):
         # --- Volume Filter (no-op in backtest — no volume data) ---
 
         # --- Swing Structure Filter (only needs last 40 bars) ---
-        if "swing_structure" in filters and i >= 20:
+        if "swing_structure" in filters and i >= 20 and params.signal_mode != "ai_signal":
             swing = _swing_structure_simple(highs[max(0, i - 40):i + 1], lows[max(0, i - 40):i + 1])
             if direction == "BUY" and swing != "bullish":
                 return None
@@ -974,6 +979,14 @@ async def _run_backtest(
             if result.trade_count < MIN_TRADES:
                 _log(run_id, f"⚠ Only {result.trade_count} trades — below minimum {MIN_TRADES}. "
                              f"Try fewer filters, a shorter timeframe, or more history days.", "WARN")
+                async with session_factory() as session:
+                    repo = BacktestRepository(session)
+                    await repo.update_state(
+                        run_id, "failed",
+                        message=f"Baseline produced {result.trade_count} trades (min {MIN_TRADES}) — adjust filters",
+                    )
+                    await session.commit()
+                return
             _log(run_id, f"Params: EMA={base_params.ema_fast}/{base_params.ema_slow}, "
                          f"SL={base_params.sl_atr_mult}, TP1={base_params.tp1_rr}, TP2={base_params.tp2_rr}, "
                          f"RSI={base_params.rsi_os}-{base_params.rsi_ob}", "STAT")
@@ -1018,6 +1031,20 @@ async def _run_backtest(
                 return
 
             _log(run_id, f"=== Generation {gen}/{max_generations}: Optimizing ===", "GEN")
+
+            # Mark gen start in DB so the UI counter advances immediately
+            async with session_factory() as session:
+                repo = BacktestRepository(session)
+                await repo.update_progress(
+                    run_id, generation=gen, phase="optimizing",
+                    message=f"Gen {gen}: optimizing...",
+                    best_sharpe=best_sharpe if best_sharpe > -999 else None,
+                    best_wr=best_result.win_rate if best_result else None,
+                    best_pnl=best_result.total_pnl if best_result else None,
+                    best_dd=best_result.max_drawdown_pct if best_result else None,
+                    best_trades=best_result.trade_count if best_result else None,
+                )
+                await session.commit()
 
             # Run Optuna + backtests entirely in a thread to avoid blocking the event loop.
             def run_on_train(params: BacktestParams) -> float:
@@ -1200,10 +1227,16 @@ async def _run_backtest(
 
         async with session_factory() as session:
             repo = BacktestRepository(session)
+            no_trades = not best_result or best_result.trade_count < MIN_TRADES
+            completion_msg = (
+                f"Completed — no viable parameters found ({best_result.trade_count if best_result else 0} trades). "
+                "Try fewer filters or a longer history."
+                if no_trades else "Completed successfully"
+            )
             await repo.update_state(
                 run_id, "completed",
                 finished_at=datetime.now(timezone.utc),
-                message="Completed successfully",
+                message=completion_msg,
             )
             await session.commit()
 
@@ -1277,6 +1310,8 @@ async def _fetch_data_mt5(
         _log(run_id, f"MT5: unsupported timeframe '{timeframe}'", "WARN")
         return None
 
+    _used_sym: list[str] = [symbol]
+
     def _mt5_fetch():
         from datetime import timedelta
         # Auto-connect: try stored broker credentials, then bare init
@@ -1314,6 +1349,7 @@ async def _fetch_data_mt5(
             tried.append(sym)
             rates = mt5.copy_rates_range(sym, mt5_tf, date_from, date_to)
             if rates is not None and len(rates) > 0:
+                _used_sym[0] = sym
                 return rates
             _log(run_id, f"MT5: copy_rates_range({sym!r}) returned None — {mt5.last_error()}", "WARN")
         return None
@@ -1338,7 +1374,7 @@ async def _fetch_data_mt5(
     closes = df["close"].values.astype(np.float64)
     timestamps = [dt.to_pydatetime() for dt in df["time"]]
 
-    _log(run_id, f"Loaded {len(closes)} bars from MT5 ({timestamps[0].date()} to {timestamps[-1].date()})", "DATA")
+    _log(run_id, f"Loaded {len(closes)} bars from MT5 via {_used_sym[0]!r} ({timestamps[0].date()} to {timestamps[-1].date()})", "DATA")
 
     if len(timestamps) >= 2:
         actual_days = (timestamps[-1] - timestamps[0]).days

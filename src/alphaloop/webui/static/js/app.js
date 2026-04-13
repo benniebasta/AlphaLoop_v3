@@ -9,7 +9,7 @@ const components = {};
 const ROUTES = [
   'dashboard', 'live', 'trades', 'agents', 'strategies',
   'seedlab', 'research', 'risk_dashboard', 'event_log', 'health',
-  'ai_hub', 'settings',
+  'ai_hub', 'settings', 'asset_params',
 ];
 
 // Backward-compatible aliases (old route → new route)
@@ -21,7 +21,7 @@ const ALIASES = {
 };
 
 // Cache-bust version — increment when deploying new JS
-const _V = '8.1';
+const _V = '8.6';
 
 /**
  * Load a component module on demand.

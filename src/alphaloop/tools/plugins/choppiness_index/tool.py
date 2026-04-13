@@ -13,10 +13,6 @@ from __future__ import annotations
 
 from alphaloop.tools.base import BaseTool, ToolResult, FeatureResult
 
-_CHOPPY_THRESHOLD = 61.8
-_TRENDING_THRESHOLD = 38.2
-
-
 class ChoppinessIndexFilter(BaseTool):
     """
     Choppiness Index market regime filter.
@@ -32,6 +28,9 @@ class ChoppinessIndexFilter(BaseTool):
         m15 = context.indicators.get("M15", {})
         chop_data = m15.get("choppiness")
 
+        choppy_threshold   = self.config.get("choppy_threshold", 61.8)
+        trending_threshold = self.config.get("trending_threshold", 38.2)
+
         if chop_data is None:
             return ToolResult(
                 passed=True,
@@ -41,18 +40,18 @@ class ChoppinessIndexFilter(BaseTool):
 
         ci = float(chop_data.get("ci", 50))
 
-        if ci > _CHOPPY_THRESHOLD:
+        if ci > choppy_threshold:
             return ToolResult(
                 passed=False,
                 reason=(
-                    f"Entry blocked: CI {ci:.1f} > {_CHOPPY_THRESHOLD} — "
+                    f"Entry blocked: CI {ci:.1f} > {choppy_threshold} — "
                     f"market is choppy/ranging, no directional edge"
                 ),
                 severity="warn",
                 data=chop_data,
             )
 
-        regime = "trending" if ci < _TRENDING_THRESHOLD else "transitional"
+        regime = "trending" if ci < trending_threshold else "transitional"
         return ToolResult(
             passed=True,
             reason=f"CI {ci:.1f} — market is {regime}",
@@ -79,8 +78,8 @@ class ChoppinessIndexFilter(BaseTool):
             group="volatility",
             features={"trendiness": round(trendiness, 1)},
             reference_thresholds={
-                "choppy_above": _CHOPPY_THRESHOLD,
-                "trending_below": _TRENDING_THRESHOLD,
+                "choppy_above": self.config.get("choppy_threshold", 61.8),
+                "trending_below": self.config.get("trending_threshold", 38.2),
             },
             meta=chop_data,
         )

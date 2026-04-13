@@ -1373,6 +1373,19 @@ select.field-input { cursor: pointer; }
 
 .asset-save-btn:disabled { opacity: 0.5; cursor: default; }
 
+.asset-reset-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: var(--r-md);
+  padding: 4px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+.asset-reset-btn:hover { border-color: var(--red, #ef4444); color: var(--red, #ef4444); }
+.asset-reset-btn:disabled { opacity: 0.5; cursor: default; }
+
 .asset-save-feedback {
   font-size: 11px;
   color: var(--green);

@@ -1,0 +1,61 @@
+{
+  "run_id": "5ca2509b6adc",
+  "generation": 1,
+  "best_sharpe": -0.913,
+  "data_hash": "bd0a948c2499aa8b",
+  "saved_at": "2026-04-13T15:25:20.102425+00:00",
+  "best_params": {
+    "ema_fast": 21,
+    "ema_slow": 55,
+    "sl_atr_mult": 2.0,
+    "tp1_rr": 2.0,
+    "tp2_rr": 4.0,
+    "rsi_ob": 70.0,
+    "rsi_os": 30.0,
+    "rsi_period": 14,
+    "risk_pct": 0.01,
+    "signal_rules": [
+      {
+        "source": "ema_crossover"
+      }
+    ],
+    "signal_logic": "AND",
+    "signal_auto": false,
+    "max_param_change_pct": 0.15,
+    "signal_mode": "algo_ai",
+    "setup_family": "trend_continuation",
+    "spec_version": "v1",
+    "strategy_spec": {
+      "spec_version": "v1",
+      "signal_mode": "algo_ai",
+      "setup_family": "trend_continuation",
+      "direction_model": "algorithmic_rules",
+      "enabled_preconditions": [],
+      "entry_model": {
+        "type": "rule_derived",
+        "signal_logic": "AND",
+        "signal_rule_sources": [
+          "ema_crossover"
+        ]
+      },
+      "invalidation_model": {},
+      "exit_policy": {},
+      "risk_policy": {},
+      "prompt_bundle": {
+        "signal_instruction": "",
+        "validator_instruction": ""
+      },
+      "ai_models": {},
+      "metadata": {
+        "source": "backtest_runner",
+        "symbol": "",
+        "version": 0
+      }
+    },
+    "tools": {
+      "volatility_filter": true,
+      "ema200_filter": true
+    },
+    "source": "backtest_runner"
+  }
+}

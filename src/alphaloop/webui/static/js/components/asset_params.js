@@ -31,11 +31,25 @@ const TOOL_KEYS = {
     { key: 'max_atr_pct', label: 'Max ATR %', step: 0.1 },
     { key: 'min_atr_pct', label: 'Min ATR %', step: 0.001 },
   ],
-  adx_filter:        [{ key: 'min_adx',           label: 'Min ADX',          step: 1 }],
-  fvg_guard:         [{ key: 'min_size_atr',       label: 'FVG Min Size ATR', step: 0.01 }],
+  adx_filter:        [{ key: 'min_adx',           label: 'Min ADX',              step: 1 }],
+  fvg_guard:         [{ key: 'min_size_atr',       label: 'FVG Min Size ATR',     step: 0.01 }],
   liq_vacuum_guard:  [{ key: 'max_range_atr',      label: 'LiqVac Max Range ATR', step: 0.1 }],
   tick_jump_guard:   [{ key: 'max_tick_jump_atr',  label: 'Tick Jump Max ATR',    step: 0.1 }],
   vwap_guard:        [{ key: 'max_extension_atr',  label: 'VWAP Max Ext ATR',     step: 0.1 }],
+  rsi_feature: [
+    { key: 'rsi_overbought', label: 'RSI Overbought', step: 1 },
+    { key: 'rsi_oversold',   label: 'RSI Oversold',   step: 1 },
+  ],
+  bollinger_filter: [
+    { key: 'buy_max_pct_b',  label: 'Buy Max %B',  step: 0.01 },
+    { key: 'sell_min_pct_b', label: 'Sell Min %B', step: 0.01 },
+  ],
+  trendilo:          [{ key: 'strength_threshold', label: 'Slope Strength Min',   step: 1 }],
+  choppiness_index: [
+    { key: 'choppy_threshold',   label: 'Choppy Threshold',   step: 0.1 },
+    { key: 'trending_threshold', label: 'Trending Threshold', step: 0.1 },
+  ],
+  volume_filter:     [{ key: 'min_vol_ratio',       label: 'Min Vol Ratio',        step: 0.05 }],
 };
 
 let _allAssets = [];

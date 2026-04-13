@@ -22,9 +22,8 @@ class VWAPGuard(BaseTool):
     description = "VWAP alignment check — blocks overextended entries"
     requires_direction = True
 
-    MAX_EXTENSION_ATR = 1.5
-
     async def run(self, context) -> ToolResult:
+        max_extension_atr = self.config.get("max_extension_atr", 1.5)
         direction = context.trade_direction.upper()
         m15_ind = context.indicators.get("M15", {})
 
@@ -38,7 +37,6 @@ class VWAPGuard(BaseTool):
                 severity="info",
             )
 
-        # Use current price from context
         current_price = context.price.ask if direction == "BUY" else context.price.bid
         if current_price == 0:
             return ToolResult(
@@ -49,23 +47,23 @@ class VWAPGuard(BaseTool):
 
         extension = (current_price - vwap_val) / atr_val
 
-        if direction == "BUY" and extension > self.MAX_EXTENSION_ATR:
+        if direction == "BUY" and extension > max_extension_atr:
             return ToolResult(
                 passed=False,
                 reason=(
                     f"BUY price {current_price:.2f} is {extension:.2f}x ATR above "
-                    f"VWAP {vwap_val:.2f} (max={self.MAX_EXTENSION_ATR:.1f}x) — overextended"
+                    f"VWAP {vwap_val:.2f} (max={max_extension_atr:.1f}x) — overextended"
                 ),
                 severity="warn",
                 data={"vwap": vwap_val, "atr": atr_val, "extension_atr": round(extension, 3)},
             )
 
-        if direction == "SELL" and extension < -self.MAX_EXTENSION_ATR:
+        if direction == "SELL" and extension < -max_extension_atr:
             return ToolResult(
                 passed=False,
                 reason=(
                     f"SELL price {current_price:.2f} is {abs(extension):.2f}x ATR below "
-                    f"VWAP {vwap_val:.2f} (max={self.MAX_EXTENSION_ATR:.1f}x) — overextended"
+                    f"VWAP {vwap_val:.2f} (max={max_extension_atr:.1f}x) — overextended"
                 ),
                 severity="warn",
                 data={"vwap": vwap_val, "atr": atr_val, "extension_atr": round(extension, 3)},
@@ -78,6 +76,7 @@ class VWAPGuard(BaseTool):
         )
 
     async def extract_features(self, context) -> FeatureResult:
+        max_extension_atr = self.config.get("max_extension_atr", 1.5)
         m15_ind = context.indicators.get("M15", {})
         vwap_val = m15_ind.get("vwap")
         atr_val = m15_ind.get("atr")
@@ -86,7 +85,6 @@ class VWAPGuard(BaseTool):
         if direction:
             direction = direction.upper()
 
-        # Use directional price
         price_obj = getattr(context, "price", None)
         if price_obj is None:
             price = 0.0
@@ -104,29 +102,21 @@ class VWAPGuard(BaseTool):
                 meta={"status": "unavailable"},
             )
 
-        # Signed extension: positive = price above VWAP
         signed_ext = (price - vwap_val) / atr_val
 
-        # Direction-aware scoring:
-        #   BUY overextended above VWAP = bad (chasing)
-        #   BUY near/below VWAP = good (mean-reversion entry)
-        #   SELL overextended below VWAP = bad
-        #   SELL near/above VWAP = good
         if direction == "BUY":
-            # Positive extension is bad for BUY (overextended up)
             directional_ext = max(0, signed_ext)
         elif direction == "SELL":
-            # Negative extension is bad for SELL (overextended down)
             directional_ext = max(0, -signed_ext)
         else:
             directional_ext = abs(signed_ext)
 
-        vwap_position = max(0.0, 100.0 - directional_ext / self.MAX_EXTENSION_ATR * 100)
+        vwap_position = max(0.0, 100.0 - directional_ext / max_extension_atr * 100)
 
         return FeatureResult(
             group="structure",
             features={"vwap_position": round(vwap_position, 1)},
-            reference_thresholds={"max_extension_atr": self.MAX_EXTENSION_ATR},
+            reference_thresholds={"max_extension_atr": max_extension_atr},
             meta={
                 "vwap": vwap_val,
                 "signed_extension_atr": round(signed_ext, 3),
