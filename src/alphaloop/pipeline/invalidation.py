@@ -91,6 +91,16 @@ class StructuralInvalidator:
             self.cfg.update(cfg)
         self._tools: list = tools or []  # liq_vacuum_guard, vwap_guard
 
+        # GAP-1: Warn loudly if sl_min/sl_max are still at safety-net defaults.
+        _sl_min = self.cfg.get("sl_min_points", 20.0)
+        _sl_max = self.cfg.get("sl_max_points", 300.0)
+        if _sl_min == 20.0 and _sl_max == 300.0:
+            logger.critical(
+                "[invalidation] sl_min=20 / sl_max=300 are SAFETY-NET defaults — "
+                "caller MUST inject asset-resolved values via cfg['invalidation']. "
+                "If you see this in production, param injection is broken."
+            )
+
     async def validate(
         self,
         signal: CandidateSignal,

@@ -43,8 +43,20 @@ def _field(source: Any, key: str, default: Any = None) -> Any:
     return getattr(source, key, default)
 
 
-def _build_signal_system_prompt(asset: AssetConfig) -> str:
-    """Build the signal generation system prompt."""
+def _build_signal_system_prompt(
+    asset: AssetConfig,
+    resolved_params: dict | None = None,
+) -> str:
+    """Build the signal generation system prompt.
+
+    Parameters
+    ----------
+    resolved_params : dict | None
+        TF-aware resolved construction params.  When provided, SL/TP bounds
+        in the prompt reflect the actual runtime constraints instead of the
+        base AssetConfig values.
+    """
+    _rp = resolved_params or {}
     return f"""You are a professional {asset.display_name} ({asset.symbol}) trader with 15 years of experience specialising in {asset.asset_class} markets.
 
 Best trading sessions: {', '.join(asset.best_sessions)}
@@ -65,8 +77,8 @@ CRITICAL RULES:
    - BUY signal:  TP must be ABOVE entry_zone[1]
    - SELL signal: TP must be BELOW entry_zone[0]
 6. If no clear setup exists, return {{"trend": "neutral", "confidence": 0.0, "reasoning": "No setup"}}
-7. SL distance: minimum {asset.sl_min_points} points | maximum {asset.sl_max_points} points
-8. SL size: {asset.sl_atr_mult}x ATR | TP1 minimum R:R: {asset.tp1_rr} | TP2: {asset.tp2_rr}
+7. SL distance: minimum {_rp.get("sl_min_points", asset.sl_min_points)} points | maximum {_rp.get("sl_max_points", asset.sl_max_points)} points
+8. SL size: {_rp.get("sl_atr_mult", asset.sl_atr_mult)}x ATR | TP1 minimum R:R: {_rp.get("tp1_rr", asset.tp1_rr)} | TP2: {_rp.get("tp2_rr", asset.tp2_rr)}
 9. Minimum confidence to signal: {asset.min_confidence}
 10. MODE: SWING — favour H1 structure, SL 1-2x ATR, TP1 at {asset.tp1_rr}R minimum
 
@@ -98,9 +110,13 @@ You MUST respond with ONLY valid JSON:
 No markdown, no preamble. Only the raw JSON object."""
 
 
-def build_signal_system_prompt(asset: AssetConfig, prompt_instructions: str = "") -> str:
+def build_signal_system_prompt(
+    asset: AssetConfig,
+    prompt_instructions: str = "",
+    resolved_params: dict | None = None,
+) -> str:
     """Build the signal generation system prompt with optional strategy instructions."""
-    base = _build_signal_system_prompt(asset)
+    base = _build_signal_system_prompt(asset, resolved_params=resolved_params)
     extra = (prompt_instructions or "").strip()
     if not extra:
         return base

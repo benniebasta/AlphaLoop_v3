@@ -113,6 +113,20 @@ class TradingLoop:
         self._supervision_service = supervision_service
         self._redis_sync = redis_sync
 
+        # Redis cross-session learning modules (initialized if Redis is available)
+        self._redis_regime = None     # RedisRegimePersistence
+        self._redis_guards = None     # RedisGuardPersistence
+        self._redis_ece = None        # RedisECEPersistence
+        if redis_sync and getattr(redis_sync, "_client", None):
+            from alphaloop.pipeline.redis_regime import RedisRegimePersistence
+            from alphaloop.risk.redis_guards import RedisGuardPersistence
+            from alphaloop.pipeline.redis_ece import RedisECEPersistence
+            _rc = redis_sync._client
+            _iid = getattr(redis_sync, "_instance_id", "default")
+            self._redis_regime = RedisRegimePersistence(_rc, instance_id=_iid)
+            self._redis_guards = RedisGuardPersistence(_rc)
+            self._redis_ece = RedisECEPersistence(_rc, instance_id=_iid)
+
         self._running = False
         self._halt_trading = False  # Phase 2F: set True on critical persistence failure
         self._circuit = CircuitBreaker()
@@ -128,6 +142,8 @@ class TradingLoop:
         self._feature_pipeline = None      # FeaturePipeline | None (algo_ai)
         self._algo_engine = None           # AlgorithmicSignalEngine | None
         self._strategy_runtime_sig = ""
+        self._v4_orchestrator = None       # Cached PipelineOrchestrator
+        self._asset_tf_overrides: dict[str, dict] = {}  # DB per-TF overrides
 
         # Stateful guards (persist across cycles)
         self._signal_hash = SignalHashFilter(window=3)
@@ -217,6 +233,17 @@ class TradingLoop:
                 equity_scaler=self._equity_scaler,
                 dd_pause=self._dd_pause,
             )
+
+        # Restore Redis cross-session learning state (faster than DB seed)
+        try:
+            if self._redis_regime:
+                await self._redis_regime.pull_state(self._regime_classifier, self.symbol)
+            if self._redis_guards:
+                await self._redis_guards.pull_state(
+                    self._signal_hash, self._conf_variance, self.symbol,
+                )
+        except Exception as e:
+            logger.warning("[loop] Redis state restore failed (non-critical): %s", e)
 
         while self._running:
             try:
@@ -312,6 +339,7 @@ class TradingLoop:
             self._algo_engine = None
             self._strategy_runtime_sig = ""
             self.signal_model_id = ""
+            self._v4_orchestrator = None
             self._signal_dispatcher.update_algo_engine(None)
             self._signal_dispatcher.update_signal_model("")
             self._execution_orch.update_state(
@@ -329,6 +357,9 @@ class TradingLoop:
             return
 
         self._active_strategy = config
+
+        # Strategy changed — invalidate cached orchestrator so it rebuilds
+        self._v4_orchestrator = None
 
         # Build feature pipeline for algo_ai mode
         self._runtime_strategy = dict(runtime_config)
@@ -397,10 +428,17 @@ class TradingLoop:
             from alphaloop.monitoring.metrics import metrics_tracker as _mt
             _mt.record_sync("cycle_duration_ms", (time.time() - t0) * 1000)
 
-            # Push risk state to Redis every 10 cycles (HA cache layer)
-            if self._redis_sync and self.risk_monitor and self._cycle_count % 10 == 0:
+            # Push state to Redis every 10 cycles (HA cache + cross-session learning)
+            if self._redis_sync and self._cycle_count % 10 == 0:
                 try:
-                    await self._redis_sync.push_risk_state(self.risk_monitor)
+                    if self.risk_monitor:
+                        await self._redis_sync.push_risk_state(self.risk_monitor)
+                    if self._redis_regime and hasattr(self, "_regime_classifier"):
+                        await self._redis_regime.push_state(self._regime_classifier, self.symbol)
+                    if self._redis_guards:
+                        await self._redis_guards.push_state(
+                            self._signal_hash, self._conf_variance, self.symbol,
+                        )
                 except Exception:
                     pass  # Redis is non-critical
 
@@ -538,6 +576,44 @@ class TradingLoop:
                     result.append(tool)
         return result
 
+    def _apply_tools_config(self, asset_cfg, active_tf: str, runtime_strategy: dict) -> None:
+        """Apply TF-calibrated + strategy-level config to each registered tool."""
+        from alphaloop.config.asset_classes import merge_tools_config
+
+        strategy_tc = dict((runtime_strategy.get("tools_config") or {}))
+        merged = merge_tools_config(asset_cfg.asset_class, {})
+
+        tf_defaults = (getattr(asset_cfg, "default_params_by_timeframe", None) or {}).get(
+            active_tf, {}
+        )
+        tf_tools_cfg = tf_defaults.get("tools_config") or {}
+        for plugin, plugin_params in tf_tools_cfg.items():
+            if plugin in merged:
+                merged[plugin] = {**merged[plugin], **plugin_params}
+            else:
+                merged[plugin] = dict(plugin_params)
+
+        db_tf_tools = (
+            (getattr(self, "_asset_tf_overrides", None) or {}).get(active_tf) or {}
+        ).get("tools_config") or {}
+        for plugin, plugin_params in db_tf_tools.items():
+            if plugin in merged:
+                merged[plugin] = {**merged[plugin], **plugin_params}
+            else:
+                merged[plugin] = dict(plugin_params)
+
+        for plugin, plugin_params in strategy_tc.items():
+            if plugin in merged:
+                merged[plugin] = {**merged[plugin], **plugin_params}
+            else:
+                merged[plugin] = dict(plugin_params)
+
+        if self.tool_registry:
+            for plugin_name, plugin_cfg in merged.items():
+                tool = self.tool_registry.get_tool(plugin_name)
+                if tool is not None:
+                    tool.configure(plugin_cfg)
+
     def _build_v4_orchestrator(self):
         """Lazily build the v4 PipelineOrchestrator from existing components."""
         from alphaloop.pipeline.orchestrator import PipelineOrchestrator
@@ -555,29 +631,39 @@ class TradingLoop:
         strat_validation = dict(runtime_strategy.get("validation") or {})
         cfg = load_pipeline_config(strat_validation)
 
-        # Override SL bounds and pip_size with per-asset values
+        # Resolve construction params through 5-layer precedence
         from alphaloop.config.assets import get_asset_config as _get_asset
+        from alphaloop.trading.strategy_loader import resolve_construction_params
         _asset_cfg = _get_asset(self.symbol)
-        cfg["invalidation"]["sl_min_points"] = _asset_cfg.sl_min_points
-        cfg["invalidation"]["sl_max_points"] = _asset_cfg.sl_max_points
+        active_tf = str(
+            (self._runtime_strategy or {}).get("params", {}).get("timeframe", "M15")
+        ).upper()
+        _cp = resolve_construction_params(
+            runtime_strategy, active_tf, _asset_cfg,
+            tf_db_overrides=getattr(self, "_asset_tf_overrides", None),
+        )
+
+        # Override invalidation SL bounds with resolved values
+        cfg["invalidation"]["sl_min_points"] = _cp["sl_min_points"]
+        cfg["invalidation"]["sl_max_points"] = _cp["sl_max_points"]
         cfg["invalidation"]["pip_size"] = _asset_cfg.pip_size
 
-        # Build TradeConstructor with explicit asset config + strategy params
+        # Build TradeConstructor with fully resolved params
         from alphaloop.pipeline.construction import TradeConstructor
-        strat_params = dict(self._active_strategy_runtime().get("params") or {})
         _tc = TradeConstructor(
             pip_size=_asset_cfg.pip_size,
-            sl_min_pts=_asset_cfg.sl_min_points,
-            sl_max_pts=_asset_cfg.sl_max_points,
-            tp1_rr=float(strat_params.get("tp1_rr", _asset_cfg.tp1_rr)),
-            tp2_rr=float(strat_params.get("tp2_rr", _asset_cfg.tp2_rr)),
-            entry_zone_atr_mult=float(strat_params.get(
-                "entry_zone_atr_mult", _asset_cfg.entry_zone_atr_mult,
-            )),
-            sl_buffer_atr=float(strat_params.get("sl_buffer_atr", 0.15)),
-            sl_atr_mult=float(strat_params.get("sl_atr_mult", _asset_cfg.sl_atr_mult)),
+            sl_min_pts=_cp["sl_min_points"],
+            sl_max_pts=_cp["sl_max_points"],
+            tp1_rr=_cp["tp1_rr"],
+            tp2_rr=_cp["tp2_rr"],
+            entry_zone_atr_mult=_cp["entry_zone_atr_mult"],
+            sl_buffer_atr=_cp["sl_buffer_atr"],
+            sl_atr_mult=_cp["sl_atr_mult"],
             tools=self._get_stage_tools("construction"),
         )
+
+        # Configure tools with TF-calibrated params (BUG-3 fix)
+        self._apply_tools_config(_asset_cfg, active_tf, runtime_strategy)
 
         # Per-stage tool injection — each stage gets only its assigned plugins,
         # filtered by the strategy card toggle (active_strategy.tools dict).
@@ -757,7 +843,9 @@ class TradingLoop:
 
         Replaces _cycle_inner / _cycle_algo_ai for pipeline_version='v4'.
         """
-        orchestrator = self._build_v4_orchestrator()
+        if not hasattr(self, "_v4_orchestrator") or self._v4_orchestrator is None:
+            self._v4_orchestrator = self._build_v4_orchestrator()
+        orchestrator = self._v4_orchestrator
 
         # Check for delayed signals from previous cycles first
         delayed_result = await orchestrator.check_delayed(context, self.symbol)

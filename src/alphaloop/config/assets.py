@@ -82,6 +82,167 @@ class AssetConfig(BaseModel):
     trail_activation_rr: float = 1.0
     trail_step_min_pips: float = 5.0
 
+    # Per-timeframe construction calibration (populated per asset below)
+    default_params_by_timeframe: dict[str, dict[str, object]] = {}
+
+
+# ---------------------------------------------------------------------------
+# TF calibration helper
+# ---------------------------------------------------------------------------
+def _tf(
+    sl_min: float,
+    sl_max: float,
+    buf: float,
+    tp2: float,
+    zone: float,
+    sl_atr: float,
+    tp1: float,
+    *,
+    max_atr_pct: float = 0.0,
+    min_atr_pct: float = 0.0,
+    adx_thresh: float = 0.0,
+    fvg_min_atr: float = 0.0,
+    liq_spike: float = 0.0,
+    tick_atr: float = 0.0,
+    vwap_band: float = 0.0,
+) -> dict[str, object]:
+    """Build one timeframe's calibration dict for an asset."""
+    d: dict[str, object] = {
+        "sl_min_points": sl_min,
+        "sl_max_points": sl_max,
+        "sl_buffer_atr": buf,
+        "tp2_rr": tp2,
+        "entry_zone_atr_mult": zone,
+        "sl_atr_mult": sl_atr,
+        "tp1_rr": tp1,
+    }
+    tools_cfg: dict[str, dict[str, object]] = {}
+    if max_atr_pct:
+        tools_cfg.setdefault("volatility_filter", {})["max_atr_pct"] = max_atr_pct
+    if min_atr_pct:
+        tools_cfg.setdefault("volatility_filter", {})["min_atr_pct"] = min_atr_pct
+    if adx_thresh:
+        tools_cfg["adx_filter"] = {"adx_threshold": adx_thresh}
+    if fvg_min_atr:
+        tools_cfg["fvg_guard"] = {"fvg_min_atr": fvg_min_atr}
+    if liq_spike:
+        tools_cfg["liq_vacuum_guard"] = {"spike_mult": liq_spike}
+    if tick_atr:
+        tools_cfg["tick_jump_guard"] = {"tick_jump_atr_max": tick_atr}
+    if vwap_band:
+        tools_cfg["vwap_guard"] = {"vwap_band_atr": vwap_band}
+    if tools_cfg:
+        d["tools_config"] = tools_cfg
+    return d
+
+
+# --- Per-asset TF calibration tables ---
+_XAUUSD_TF = {
+    "M1":  _tf(30, 150, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.008, min_atr_pct=0.001),
+    "M5":  _tf(60, 250, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.015, min_atr_pct=0.002),
+    "M15": _tf(150, 500, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.03, min_atr_pct=0.003),
+    "M30": _tf(200, 600, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.04, min_atr_pct=0.004),
+    "H1":  _tf(250, 800, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.06, min_atr_pct=0.005),
+    "H4":  _tf(350, 1200, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.08, min_atr_pct=0.006),
+    "D1":  _tf(500, 2000, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.12, min_atr_pct=0.008),
+}
+
+_XAGUSD_TF = {
+    "M1":  _tf(40, 200, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.010),
+    "M5":  _tf(80, 350, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.020),
+    "M15": _tf(200, 800, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.040),
+    "M30": _tf(250, 900, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.050),
+    "H1":  _tf(300, 1100, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.070),
+    "H4":  _tf(450, 1500, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.090),
+    "D1":  _tf(600, 2500, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.140),
+}
+
+_BTCUSD_TF = {
+    "M1":  _tf(100, 1000, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.010),
+    "M5":  _tf(200, 2000, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.020),
+    "M15": _tf(500, 5000, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.040),
+    "M30": _tf(600, 5500, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.050),
+    "H1":  _tf(800, 7000, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.070),
+    "H4":  _tf(1200, 10000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.100),
+    "D1":  _tf(2000, 15000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.150),
+}
+
+_ETHUSD_TF = {
+    "M1":  _tf(30, 300, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.012),
+    "M5":  _tf(60, 600, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.025),
+    "M15": _tf(150, 1500, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.050),
+    "M30": _tf(200, 2000, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.060),
+    "H1":  _tf(300, 3000, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.080),
+    "H4":  _tf(500, 5000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.120),
+    "D1":  _tf(800, 8000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.170),
+}
+
+_EURUSD_TF = {
+    "M1":  _tf(5, 30, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003),
+    "M5":  _tf(10, 50, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005),
+    "M15": _tf(20, 100, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010),
+    "M30": _tf(30, 120, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.015),
+    "H1":  _tf(40, 200, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.020),
+    "H4":  _tf(60, 350, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.030),
+    "D1":  _tf(100, 600, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.050),
+}
+
+_GBPUSD_TF = {
+    "M1":  _tf(6, 35, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.004),
+    "M5":  _tf(12, 60, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.006),
+    "M15": _tf(25, 120, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.012),
+    "M30": _tf(35, 150, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.018),
+    "H1":  _tf(50, 250, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.025),
+    "H4":  _tf(80, 400, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.035),
+    "D1":  _tf(120, 700, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.060),
+}
+
+_USDJPY_TF = {
+    "M1":  _tf(5, 30, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003),
+    "M5":  _tf(10, 50, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005),
+    "M15": _tf(20, 100, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010),
+    "M30": _tf(30, 130, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.015),
+    "H1":  _tf(40, 200, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.020),
+    "H4":  _tf(60, 350, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.030),
+    "D1":  _tf(100, 600, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.050),
+}
+
+_AUDUSD_TF = {
+    "M1":  _tf(4, 25, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.003),
+    "M5":  _tf(8, 40, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.005),
+    "M15": _tf(15, 80, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.010),
+    "M30": _tf(20, 100, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.012),
+    "H1":  _tf(30, 150, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.018),
+    "H4":  _tf(50, 300, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.028),
+    "D1":  _tf(80, 500, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.045),
+}
+
+_US30_TF = {
+    "M1":  _tf(40, 200, 0.05, 2.0, 0.15, 1.0, 1.0, max_atr_pct=0.005),
+    "M5":  _tf(80, 400, 0.08, 2.0, 0.20, 1.2, 1.2, max_atr_pct=0.008),
+    "M15": _tf(200, 1000, 0.15, 2.5, 0.25, 1.5, 1.5, max_atr_pct=0.015),
+    "M30": _tf(250, 1200, 0.15, 2.5, 0.25, 1.8, 1.5, max_atr_pct=0.020),
+    "H1":  _tf(350, 1500, 0.20, 3.0, 0.30, 2.0, 2.0, max_atr_pct=0.030),
+    "H4":  _tf(500, 2500, 0.20, 3.0, 0.35, 2.5, 2.0, max_atr_pct=0.045),
+    "D1":  _tf(800, 4000, 0.25, 3.5, 0.40, 3.0, 2.5, max_atr_pct=0.070),
+}
+
+_NAS100_TF = {
+    "M1":  _tf(60, 300, 0.05, 2.5, 0.15, 1.0, 1.0, max_atr_pct=0.006),
+    "M5":  _tf(120, 600, 0.08, 2.5, 0.20, 1.2, 1.2, max_atr_pct=0.010),
+    "M15": _tf(300, 1500, 0.15, 3.0, 0.25, 1.5, 1.5, max_atr_pct=0.020),
+    "M30": _tf(350, 1800, 0.15, 3.0, 0.25, 1.8, 1.5, max_atr_pct=0.025),
+    "H1":  _tf(500, 2500, 0.20, 3.5, 0.30, 2.0, 2.0, max_atr_pct=0.035),
+    "H4":  _tf(800, 4000, 0.20, 3.5, 0.35, 2.5, 2.0, max_atr_pct=0.055),
+    "D1":  _tf(1200, 6000, 0.25, 4.0, 0.40, 3.0, 2.5, max_atr_pct=0.080),
+}
+
+_ASSET_TF_MAP: dict[str, dict[str, dict[str, object]]] = {
+    "XAUUSD": _XAUUSD_TF, "XAGUSD": _XAGUSD_TF, "BTCUSD": _BTCUSD_TF,
+    "ETHUSD": _ETHUSD_TF, "EURUSD": _EURUSD_TF, "GBPUSD": _GBPUSD_TF,
+    "USDJPY": _USDJPY_TF, "AUDUSD": _AUDUSD_TF, "US30": _US30_TF,
+    "NAS100": _NAS100_TF,
+}
 
 # ── Asset library ─────────────────────────────────────────────────────────────
 
@@ -105,6 +266,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=200.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=5.0,
+        default_params_by_timeframe=_XAUUSD_TF,
         ai_context=(
             "XAUUSD specific: Watch for liquidity sweeps at round numbers ($2300, $2350). "
             "NY open (13:00 UTC) often creates the strongest moves. "
@@ -130,6 +292,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=300.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=10.0,
+        default_params_by_timeframe=_XAGUSD_TF,
         ai_context=(
             "XAGUSD: More volatile than gold, wider spreads. "
             "Follows gold but with amplified moves (gold/silver ratio matters)."
@@ -154,6 +317,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=1500.0,
         trail_activation_rr=1.5,
         trail_step_min_pips=50.0,
+        default_params_by_timeframe=_BTCUSD_TF,
         ai_context=(
             "BTCUSD specific: 24/7 market but most volatility during US hours. "
             "Watch for whale manipulation and liquidation cascades at key levels. "
@@ -179,6 +343,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=500.0,
         trail_activation_rr=1.5,
         trail_step_min_pips=20.0,
+        default_params_by_timeframe=_ETHUSD_TF,
         ai_context=(
             "ETHUSD: Follows BTC with beta amplification. "
             "Gas fees and network activity affect sentiment."
@@ -202,6 +367,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=150.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=3.0,
+        default_params_by_timeframe=_EURUSD_TF,
         ai_context="EURUSD: Most liquid forex pair. Best during London/NY overlap.",
     ),
     "GBPUSD": AssetConfig(
@@ -221,6 +387,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=200.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=5.0,
+        default_params_by_timeframe=_GBPUSD_TF,
         ai_context="GBPUSD (Cable): Higher volatility than EURUSD.",
     ),
     "USDJPY": AssetConfig(
@@ -240,6 +407,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=150.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=3.0,
+        default_params_by_timeframe=_USDJPY_TF,
         ai_context="USDJPY: Driven by US-Japan yield differential.",
     ),
     "AUDUSD": AssetConfig(
@@ -259,6 +427,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=150.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=3.0,
+        default_params_by_timeframe=_AUDUSD_TF,
         ai_context="AUDUSD: Commodity currency — correlates with gold and iron ore.",
     ),
     "US30": AssetConfig(
@@ -277,6 +446,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=300.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=20.0,
+        default_params_by_timeframe=_US30_TF,
         ai_context="US30 (Dow Jones): Driven by earnings, Fed policy, economic data.",
     ),
     "NAS100": AssetConfig(
@@ -297,6 +467,7 @@ ASSETS: dict[str, AssetConfig] = {
         trail_pips=400.0,
         trail_activation_rr=1.0,
         trail_step_min_pips=30.0,
+        default_params_by_timeframe=_NAS100_TF,
         ai_context="NAS100: Tech-heavy index, more volatile than Dow.",
     ),
 }

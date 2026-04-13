@@ -81,6 +81,7 @@ def _make_quality(**overrides):
 
 def _make_context(**overrides):
     ctx = MagicMock()
+    ctx.timeframe = "M15"
     ctx.indicators = {
         "M15": {
             "ema200": 3090.0,

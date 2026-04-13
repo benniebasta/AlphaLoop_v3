@@ -95,6 +95,11 @@ class BaseTool(ABC):
 
     name: str = "base_tool"
     description: str = ""
+    config: dict[str, object] = {}  # Per-tool config overrides (from tools_config resolution)
+
+    def configure(self, params: dict[str, object]) -> None:
+        """Apply runtime config overrides (TF-calibrated + strategy-level)."""
+        self.config = dict(params)
 
     @abstractmethod
     async def run(self, context) -> ToolResult:

@@ -152,16 +152,21 @@ def run_vectorbt_backtest(
     strategy_payload = _build_backtest_strategy_payload(params)
     resolved_params = strategy_payload["params"]
 
+    # --- Resolve construction params through 5-layer precedence ---
+    from alphaloop.trading.strategy_loader import resolve_construction_params
+    backtest_tf = str(params.get("timeframe", "M15")).upper()
+    _cp = resolve_construction_params(strategy_payload, backtest_tf, asset_config)
+
     # --- Build TradeConstructor ---
     tc = TradeConstructor(
         pip_size=asset_config.pip_size,
-        sl_min_pts=float(resolved_params.get("sl_min_points", asset_config.sl_min_points)),
-        sl_max_pts=float(resolved_params.get("sl_max_points", asset_config.sl_max_points)),
-        tp1_rr=float(resolved_params.get("tp1_rr", asset_config.tp1_rr)),
-        tp2_rr=float(resolved_params.get("tp2_rr", asset_config.tp2_rr)),
-        entry_zone_atr_mult=float(resolved_params.get("entry_zone_atr_mult", asset_config.entry_zone_atr_mult)),
-        sl_buffer_atr=float(resolved_params.get("sl_buffer_atr", 0.15)),
-        sl_atr_mult=float(resolved_params.get("sl_atr_mult", asset_config.sl_atr_mult)),
+        sl_min_pts=_cp["sl_min_points"],
+        sl_max_pts=_cp["sl_max_points"],
+        tp1_rr=_cp["tp1_rr"],
+        tp2_rr=_cp["tp2_rr"],
+        entry_zone_atr_mult=_cp["entry_zone_atr_mult"],
+        sl_buffer_atr=_cp["sl_buffer_atr"],
+        sl_atr_mult=_cp["sl_atr_mult"],
     )
 
     # --- Compute indicators ---

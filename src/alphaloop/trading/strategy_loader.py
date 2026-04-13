@@ -1221,3 +1221,90 @@ def build_feature_pipeline(
         [name for name, _ in tools],
     )
     return FeaturePipeline(tools=[inst for _, inst in tools])
+
+
+# ---------------------------------------------------------------------------
+# Construction param resolution — 5-layer precedence
+# ---------------------------------------------------------------------------
+_CONSTRUCTION_KEYS = (
+    "sl_min_points", "sl_max_points", "sl_atr_mult",
+    "tp1_rr", "tp2_rr", "entry_zone_atr_mult", "sl_buffer_atr",
+)
+
+
+def resolve_construction_params(
+    strategy: Any,
+    timeframe: str,
+    asset_config: Any,
+    *,
+    tf_db_overrides: dict[str, dict] | None = None,
+) -> dict[str, float]:
+    """
+    Resolve construction parameters through the 5-layer precedence chain.
+
+    Layer 0: AssetConfig base fields (lowest priority)
+    Layer 1: default_params_by_timeframe[tf] (baked-in TF calibration)
+    Layer 2: DB per-asset-TF overrides (user edits via Asset Params UI)
+    Layer 3: strategy.params (strategy card flat params)
+    Layer 4: strategy.params_by_timeframe[tf] (strategy TF-specific — highest)
+    """
+    # Layer 0: AssetConfig base
+    base: dict[str, float] = {
+        "sl_min_points": float(asset_config.sl_min_points),
+        "sl_max_points": float(asset_config.sl_max_points),
+        "sl_atr_mult": float(asset_config.sl_atr_mult),
+        "tp1_rr": float(asset_config.tp1_rr),
+        "tp2_rr": float(asset_config.tp2_rr),
+        "entry_zone_atr_mult": float(asset_config.entry_zone_atr_mult),
+        "sl_buffer_atr": 0.15,
+    }
+
+    # Layer 1: baked-in TF calibration from assets.py
+    tf_defaults = (getattr(asset_config, "default_params_by_timeframe", None) or {}).get(
+        timeframe.upper(), {}
+    )
+    for key in _CONSTRUCTION_KEYS:
+        if key in tf_defaults:
+            base[key] = float(tf_defaults[key])
+
+    # Layer 2: DB per-asset-TF user overrides
+    if tf_db_overrides:
+        db_tf = tf_db_overrides.get(timeframe.upper(), {})
+        for key in _CONSTRUCTION_KEYS:
+            if key in db_tf:
+                base[key] = float(db_tf[key])
+
+    # Layer 3: strategy.params (flat)
+    if isinstance(strategy, dict):
+        strat_params = strategy.get("params") or {}
+    else:
+        strat_params = getattr(strategy, "params", {}) or {}
+    for key in _CONSTRUCTION_KEYS:
+        if key in strat_params:
+            base[key] = float(strat_params[key])
+
+    # Layer 4: strategy.params_by_timeframe[tf] (highest priority)
+    if isinstance(strategy, dict):
+        ptf = (strategy.get("params_by_timeframe") or {}).get(timeframe.upper(), {}) or {}
+    else:
+        ptf = (getattr(strategy, "params_by_timeframe", {}) or {}).get(timeframe.upper(), {}) or {}
+    for key in _CONSTRUCTION_KEYS:
+        if key in ptf:
+            base[key] = float(ptf[key])
+
+    # --- Sanity clamps (GAP-3) ---
+    if base["sl_min_points"] <= 0:
+        logger.warning("[resolve] sl_min_points=%.1f clamped to 1.0", base["sl_min_points"])
+        base["sl_min_points"] = 1.0
+    if base["sl_max_points"] <= base["sl_min_points"]:
+        logger.warning("[resolve] sl_max_points <= sl_min_points — auto-expanding")
+        base["sl_max_points"] = base["sl_min_points"] * 10
+    if base["tp1_rr"] <= 0:
+        logger.warning("[resolve] tp1_rr=%.2f clamped to 0.5", base["tp1_rr"])
+        base["tp1_rr"] = 0.5
+    if base["tp2_rr"] < base["tp1_rr"]:
+        base["tp2_rr"] = base["tp1_rr"]
+    if base["sl_atr_mult"] < 0:
+        base["sl_atr_mult"] = 0.0
+
+    return base

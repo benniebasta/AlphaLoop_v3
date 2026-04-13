@@ -24,8 +24,8 @@ class VolatilityFilter(BaseTool):
     description = "ATR-based volatility check — blocks extreme or dead markets"
 
     async def run(self, context) -> ToolResult:
-        max_atr_pct = 2.5
-        min_atr_pct = 0.05
+        max_atr_pct = self.config.get("max_atr_pct", 2.5)
+        min_atr_pct = self.config.get("min_atr_pct", 0.05)
         soft_limit = max_atr_pct * 0.80
 
         # Get H1 indicators

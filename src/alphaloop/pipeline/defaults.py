@@ -39,12 +39,16 @@ REGIME = {
 # ---------------------------------------------------------------------------
 # Stage 4A: StructuralInvalidation
 # ---------------------------------------------------------------------------
+# SAFETY NET: sl_min_points / sl_max_points below are generic fallback values.
+# Callers MUST inject asset-resolved values via cfg["invalidation"] using
+# resolve_construction_params(). If you see these defaults in production logs,
+# the param injection is broken.
 INVALIDATION = {
     "rr_hard_min": 1.0,                 # R:R below this = HARD_INVALIDATE
     "rr_soft_min": 1.5,                 # R:R below this = SOFT_INVALIDATE
     "confidence_hard_min": 0.30,        # Signal generator confidence floor
-    "sl_min_points": 20.0,
-    "sl_max_points": 300.0,
+    "sl_min_points": 20.0,              # SAFETY NET — always override with resolved params
+    "sl_max_points": 300.0,             # SAFETY NET — always override with resolved params
     "sl_boundary_tolerance_pct": 0.10,  # within 10% of boundary = SOFT
     "bos_weak_atr": 0.2,               # BOS break < this = weak
     "ema200_hard_atr": 1.0,            # > this ATR on wrong side = HARD

@@ -103,7 +103,7 @@ class ExecutionGuardRunner:
         tools = enabled_tools or {}
         warnings: list[str] = []
         indicators = getattr(context, "indicators", {})
-        m15 = indicators.get("M15", {})
+        m15 = indicators.get(getattr(context, "timeframe", "M15"), {})
 
         # --- Block-only guards (permanent) ---
 
