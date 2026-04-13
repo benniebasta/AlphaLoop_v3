@@ -1425,7 +1425,7 @@ async def test_strategy_models_update_writes_operator_audit(client, container):
 
     strategy_path = (
         strategies_route.STRATEGY_VERSIONS_DIR
-        / f"{created['symbol']}_v{created['version']}.json"
+        / f"{created['name']}_v{created['version']}.json"
     )
     saved = json.loads(strategy_path.read_text())
     assert saved["ai_models"]["signal"] == "gpt-5.4-mini"

@@ -78,6 +78,7 @@ def _make_context():
         can_open_trade=AsyncMock(return_value=(True, "")),
     )
     ctx.df = MagicMock(__len__=lambda self: 500)
+    ctx.timeframe = "M15"
     return ctx
 
 

@@ -269,10 +269,10 @@ async def test_strategy_version_creation():
             data = json.loads(path.read_text())
             assert data["symbol"] == "XAUUSD"
 
-            # Second version should be v2
+            # Second version in the same lineage (same name) should be v2
             result2 = create_strategy_version(
                 symbol="XAUUSD", params=params, metrics=metrics,
-                tools=[], status="candidate",
+                tools=[], status="candidate", name=result["name"],
             )
             assert result2["version"] == 2
 

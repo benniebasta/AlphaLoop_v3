@@ -125,21 +125,21 @@ class BOSGuard(BaseTool):
 
         if direction == "BUY":
             if has_bull:
-                bos_strength = min(100.0, bull_mult / 1.0 * 100)
+                bos_strength = min(100.0, 50.0 + bull_mult * 50.0)
             else:
-                bos_strength = 0.0
+                bos_strength = 50.0
         elif direction == "SELL":
             if has_bear:
-                bos_strength = min(100.0, bear_mult / 1.0 * 100)
+                bos_strength = min(100.0, 50.0 + bear_mult * 50.0)
             else:
-                bos_strength = 0.0
+                bos_strength = 50.0
         else:
             # No direction: take the stronger BOS (legacy behaviour)
             if has_bull or has_bear:
                 magnitude = max(bull_mult, bear_mult)
-                bos_strength = min(100.0, magnitude / 1.0 * 100)
+                bos_strength = min(100.0, 50.0 + magnitude * 50.0)
             else:
-                bos_strength = 0.0
+                bos_strength = 50.0
 
         return FeatureResult(
             group="structure",

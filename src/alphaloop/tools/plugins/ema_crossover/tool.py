@@ -86,8 +86,8 @@ class EMACrossoverFilter(BaseTool):
             )
 
         spread = ema_fast - ema_slow
-        # Normalize spread as percentage of ATR (clamped 0-100)
-        spread_norm = min(100.0, abs(spread) / atr_val * 25)
+        # Spread proximity: 100=tight/fresh crossover, 0=wide divergence
+        spread_norm = max(0.0, min(100.0, 100.0 - abs(spread) / atr_val * 25))
 
         # Alignment: 100 if fast > slow (bullish bias), 0 if fast < slow
         alignment = min(100.0, max(0.0, 50 + (spread / atr_val) * 25))

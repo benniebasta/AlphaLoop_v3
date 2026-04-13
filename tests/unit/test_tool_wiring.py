@@ -295,16 +295,20 @@ class TestStageToolMap:
         unassigned = all_known - assigned
         assert unassigned == set(), f"Tools not assigned to any stage: {unassigned}"
 
-    def test_no_tool_in_multiple_stages(self):
+    def test_no_tool_in_multiple_non_quality_stages(self):
+        """Tools must not appear in multiple stages, except quality which
+        runs extract_features() and legitimately shares tools with other stages."""
         from alphaloop.tools.registry import STAGE_TOOL_MAP
         seen = {}
         for stage, tools in STAGE_TOOL_MAP.items():
+            if stage == "quality":
+                continue
             for t in tools:
                 assert t not in seen, (
                     f"Tool '{t}' assigned to both '{seen[t]}' and '{stage}'"
                 )
                 seen[t] = stage
 
-    def test_quality_stage_has_6_tools(self):
+    def test_quality_stage_has_18_tools(self):
         from alphaloop.tools.registry import STAGE_TOOL_MAP
-        assert len(STAGE_TOOL_MAP["quality"]) == 6
+        assert len(STAGE_TOOL_MAP["quality"]) == 18

@@ -97,8 +97,8 @@ class ALMAFilter(BaseTool):
         # Normalize distance as fraction of ATR
         distance_atr = distance / atr_val if atr_val > 0 else 0
 
-        # alma_distance: absolute distance normalized (0=at ALMA, 100=far away)
-        alma_distance = min(100.0, abs(distance_atr) * 20)
+        # alma_distance: proximity score (100=at ALMA, 0=far away)
+        alma_distance = max(0.0, min(100.0, 100.0 - abs(distance_atr) * 20))
 
         # alma_alignment: 100 = far above ALMA (bullish), 0 = far below (bearish), 50 = at ALMA
         alma_alignment = min(100.0, max(0.0, 50 + distance_atr * 20))

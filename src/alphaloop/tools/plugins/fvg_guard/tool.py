@@ -111,7 +111,7 @@ class FVGGuard(BaseTool):
         if not gaps:
             return FeatureResult(
                 group="structure",
-                features={"fvg_presence": 0.0, "fvg_quality": 0.0},
+                features={"fvg_presence": 50.0, "fvg_quality": 50.0},
                 meta={
                     "bullish_count": len(bull_gaps),
                     "bearish_count": len(bear_gaps),
@@ -119,12 +119,12 @@ class FVGGuard(BaseTool):
                 },
             )
 
-        # fvg_presence: weighted by count of directional gaps
-        fvg_presence = min(100.0, len(gaps) * 33.0)
+        # fvg_presence: 50=neutral, 50-100 scaled by gap count
+        fvg_presence = min(100.0, 50.0 + len(gaps) * 25.0)
 
-        # fvg_quality: best gap size in ATR terms
+        # fvg_quality: 50=neutral, 50-100 scaled by best gap size in ATR
         best_size = max(g.get("size_atr", 0) for g in gaps)
-        fvg_quality = min(100.0, best_size / 0.5 * 100)
+        fvg_quality = min(100.0, 50.0 + best_size / 0.5 * 50.0)
 
         return FeatureResult(
             group="structure",

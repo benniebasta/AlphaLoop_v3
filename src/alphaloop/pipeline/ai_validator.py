@@ -68,12 +68,17 @@ class BoundedAIValidator:
         quality: QualityResult,
         conviction: ConvictionScore,
         context,
+        mode: str = "algo_ai",
     ) -> CandidateSignal | None:
         """
         Call AI validator and apply bounded adjustments.
 
+        Args:
+            mode: "algo_ai" for hard veto on reject, "ai_signal" for soft
+                  confidence penalty (-0.15, floor 0.30) on reject.
+
         Returns:
-            Adjusted CandidateSignal if approved, None if rejected.
+            Adjusted CandidateSignal if approved, None if rejected (algo_ai mode).
         """
         if not self._caller or not self._model:
             return self._fallback_signal(
@@ -130,8 +135,28 @@ class BoundedAIValidator:
         if status in ("rejected", "reject"):
             reasons = parsed.get("rejection_reasons", parsed.get("reasoning", ""))
             logger.info(
-                "[AIValidator] REJECTED: %s", reasons
+                "[AIValidator] REJECTED (mode=%s): %s", mode, reasons
             )
+            if mode == "ai_signal":
+                # Soft penalty: reduce confidence instead of hard veto
+                _SOFT_PENALTY = 0.15
+                _SOFT_FLOOR = 0.30
+                new_conf = max(_SOFT_FLOOR, signal.raw_confidence - _SOFT_PENALTY)
+                return CandidateSignal(
+                    direction=signal.direction,
+                    setup_type=signal.setup_type,
+                    entry_zone=signal.entry_zone,
+                    stop_loss=signal.stop_loss,
+                    take_profit=list(signal.take_profit),
+                    raw_confidence=round(new_conf, 4),
+                    rr_ratio=signal.rr_ratio,
+                    signal_sources=signal.signal_sources,
+                    reasoning=signal.reasoning,
+                    regime_at_generation=signal.regime_at_generation,
+                    generated_at=signal.generated_at,
+                    sl_source=getattr(signal, "sl_source", ""),
+                    construction_candidates=getattr(signal, "construction_candidates", 0),
+                )
             return None
 
         # --- APPROVE (with or without adjustments) ---

@@ -382,11 +382,18 @@ def _load_all_versions() -> list[dict]:
 
 
 def _load_version(name: str, version: int) -> dict | None:
-    """Load a specific strategy version by its generated name and version."""
+    """Load a specific strategy version by name or symbol and version."""
+    # Direct lookup by name
     path = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"
-    if not path.exists():
-        return None
-    return load_strategy_record(path)
+    if path.exists():
+        return load_strategy_record(path)
+    # Fallback: search by symbol match (tests/API may pass symbol in URL)
+    if STRATEGY_VERSIONS_DIR.exists():
+        for f in STRATEGY_VERSIONS_DIR.glob(f"*_v{version}.json"):
+            data = load_strategy_record(f)
+            if data and data.get("symbol", "").upper() == name.upper():
+                return data
+    return None
 
 
 def _save_version(data: dict, explicit_fields: set[str] | None = None) -> None:
@@ -738,7 +745,7 @@ async def create_ai_signal_card(
     _record_operator_audit(
         session,
         action="strategy_create",
-        target=f"{version_data['name']}_v{version_data['_version']}",
+        target=f"{version_data['symbol']}_v{version_data['_version']}",
         old_value=None,
         new_value=json.dumps({
             "signal_mode": version_data.get("signal_mode"),
@@ -1036,12 +1043,11 @@ async def delete_strategy(
 ) -> dict:
     """Delete a strategy version JSON file."""
     _require_operator_auth(authorization)
-    path = STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"
-    if not path.exists():
-        raise HTTPException(404, f"Strategy {name} v{version} not found")
-
     data = _load_version(name, version)
-    symbol = data.get("symbol", name) if data else name
+    if data is None:
+        raise HTTPException(404, f"Strategy {name} v{version} not found")
+    symbol = data.get("symbol", name)
+    path = Path(data.get("_path", STRATEGY_VERSIONS_DIR / f"{name}_v{version}.json"))
     if data and data.get("status") in ("live", "demo"):
         raise HTTPException(
             400,
