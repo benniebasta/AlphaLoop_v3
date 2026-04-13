@@ -635,6 +635,7 @@ function initChart(ohlc) {
 
   if (ohlc.length) {
     candleSeries.setData(ohlc);
+    lwChart.timeScale().fitContent();
     const countEl = document.getElementById('live-bar-count');
     if (countEl) countEl.textContent = `${ohlc.length} BARS · ${selectedTf.toUpperCase()}`;
   }
@@ -664,7 +665,7 @@ function updateChart(ohlc) {
   if (!lwChart) {
     initChart(bars);
   } else if (candleSeries) {
-    try { candleSeries.setData(bars); } catch (e) { console.warn('[chart] candleSeries.setData failed:', e.message); }
+    try { candleSeries.setData(bars); lwChart.timeScale().fitContent(); } catch (e) { console.warn('[chart] candleSeries.setData failed:', e.message); }
     const countEl = document.getElementById('live-bar-count');
     if (countEl) countEl.textContent = `${bars.length} BARS · ${selectedTf.toUpperCase()}`;
   }

@@ -69,15 +69,21 @@ def _fetch_ohlc_sync(symbol: str, timeframe: str) -> tuple:
     if hasattr(df.columns, 'levels') and df.columns.nlevels > 1:
         df.columns = df.columns.get_level_values(0)
 
+    # Drop rows with NaN in OHLC columns — prevents invalid JSON (NaN literal)
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+
     # Build OHLC array for LightweightCharts
     ohlc = []
     for ts, row in df.iterrows():
+        o, h, l, c = float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
+        if any(x != x for x in (o, h, l, c)):  # NaN guard
+            continue
         ohlc.append({
             "time": int(ts.timestamp()),
-            "open": round(float(row["Open"]), 5),
-            "high": round(float(row["High"]), 5),
-            "low": round(float(row["Low"]), 5),
-            "close": round(float(row["Close"]), 5),
+            "open": round(o, 5),
+            "high": round(h, 5),
+            "low": round(l, 5),
+            "close": round(c, 5),
         })
 
     # Aggregate 1H → 4H if requested (yfinance has no native 4h interval)
